@@ -133,8 +133,11 @@ class SentimentService:
         for (source, _), response in zip(RSS_FEEDS, responses):
             if isinstance(response, Exception):
                 continue
-            response.raise_for_status()
-            headlines.extend(self._parse_rss(source, response.text))
+            try:
+                response.raise_for_status()
+                headlines.extend(self._parse_rss(source, response.text))
+            except Exception:
+                continue
         return sorted(
             headlines,
             key=lambda item: item.published_at or 0,

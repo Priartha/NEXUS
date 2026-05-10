@@ -11,6 +11,68 @@ const CandleSchema = z.object({
   is_closed: z.boolean(),
 })
 
+const OrderbookImbalanceSchema = z.object({
+  id: z.string(),
+  timestamp: z.number(),
+  price_level: z.number(),
+  imbalance_ratio: z.number(),
+  side: z.enum(['buy', 'sell']),
+  strength: z.number(),
+  duration_ms: z.number(),
+  status: z.enum(['active', 'reversed', 'filled']),
+  reversal_timestamp: z.number().nullable().optional(),
+  reversal_price: z.number().nullable().optional(),
+})
+
+const SpreadDynamicsSchema = z.object({
+  id: z.string(),
+  timestamp: z.number(),
+  spread: z.number(),
+  spread_pct: z.number(),
+  spread_zscore: z.number(),
+  bid: z.number(),
+  ask: z.number(),
+  bid_ask_midpoint: z.number(),
+  status: z.enum(['normal', 'tight', 'wide', 'squeezed']),
+  anomaly_type: z.enum(['compression', 'expansion', 'inversion']).nullable().optional(),
+})
+
+const OrderbookDepthLevelSchema = z.object({
+  id: z.string(),
+  timestamp: z.number(),
+  price_level: z.number(),
+  level_type: z.enum(['bid', 'ask']),
+  estimated_size: z.number(),
+  order_count: z.number(),
+  depth_tier: z.number(),
+  saturation: z.number(),
+  touched_count: z.number().optional(),
+  last_touch: z.number().nullable().optional(),
+  filled_count: z.number().optional(),
+})
+
+const OrderbookAccumulationSchema = z.object({
+  id: z.string(),
+  timestamp: z.number(),
+  price_range_low: z.number(),
+  price_range_high: z.number(),
+  side: z.enum(['accumulation', 'distribution']),
+  confidence: z.number(),
+  volume_ratio: z.number(),
+  pattern_duration_ms: z.number(),
+  candle_touches: z.number(),
+  status: z.enum(['active', 'completed']),
+  completion_timestamp: z.number().nullable().optional(),
+  completion_price: z.number().nullable().optional(),
+})
+
+const OrderbookDataSchema = z.object({
+  imbalances: z.array(OrderbookImbalanceSchema),
+  spread_dynamics: z.array(SpreadDynamicsSchema),
+  depth_levels: z.array(OrderbookDepthLevelSchema),
+  accumulations: z.array(OrderbookAccumulationSchema),
+})
+
 const MessageSchema = z.union([
   z.object({
     update_type: z.literal('snapshot'),
@@ -258,6 +320,7 @@ const MessageSchema = z.union([
       updated_at: z.number().nullable().optional(),
       error: z.string().nullable().optional(),
     }).nullable().optional(),
+    orderbook: OrderbookDataSchema.optional(),
     stats: z.object({
       closed_candles: z.number(),
       active_fvgs: z.number(),
@@ -265,11 +328,23 @@ const MessageSchema = z.union([
       active_liquidity: z.number(),
       liquidity_events: z.number(),
       signals: z.number(),
+      ob_imbalances: z.number().optional(),
+      ob_spread_anomalies: z.number().optional(),
+      ob_accumulations: z.number().optional(),
     }).optional(),
     available_timeframes: z.array(z.string()).optional(),
+    btc_patterns: z.any().nullable().optional(),
+    paper_trading: z.object({
+      total_trades: z.number(),
+      closed_trades: z.number(),
+      winning_trades: z.number(),
+      losing_trades: z.number(),
+      total_pnl: z.number(),
+      win_rate: z.number(),
+    }).optional(),
   }),
-  z.object({ update_type: z.literal('tick'), candle: CandleSchema }),
-  z.object({ update_type: z.literal('close'), candle: CandleSchema }),
+  z.object({ update_type: z.literal('tick'), candle: CandleSchema, btc_patterns: z.any().nullable().optional() }),
+  z.object({ update_type: z.literal('close'), candle: CandleSchema, btc_patterns: z.any().nullable().optional() }),
   z.object({ update_type: z.literal('status'), status: z.string(), message: z.string().optional(), retry_in_seconds: z.number().optional() }),
   z.object({ update_type: z.literal('sentiment'), sentiment: z.any() }), // Simplified
   z.object({ update_type: z.literal('ai_ict'), ai_ict: z.any() }), // Simplified

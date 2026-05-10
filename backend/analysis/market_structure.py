@@ -29,8 +29,8 @@ def detect_bos_choch(swings: list[Swing], candles: list[Candle]) -> list[Structu
     labels: list[StructureLabel] = []
     ordered_swings = sorted(swings, key=lambda swing: swing.timestamp)
     swing_cursor = 0
-    last_high: Swing | None = None
-    last_low: Swing | None = None
+    swing_highs: list[Swing] = []
+    swing_lows: list[Swing] = []
     trend: str | None = None
     broken: set[tuple[str, int]] = set()
 
@@ -38,38 +38,50 @@ def detect_bos_choch(swings: list[Swing], candles: list[Candle]) -> list[Structu
         while swing_cursor < len(ordered_swings) and ordered_swings[swing_cursor].timestamp < candle.timestamp:
             swing = ordered_swings[swing_cursor]
             if swing.kind == "high":
-                last_high = swing
+                swing_highs.append(swing)
             elif swing.kind == "low":
-                last_low = swing
+                swing_lows.append(swing)
             swing_cursor += 1
 
-        if last_high and candle.close > last_high.price and ("high", last_high.timestamp) not in broken:
-            kind = StructureType.CHOCH if trend == "bearish" else StructureType.BOS
-            labels.append(
-                StructureLabel(
-                    timestamp=candle.timestamp,
-                    price=candle.close,
-                    kind=kind,
-                    broken_swing_price=last_high.price,
-                    direction="bullish",
-                )
+        if swing_highs:
+            highest_unbroken = max(
+                (s for s in swing_highs if ("high", s.timestamp) not in broken),
+                key=lambda s: s.price,
+                default=None,
             )
-            trend = "bullish"
-            broken.add(("high", last_high.timestamp))
+            if highest_unbroken and candle.close > highest_unbroken.price:
+                kind = StructureType.CHOCH if trend == "bearish" else StructureType.BOS
+                labels.append(
+                    StructureLabel(
+                        timestamp=candle.timestamp,
+                        price=candle.close,
+                        kind=kind,
+                        broken_swing_price=highest_unbroken.price,
+                        direction="bullish",
+                    )
+                )
+                trend = "bullish"
+                broken.add(("high", highest_unbroken.timestamp))
 
-        if last_low and candle.close < last_low.price and ("low", last_low.timestamp) not in broken:
-            kind = StructureType.CHOCH if trend == "bullish" else StructureType.BOS
-            labels.append(
-                StructureLabel(
-                    timestamp=candle.timestamp,
-                    price=candle.close,
-                    kind=kind,
-                    broken_swing_price=last_low.price,
-                    direction="bearish",
-                )
+        if swing_lows:
+            lowest_unbroken = min(
+                (s for s in swing_lows if ("low", s.timestamp) not in broken),
+                key=lambda s: s.price,
+                default=None,
             )
-            trend = "bearish"
-            broken.add(("low", last_low.timestamp))
+            if lowest_unbroken and candle.close < lowest_unbroken.price:
+                kind = StructureType.CHOCH if trend == "bullish" else StructureType.BOS
+                labels.append(
+                    StructureLabel(
+                        timestamp=candle.timestamp,
+                        price=candle.close,
+                        kind=kind,
+                        broken_swing_price=lowest_unbroken.price,
+                        direction="bearish",
+                    )
+                )
+                trend = "bearish"
+                broken.add(("low", lowest_unbroken.timestamp))
 
     return labels
 

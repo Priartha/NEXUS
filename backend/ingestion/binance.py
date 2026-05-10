@@ -226,15 +226,16 @@ def parse_trade_message(message: dict, symbol: str) -> TradeTick | None:
         return None
     if price <= 0 or qty < 0:
         return None
-    now_ms = int(time.time() * 1000)
-    if timestamp_ms <= 0 or abs(now_ms - timestamp_ms) > 86_400_000:
+    if timestamp_ms <= 0:
         return None
 
     return TradeTick(price=price, qty=qty, timestamp_ms=timestamp_ms)
 
 
 def parse_quote_message(message: dict, symbol: str) -> MarketQuote | None:
-    if message.get("e") != "bookTicker":
+    # bookTicker from combined stream has no "e" field, detect by "u" (updateId)
+    is_book = message.get("e") == "bookTicker" or ("u" in message and message.get("s") is not None)
+    if not is_book:
         return None
 
     message_symbol = message.get("s")
@@ -243,6 +244,8 @@ def parse_quote_message(message: dict, symbol: str) -> MarketQuote | None:
 
     bid = _optional_float(message.get("b"))
     ask = _optional_float(message.get("a"))
+    bid_qty = _optional_float(message.get("B"))
+    ask_qty = _optional_float(message.get("A"))
     ts_raw = message.get("E") or message.get("T")
     timestamp_ms = normalize_timestamp_ms(ts_raw) if ts_raw is not None else int(time.time() * 1000)
     mid = (bid + ask) / 2 if bid is not None and ask is not None else None
@@ -253,6 +256,8 @@ def parse_quote_message(message: dict, symbol: str) -> MarketQuote | None:
         bid=bid,
         ask=ask,
         mid=mid,
+        bid_qty=bid_qty,
+        ask_qty=ask_qty,
         latency_ms=max(0, int(time.time() * 1000) - timestamp_ms),
     )
 

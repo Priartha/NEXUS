@@ -182,6 +182,8 @@ export interface MarketQuote {
   last_trade?: number | null
   mark_price?: number | null
   spot_price?: number | null
+  bid_qty?: number | null
+  ask_qty?: number | null
   latency_ms?: number | null
 }
 
@@ -320,6 +322,50 @@ export interface TradeSignal {
   model: string
 }
 
+export interface BtcPattern {
+  id: string
+  timestamp: number
+  name: string
+  direction: Direction | 'neutral'
+  confidence: number
+  score: number
+  description: string
+  candle_count: number
+  completed: boolean
+  completion_timestamp?: number | null
+  completion_price?: number | null
+}
+
+export interface BtcInvestorBehavior {
+  id: string
+  timestamp: number
+  behavior_type: string
+  side: Direction
+  confidence: number
+  intensity: number
+  description: string
+  price_level: number
+  volume_ratio: number
+  is_active: boolean
+}
+
+export interface BtcPatternContext {
+  timestamp: number
+  killzone?: string | null
+  session: string
+  weekday: number
+  hour: number
+  is_weekend: boolean
+  halving_phase: string
+  volatility_regime: string
+  fractal_clusters: string[]
+  patterns: BtcPattern[]
+  investor_behaviors: BtcInvestorBehavior[]
+  bullish_pattern_score: number
+  bearish_pattern_score: number
+  pattern_signal: 'bullish' | 'bearish' | 'neutral'
+}
+
 export interface MarketStats {
   closed_candles: number
   active_fvgs: number
@@ -327,6 +373,8 @@ export interface MarketStats {
   active_liquidity: number
   liquidity_events: number
   signals: number
+  btc_patterns?: number
+  btc_behaviors?: number
 }
 
 export interface MarketMessage {
@@ -347,6 +395,7 @@ export interface MarketMessage {
   projection?: PriceProjection | null
   regime?: MarketRegime | null
   options_context?: OptionsContext | null
+  btc_patterns?: BtcPatternContext | null
   sentiment?: SentimentSnapshot | null
   ai_ict?: AiIctDecision | null
   orderbook?: OrderbookData | null
@@ -355,11 +404,204 @@ export interface MarketMessage {
   message?: string
   retry_in_seconds?: number
   available_timeframes?: string[]
+  paper_trading?: PaperTradeStats
 }
 
 export type ChartCandle = CandlestickData<UTCTimestamp> & {
   volume: number
   isClosed: boolean
+}
+
+export interface PaperTradeStats {
+  total_trades: number
+  closed_trades: number
+  winning_trades: number
+  losing_trades: number
+  total_pnl: number
+  win_rate: number
+}
+
+export interface PaperTrade {
+  id: string
+  signal_id?: string
+  symbol: string
+  timeframe: string
+  side: 'buy' | 'sell'
+  entry_price: number
+  stop_loss: number
+  take_profit: number
+  quantity: number
+  status: 'open' | 'closed'
+  opened_at: number
+  closed_at?: number | null
+  exit_price?: number | null
+  pnl?: number | null
+  pnl_pct?: number | null
+  risk_reward?: number | null
+  confidence?: number | null
+  reason?: string | null
+  close_reason?: string | null
+}
+
+export interface BacktestRun {
+  id: string
+  symbol: string
+  timeframe: string
+  start_date: number
+  end_date: number
+  candle_count: number
+  initial_balance: number
+  final_balance: number
+  total_pnl: number
+  total_pnl_pct: number
+  total_trades: number
+  winning_trades: number
+  losing_trades: number
+  win_rate: number
+  avg_win: number
+  avg_loss: number
+  profit_factor: number
+  max_drawdown: number
+  max_drawdown_pct: number
+  sharpe_ratio: number
+  trades?: BacktestTrade[]
+  equity_curve?: EquityPoint[]
+}
+
+export interface BacktestTrade {
+  id: string
+  timestamp: number
+  side: string
+  entry_price: number
+  stop_loss: number
+  exit_price: number
+  exit_timestamp?: number | null
+  pnl?: number | null
+  pnl_pct?: number | null
+  risk_reward?: number | null
+  confidence?: number | null
+  reason?: string | null
+  status: string
+}
+
+export interface EquityPoint {
+  timestamp: number
+  account_balance: number
+  drawdown: number
+  drawdown_pct: number
+}
+
+export interface MtfSnapshot {
+  candles: ApiCandle[]
+  fvgs: FVG[]
+  order_blocks: OrderBlock[]
+  liquidity: LiquidityLevel[]
+  structure: StructureLabel[]
+  swings: any[]
+  metrics: MarketMetrics | null
+  regime: MarketRegime | null
+  current_price: number | null
+}
+
+export interface VolumeProfile {
+  bins: Array<{
+    price: number
+    volume: number
+    is_poc: boolean
+    is_value_area: boolean
+  }>
+  poc: number | null
+  poc_volume: number
+  value_area_low: number | null
+  value_area_high: number | null
+  total_volume: number
+}
+
+export interface Alert {
+  id: string
+  timestamp: number
+  type: string
+  severity: string
+  symbol?: string | null
+  title: string
+  message?: string | null
+  data?: any
+  acknowledged: number
+}
+
+export const DEMO_PATTERNS: BtcPatternContext = {
+  timestamp: Date.now(),
+  session: 'ny',
+  weekday: 2,
+  hour: 14,
+  is_weekend: false,
+  halving_phase: 'pre_halving_run',
+  volatility_regime: 'low',
+  fractal_clusters: ['near_pivot_80950', 'near_pivot_80780'],
+  pattern_signal: 'neutral',
+  bullish_pattern_score: 0.18,
+  bearish_pattern_score: 0.15,
+  patterns: [
+    {
+      id: 'demo_halving',
+      timestamp: Date.now() - 60000,
+      name: 'halving_cycle_pre_halving_run',
+      direction: 'bullish',
+      confidence: 0.58,
+      score: 0.21,
+      description: 'Pre-halving run-up: BTC typically sees parabolic move 6-12 months before halving',
+      candle_count: 20,
+      completed: false,
+    },
+    {
+      id: 'demo_double_dist',
+      timestamp: Date.now() - 120000,
+      name: 'double_distribution_top',
+      direction: 'bearish',
+      confidence: 0.62,
+      score: 0.15,
+      description: 'Double distribution: equal highs near 80950, BTC often breaks down after retesting resistance twice',
+      candle_count: 40,
+      completed: false,
+    },
+    {
+      id: 'demo_fractal_support',
+      timestamp: Date.now() - 180000,
+      name: 'fractal_support_bounce',
+      direction: 'bullish',
+      confidence: 0.55,
+      score: 0.12,
+      description: 'Fractal support: price near historical swing lows, BTC tends to bounce from fractal levels',
+      candle_count: 40,
+      completed: false,
+    },
+  ],
+  investor_behaviors: [
+    {
+      id: 'demo_stop_hunt',
+      timestamp: Date.now() - 90000,
+      behavior_type: 'stop_hunt_reversal',
+      side: 'bullish',
+      confidence: 0.61,
+      intensity: 0.32,
+      description: 'Stop hunt + reversal: sell-side swept then reclaimed, classic smart money stop hunt',
+      price_level: 80850,
+      volume_ratio: 1.2,
+      is_active: true,
+    },
+    {
+      id: 'demo_distribution',
+      timestamp: Date.now() - 150000,
+      behavior_type: 'smart_money_distribution',
+      side: 'bearish',
+      confidence: 0.52,
+      intensity: 0.25,
+      description: 'Smart money distribution: institutions selling into retail buying pressure',
+      price_level: 80900,
+      volume_ratio: 0.8,
+      is_active: true,
+    },
+  ],
 }
 
 export function toChartTime(timestampMs: number): UTCTimestamp {

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
-import statistics
+import numpy as np
+import pandas as pd
+import ta
 
 from backend.models.types import Candle, LiquidityEvent, MarketMetrics, PriceProjection, Swing
 
@@ -14,11 +16,13 @@ def compute_market_metrics(candles: list[Candle], swings: list[Swing], lookback:
     window = ordered[-lookback:]
     latest = ordered[-1]
     closes = [candle.close for candle in ordered]
-    atr14 = _atr(ordered, 14)
+    df = _to_df(ordered)
+
+    atr14 = _atr(df, 14)
     ema20 = _ema(closes, 20)
     ema50 = _ema(closes, 50)
     rsi14 = _rsi(closes, 14)
-    vwap = _vwap(window)
+    vwap = _vwap(df)
     vwap_distance_pct = _safe_div(latest.close - vwap, latest.close)
     volume_zscore = _volume_zscore(window)
     realized_volatility = _realized_volatility(window)
@@ -145,105 +149,88 @@ def build_price_projection(
     )
 
 
-def _atr(candles: list[Candle], period: int) -> float:
-    if len(candles) < 2:
+def _to_df(candles: list[Candle]) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"high": c.high, "low": c.low, "close": c.close, "open": c.open, "volume": c.volume}
+        for c in candles
+    ])
+
+
+def _atr(df: pd.DataFrame, period: int = 14) -> float:
+    if len(df) < period + 1:
         return 0.0
-    ranges: list[float] = []
-    recent = candles[-(period + 1) :]
-    for previous, current in zip(recent, recent[1:]):
-        ranges.append(
-            max(
-                current.high - current.low,
-                abs(current.high - previous.close),
-                abs(current.low - previous.close),
-            )
-        )
-    return sum(ranges) / len(ranges) if ranges else 0.0
+    high_low = df["high"] - df["low"]
+    high_close = (df["high"] - df["close"].shift(1)).abs()
+    low_close = (df["low"] - df["close"].shift(1)).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return float(tr.iloc[-period:].mean())
 
 
 def _ema(values: list[float], period: int) -> float:
     if not values:
         return 0.0
-    alpha = 2 / (period + 1)
-    ema = values[0]
-    for value in values[1:]:
-        ema = (value * alpha) + (ema * (1 - alpha))
-    return ema
+    s = pd.Series(values)
+    ema = ta.trend.ema_indicator(s, window=period)
+    return float(ema.iloc[-1]) if not pd.isna(ema.iloc[-1]) else float(s.iloc[-1])
 
 
 def _rsi(values: list[float], period: int) -> float:
     if len(values) <= period:
         return 50.0
-    gains: list[float] = []
-    losses: list[float] = []
-    for previous, current in zip(values[-(period + 1) :], values[-period:]):
-        delta = current - previous
-        gains.append(max(delta, 0.0))
-        losses.append(abs(min(delta, 0.0)))
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-    if avg_loss == 0:
-        return 100.0 if avg_gain > 0 else 50.0
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    s = pd.Series(values)
+    rsi = ta.momentum.rsi(s, window=period)
+    return float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0
 
 
-def _vwap(candles: list[Candle]) -> float:
-    numerator = 0.0
-    denominator = 0.0
-    for candle in candles:
-        typical = (candle.high + candle.low + candle.close) / 3
-        weight = candle.volume if candle.volume > 0 else 1.0
-        numerator += typical * weight
-        denominator += weight
-    return numerator / denominator if denominator else candles[-1].close
+def _vwap(df: pd.DataFrame) -> float:
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    vol = df["volume"].clip(lower=1.0)
+    numerator = (typical * vol).sum()
+    denominator = vol.sum()
+    return float(numerator / denominator) if denominator > 0 else float(df["close"].iloc[-1])
 
 
 def _volume_zscore(candles: list[Candle], period: int = 30) -> float:
-    recent = [candle.volume for candle in candles[-period:] if candle.volume > 0]
+    recent = np.array([c.volume for c in candles[-period:] if c.volume > 0])
     if len(recent) < 5:
         return 0.0
-    mean = statistics.fmean(recent[:-1])
-    stdev = statistics.pstdev(recent[:-1])
-    if stdev == 0:
+    mean = np.mean(recent[:-1])
+    std = np.std(recent[:-1], ddof=1)
+    if std == 0:
         return 0.0
-    return (recent[-1] - mean) / stdev
+    return float((recent[-1] - mean) / std)
 
 
 def _realized_volatility(candles: list[Candle]) -> float:
-    returns = []
-    for previous, current in zip(candles, candles[1:]):
-        if previous.close > 0 and current.close > 0:
-            returns.append(math.log(current.close / previous.close))
-    if len(returns) < 2:
+    closes = np.array([c.close for c in candles])
+    log_returns = np.diff(np.log(closes[closes > 0]))
+    if len(log_returns) < 2:
         return 0.0
-    return statistics.pstdev(returns) * candles[-1].close
+    return float(np.std(log_returns, ddof=1) * candles[-1].close)
 
 
 def _parkinson_volatility(candles: list[Candle]) -> float:
-    samples = [
-        math.log(candle.high / candle.low) ** 2
-        for candle in candles
-        if candle.high > 0 and candle.low > 0 and candle.high >= candle.low
-    ]
-    if not samples:
+    highs = np.array([c.high for c in candles])
+    lows = np.array([c.low for c in candles])
+    mask = (highs > 0) & (lows > 0) & (highs >= lows)
+    if not mask.any():
         return 0.0
-    variance = sum(samples) / (4 * len(samples) * math.log(2))
-    return math.sqrt(max(variance, 0.0)) * candles[-1].close
+    samples = np.log(highs[mask] / lows[mask]) ** 2
+    variance = np.sum(samples) / (4 * len(samples) * math.log(2))
+    return float(np.sqrt(max(variance, 0.0)) * candles[-1].close)
 
 
 def _garman_klass_volatility(candles: list[Candle]) -> float:
-    samples = []
-    for candle in candles:
-        if min(candle.open, candle.high, candle.low, candle.close) <= 0:
-            continue
-        log_hl = math.log(candle.high / candle.low)
-        log_co = math.log(candle.close / candle.open)
-        samples.append(0.5 * log_hl**2 - ((2 * math.log(2) - 1) * log_co**2))
-    if not samples:
+    arr = np.array([(c.open, c.high, c.low, c.close) for c in candles])
+    mask = (arr.min(axis=1) > 0)
+    if not mask.any():
         return 0.0
-    variance = sum(samples) / len(samples)
-    return math.sqrt(max(variance, 0.0)) * candles[-1].close
+    o, h, l, c = arr[mask].T
+    log_hl = np.log(h / l)
+    log_co = np.log(c / o)
+    samples = 0.5 * log_hl**2 - ((2 * math.log(2) - 1) * log_co**2)
+    variance = np.mean(samples)
+    return float(np.sqrt(max(variance, 0.0)) * candles[-1].close)
 
 
 def _dealing_range(candles: list[Candle], swings: list[Swing]) -> tuple[float, float]:
@@ -267,7 +254,6 @@ def _trend_score(
     atr = max(atr, close * 0.001)
     ema_spread = _clamp((ema20 - ema50) / (atr * 3), -1.0, 1.0)
     price_ema = 0.18 if close >= ema20 else -0.18
-    # vwap_distance_pct is already a ratio here (e.g., 0.01 = 1%).
     vwap_score = _clamp(vwap_distance_pct / 0.02, -1.0, 1.0)
     rsi_score = _clamp((rsi14 - 50) / 28, -1.0, 1.0)
     range_score = _clamp(premium_discount, -1.0, 1.0)
@@ -278,12 +264,12 @@ def _trend_score(
 def _median_period_ms(candles: list[Candle]) -> int:
     if len(candles) < 2:
         return 60_000
-    deltas = [
-        current.timestamp - previous.timestamp
-        for previous, current in zip(candles[-20:-1], candles[-19:])
-        if current.timestamp > previous.timestamp
-    ]
-    return int(statistics.median(deltas)) if deltas else 60_000
+    timestamps = np.array([c.timestamp for c in candles[-20:]])
+    deltas = np.diff(timestamps)
+    deltas = deltas[deltas > 0]
+    if len(deltas) == 0:
+        return 60_000
+    return int(np.median(deltas))
 
 
 def _safe_div(numerator: float, denominator: float) -> float:

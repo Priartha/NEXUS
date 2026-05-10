@@ -1,22 +1,18 @@
-FROM node:18-alpine
+FROM node:18-alpine AS build
 
-# Set working directory
 WORKDIR /app
-
-# Copy package files
 COPY package*.json ./
-
-# Install dependencies
-RUN npm ci --only=production
-
-# Copy source code
+RUN npm ci
 COPY . .
-
-# Build the application
 RUN npm run build
 
-# Expose port
+FROM node:18-alpine AS production
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY --from=build /app/dist ./dist
+
 EXPOSE 5173
 
-# Start the application
-CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "5173"]
+CMD ["npx", "vite", "preview", "--host", "0.0.0.0", "--port", "5173", "--strictPort"]

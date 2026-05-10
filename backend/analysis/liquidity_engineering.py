@@ -15,7 +15,7 @@ def detect_liquidity_events(
 
     for candle in ordered:
         for level in levels:
-            if level.last_touch_timestamp and candle.timestamp <= level.last_touch_timestamp:
+            if level.swept or (level.last_touch_timestamp and candle.timestamp <= level.last_touch_timestamp):
                 continue
 
             if level.kind == "equal_high" and candle.high > level.price and candle.close < level.price:

@@ -236,6 +236,31 @@ class AiIctService:
         if sentiment_label in {"bullish", "bearish"}:
             add(sentiment_label, sentiment.confidence * 0.07, f"AI sentiment {sentiment_label} {sentiment.confidence:.0%}")
 
+        # BTC movement & investor behavior patterns
+        btc_patterns = _dict(payload.get("btc_patterns"))
+        if btc_patterns:
+            pat_signal = str(btc_patterns.get("pattern_signal") or "neutral")
+            bull_pat_score = float(btc_patterns.get("bullish_pattern_score") or 0.0)
+            bear_pat_score = float(btc_patterns.get("bearish_pattern_score") or 0.0)
+            if pat_signal == "bullish":
+                add("bullish", min(bull_pat_score * 0.18, 0.18), f"BTC pattern cluster: {len(btc_patterns.get('patterns',[]))} patterns score {bull_pat_score:.3f}")
+                for b in btc_patterns.get("investor_behaviors", [])[-3:]:
+                    b_side = str(b.get("side") or "")
+                    b_type = str(b.get("behavior_type") or "")
+                    b_conf = float(b.get("confidence") or 0.0)
+                    b_intensity = float(b.get("intensity") or 0.0)
+                    if b_side == "bullish":
+                        add("bullish", min(b_intensity * 0.1, 0.1), f"Investor behavior: {b_type} ({b_conf:.0%} conf)")
+            elif pat_signal == "bearish":
+                add("bearish", min(bear_pat_score * 0.18, 0.18), f"BTC pattern cluster: {len(btc_patterns.get('patterns',[]))} patterns score {bear_pat_score:.3f}")
+                for b in btc_patterns.get("investor_behaviors", [])[-3:]:
+                    b_side = str(b.get("side") or "")
+                    b_type = str(b.get("behavior_type") or "")
+                    b_conf = float(b.get("confidence") or 0.0)
+                    b_intensity = float(b.get("intensity") or 0.0)
+                    if b_side == "bearish":
+                        add("bearish", min(b_intensity * 0.1, 0.1), f"Investor behavior: {b_type} ({b_conf:.0%} conf)")
+
         bullish_event = _best_liquidity_event(liquidity_events, "sell_side")
         bearish_event = _best_liquidity_event(liquidity_events, "buy_side")
         if bullish_event:
@@ -377,17 +402,26 @@ class AiIctService:
             f"Expected move {float(metrics.get('expected_move') or 0):.2f}",
             f"Live volume pulse {_live_volume_pulse(candle, candles):.2f}x",
             f"Phase {regime_phase or 'unknown'}",
+            f"BTC patterns: {len(btc_patterns.get('patterns',[]))} patterns, {len(btc_patterns.get('investor_behaviors',[]))} behaviors, signal {btc_patterns.get('pattern_signal','neutral')}",
             f"Options momentum {_directional_momentum(payload, direction):.0%}",
             *(_option_calculations(selected_option) if selected_option else []),
             *price_plan["calculations"],
         ]
 
         action = "WAIT" if direction == "neutral" or grade == "NO_TRADE" else ("BUY" if direction == "bullish" else "SELL")
+        # Build summary with investor behavior context
+        behavior_context = ""
+        if btc_patterns:
+            behaviors = btc_patterns.get("investor_behaviors", [])
+            if behaviors:
+                best_b = max(behaviors, key=lambda b: float(b.get("confidence") or 0))
+                behavior_context = f" {best_b.get('behavior_type','').replace('_',' ')} detected ({best_b.get('confidence',0):.0%} conf);"
+
         if action == "WAIT":
             wait_reason = blockers[0] if blockers else "Execution-grade confirmation is not present"
-            summary = f"WAIT setup: NO_TRADE / avoid. Phase {regime_phase or 'unknown'}; {wait_reason}."
+            summary = f"WAIT setup: NO_TRADE / avoid. Phase {regime_phase or 'unknown'};{behavior_context} {wait_reason}."
         else:
-            summary = f"{action} setup: {grade} / {readiness}. Phase {regime_phase or 'unknown'}; one 1:3 plan from liquidity, structure, volatility, sentiment, and institutional confluence."
+            summary = f"{action} setup: {grade} / {readiness}. Phase {regime_phase or 'unknown'};{behavior_context} one 1:3 plan from liquidity, structure, volatility, sentiment, BTC patterns, and institutional confluence."
 
         return AiIctDecision(
             timestamp=timestamp,
@@ -436,6 +470,7 @@ def _compact_context(payload: dict[str, Any], sentiment: SentimentSnapshot, fall
         "liquidity_events": payload.get("liquidity_events", [])[-8:],
         "active_fvgs": payload.get("fvgs", [])[-8:],
         "active_order_blocks": payload.get("order_blocks", [])[-6:],
+        "btc_patterns": payload.get("btc_patterns"),
         "sentiment": {
             "label": sentiment.label,
             "score": sentiment.score,

@@ -142,6 +142,8 @@ class MarketQuote:
     mark_price: Optional[float] = None
     spot_price: Optional[float] = None
     latency_ms: Optional[int] = None
+    bid_qty: Optional[float] = None
+    ask_qty: Optional[float] = None
 
 
 @dataclass
@@ -260,6 +262,53 @@ class AiIctDecision:
 
 
 @dataclass
+class BtcPattern:
+    id: str
+    timestamp: int
+    name: str
+    direction: str
+    confidence: float
+    score: float
+    description: str
+    candle_count: int
+    completed: bool = False
+    completion_timestamp: Optional[int] = None
+    completion_price: Optional[float] = None
+
+
+@dataclass
+class BtcInvestorBehavior:
+    id: str
+    timestamp: int
+    behavior_type: str
+    side: str
+    confidence: float
+    intensity: float
+    description: str
+    price_level: float
+    volume_ratio: float
+    is_active: bool = True
+
+
+@dataclass
+class BtcPatternContext:
+    timestamp: int
+    killzone: Optional[str]
+    session: str
+    weekday: int
+    hour: int
+    is_weekend: bool
+    halving_phase: str
+    volatility_regime: str
+    fractal_clusters: list[str]
+    patterns: list[BtcPattern] = field(default_factory=list)
+    investor_behaviors: list[BtcInvestorBehavior] = field(default_factory=list)
+    bullish_pattern_score: float = 0.0
+    bearish_pattern_score: float = 0.0
+    pattern_signal: str = "neutral"
+
+
+@dataclass
 class TradeSignal:
     id: str
     timestamp: int
@@ -357,6 +406,8 @@ class OrderbookSnapshot:
     ask: float
     spread: float
     mid: float
+    bid_qty: float = 0.0
+    ask_qty: float = 0.0
 
 
 @dataclass
@@ -373,6 +424,7 @@ class ChartUpdate:
     projection: Optional[PriceProjection]
     regime: Optional[MarketRegime]
     options_context: Optional[OptionsContext]
+    btc_patterns: Optional[BtcPatternContext]
     update_type: str
 
 

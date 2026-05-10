@@ -27,25 +27,30 @@ class ConnectionManager:
         message = json.dumps(to_wire(data), separators=(",", ":"))
         async with self._lock:
             sockets = [
-                websocket
-                for websocket, subscribed_timeframe in self._active.items()
-                if timeframe is None or subscribed_timeframe == timeframe
+                ws
+                for ws, tf in self._active.items()
+                if timeframe is None or tf == timeframe
             ]
 
-        async def _send(websocket: WebSocket) -> tuple[WebSocket, bool]:
+        async def _send(ws: WebSocket) -> tuple[WebSocket, bool]:
             try:
-                await asyncio.wait_for(websocket.send_text(message), timeout=3)
-                return websocket, True
-            except Exception:
-                return websocket, False
+                await asyncio.wait_for(ws.send_text(message), timeout=3)
+                return ws, True
+            except BaseException:
+                return ws, False
 
-        results = await asyncio.gather(*(_send(websocket) for websocket in sockets), return_exceptions=False)
-        dead = [websocket for websocket, ok in results if not ok]
+        if not sockets:
+            return
+        raw = await asyncio.gather(*(_send(ws) for ws in sockets), return_exceptions=True)
+        dead: list[WebSocket] = []
+        for r in raw:
+            if isinstance(r, tuple) and not r[1]:
+                dead.append(r[0])
 
         if dead:
             async with self._lock:
-                for websocket in dead:
-                    self._active.pop(websocket, None)
+                for ws in dead:
+                    self._active.pop(ws, None)
 
     @property
     def count(self) -> int:

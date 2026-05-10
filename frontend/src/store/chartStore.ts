@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import {
   type ApiCandle,
   type AiIctDecision,
+  type BtcPatternContext,
   type ChartCandle,
   type ConnectionStatus,
   type FVG,
@@ -12,14 +13,17 @@ import {
   type MarketQuote,
   type MarketRegime,
   type MarketStats,
+  type MtfSnapshot,
   type OrderBlock,
   type OrderbookData,
   type OptionsContext,
+  type PaperTradeStats,
   type PriceProjection,
   type SentimentSnapshot,
   type StructureLabel,
   type Swing,
   type TradeSignal,
+  type VolumeProfile,
   toChartCandle,
 } from '../types/market'
 
@@ -41,7 +45,11 @@ interface ChartStore {
   sentiment: SentimentSnapshot | null
   aiIct: AiIctDecision | null
   orderbook: OrderbookData | null
+  btcPatterns: BtcPatternContext | null
   stats: MarketStats | null
+  paperTrading: PaperTradeStats | null
+  volumeProfile: VolumeProfile | null
+  mtfConfluence: Record<string, MtfSnapshot> | null
   availableTimeframes: string[]
   selectedTimeframe: string
   symbol: string
@@ -52,6 +60,8 @@ interface ChartStore {
   lastUpdateType: string
   setTimeframe: (timeframe: string) => void
   setConnectionStatus: (status: ConnectionStatus) => void
+  setVolumeProfile: (vp: VolumeProfile | null) => void
+  setMtfConfluence: (mtf: Record<string, MtfSnapshot> | null) => void
   applyMessage: (message: MarketMessage) => void
 }
 
@@ -89,7 +99,11 @@ export const useChartStore = create<ChartStore>((set) => ({
   sentiment: null,
   aiIct: null,
   orderbook: null,
+  btcPatterns: null,
   stats: null,
+  paperTrading: null,
+  volumeProfile: null,
+  mtfConfluence: null,
   availableTimeframes: ['1m', '5m', '15m', '1h'],
   selectedTimeframe: '5m',
   symbol: 'BTCUSD',
@@ -124,6 +138,8 @@ export const useChartStore = create<ChartStore>((set) => ({
     })),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
+  setVolumeProfile: (vp) => set({ volumeProfile: vp }),
+  setMtfConfluence: (mtf) => set({ mtfConfluence: mtf }),
 
   applyMessage: (message) =>
     set((state) => {
@@ -177,8 +193,10 @@ export const useChartStore = create<ChartStore>((set) => ({
       if (message.options_context !== undefined) next.optionsContext = message.options_context
       if (message.sentiment !== undefined) next.sentiment = message.sentiment
       if (message.ai_ict !== undefined) next.aiIct = message.ai_ict
+      if (message.btc_patterns !== undefined) next.btcPatterns = message.btc_patterns
       if (message.orderbook !== undefined) next.orderbook = message.orderbook
       if (message.stats) next.stats = message.stats
+      if (message.paper_trading) next.paperTrading = message.paper_trading
 
       return next
     }),

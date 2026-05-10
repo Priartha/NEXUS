@@ -5,7 +5,8 @@ $backendDir = Join-Path $root "backend"
 $frontendDir = Join-Path $root "frontend"
 $logsDir = Join-Path $root "logs"
 $runtimeDir = Join-Path $root ".runtime"
-$backendPython = Join-Path $backendDir ".venv\Scripts\python.exe"
+$rootVenv = Join-Path $root ".venv\Scripts\python.exe"
+$backendPython = if (Test-Path $rootVenv) { $rootVenv } else { Join-Path $backendDir ".venv\Scripts\python.exe" }
 $appUrl = "http://127.0.0.1:5173"
 
 function Write-Step($message) {
@@ -91,7 +92,7 @@ function Wait-ForTcp($port, $name) {
   throw "$name did not become ready on port $port. Check logs in $logsDir."
 }
 
-New-Item -ItemType Directory -Force -Path $logsDir, $runtimeDir | Out-Null
+New-Item -ItemType Directory -Force -Path $logsDir, $runtimeDir, (Join-Path $root "data") | Out-Null
 
 Write-Step "Checking local toolchain"
 Require-Command "python" "Install Python 3.12+ and reopen PowerShell."

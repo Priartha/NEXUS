@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from collections import deque
+from typing import Any, Callable
+
+from backend.analysis.alerts import check_signal_alert, check_regime_alert
+from backend.analysis.btc_patterns import detect_btc_patterns
 from backend.analysis.fvg_detector import detect_fvgs, update_fvg_fills
 from backend.analysis.institutional import build_price_projection, compute_market_metrics
 from backend.analysis.liquidity import check_liquidity_sweeps, detect_equal_levels
@@ -8,11 +12,13 @@ from backend.analysis.liquidity_engineering import detect_liquidity_events
 from backend.analysis.market_structure import detect_structure
 from backend.analysis.order_block import detect_order_blocks, update_order_block_breakers
 from backend.analysis.orderbook import OrderbookAnalyzer
+from backend.analysis.paper_trading import PaperTradingEngine
 from backend.analysis.regime import detect_market_regime
 from backend.analysis.signals import detect_trade_signals
 from backend.analysis.swing_detector import detect_swings
 from backend.engine.candle_store import CandleStore
 from backend.models.types import (
+    BtcPatternContext,
     Candle,
     FVG,
     LiquidityEvent,
@@ -34,7 +40,9 @@ from backend.models.types import (
 
 
 class AnalysisPipeline:
-    def __init__(self, swing_window: int = 2, lookback: int = 80) -> None:
+    def __init__(self, swing_window: int = 2, lookback: int = 80,
+                 paper_trading: PaperTradingEngine | None = None,
+                 on_alert: Callable[[dict], None] | None = None) -> None:
         self.swing_window = swing_window
         self.lookback = lookback
         self.swings: list[Swing] = []
@@ -54,6 +62,14 @@ class AnalysisPipeline:
         self.ob_accumulations: list[OrderbookAccumulation] = []
         self.quote_history: deque[MarketQuote] = deque(maxlen=1000)
         
+        # BTC movement & investor behavior patterns
+        self.btc_patterns: BtcPatternContext | None = None
+
+        # Paper trading & alerts
+        self._paper_trading = paper_trading
+        self._on_alert = on_alert or (lambda _: None)
+        self._last_regime_phase: str | None = None
+
         self._last_candle_count = 0
 
     def add_quote(self, quote: MarketQuote) -> None:
@@ -101,7 +117,19 @@ class AnalysisPipeline:
         self.liquidity_events = detect_liquidity_events(window, self.liquidity, self.metrics.atr14 if self.metrics else 0.0)[-80:]
         self.regime = detect_market_regime(candles, self.metrics, self.liquidity_events)
         self.projection = build_price_projection(candles, self.metrics, self.liquidity_events)
-        
+
+        # BTC movement & investor behavior pattern analysis
+        self.btc_patterns = detect_btc_patterns(
+            candles=window,
+            swings=self.swings,
+            fvgs=self.fvgs,
+            order_blocks=self.order_blocks,
+            liquidity=self.liquidity,
+            liquidity_events=self.liquidity_events,
+            metrics=self.metrics,
+            regime=self.regime,
+        )
+
         # Orderbook analysis - always run
         self.ob_imbalances = self.orderbook_analyzer.detect_imbalances()
         self.ob_spread_dynamics = self.orderbook_analyzer.detect_spread_dynamics()
@@ -132,11 +160,26 @@ class AnalysisPipeline:
         )
         self.regime = detect_market_regime(candles, self.metrics, self.liquidity_events)
         self.projection = build_price_projection(candles, self.metrics, self.liquidity_events)
-        
+
+        # Incremental BTC pattern analysis
+        self.btc_patterns = detect_btc_patterns(
+            candles=recent,
+            swings=self.swings,
+            fvgs=self.fvgs,
+            order_blocks=self.order_blocks,
+            liquidity=self.liquidity,
+            liquidity_events=self.liquidity_events,
+            metrics=self.metrics,
+            regime=self.regime,
+        )
+
         # Incremental orderbook analysis - always run
         self.ob_imbalances = self.orderbook_analyzer.detect_imbalances()
         self.ob_spread_dynamics = self.orderbook_analyzer.detect_spread_dynamics()
         self.ob_depth_levels = self.orderbook_analyzer.detect_depth_saturation()
+        if self.quote_history:
+            latest_quote = list(self.quote_history)[-1]
+            self.ob_imbalances = self.orderbook_analyzer.update_imbalances(self.ob_imbalances, latest_quote)
         
         # Update accumulation status if we have quotes
         if self.quote_history:
@@ -191,6 +234,25 @@ class AnalysisPipeline:
             self.metrics = compute_market_metrics(closed_candles, self.swings)
             self.regime = detect_market_regime(closed_candles, self.metrics, self.liquidity_events)
             self.projection = build_price_projection(closed_candles, self.metrics, self.liquidity_events)
+            self.btc_patterns = detect_btc_patterns(
+                candles=closed_candles[-self.lookback:],
+                swings=self.swings,
+                fvgs=self.fvgs,
+                order_blocks=self.order_blocks,
+                liquidity=self.liquidity,
+                liquidity_events=self.liquidity_events,
+                metrics=self.metrics,
+                regime=self.regime,
+            )
+        # Refresh accumulations status with latest candle data
+        if self.quote_history:
+            latest_candle = closed_candles[-1] if closed_candles else None
+            latest_quote = list(self.quote_history)[-1] if self.quote_history else None
+            if latest_candle and latest_quote:
+                self.ob_accumulations = self.orderbook_analyzer.update_accumulation_status(
+                    self.ob_accumulations, latest_candle, latest_quote
+                )
+
         structure: list[StructureLabel] = detect_structure(self.swings, closed_candles)
         active_fvgs = [fvg for fvg in self.fvgs if not fvg.is_filled][-30:]
         active_obs = [block for block in self.order_blocks if not block.is_breaker][-20:]
@@ -223,6 +285,7 @@ class AnalysisPipeline:
             "metrics": to_wire(self.metrics),
             "projection": to_wire(self.projection),
             "regime": to_wire(self.regime),
+            "btc_patterns": to_wire(self.btc_patterns),
             "orderbook": {
                 "imbalances": to_wire(self.ob_imbalances[-15:]),
                 "spread_dynamics": to_wire(self.ob_spread_dynamics[-15:]),
@@ -239,10 +302,38 @@ class AnalysisPipeline:
                 "ob_imbalances": len(self.ob_imbalances),
                 "ob_spread_anomalies": len([d for d in self.ob_spread_dynamics if d.status != "normal"]),
                 "ob_accumulations": len([a for a in self.ob_accumulations if a.status == "active"]),
+                "btc_patterns": len(self.btc_patterns.patterns) if self.btc_patterns else 0,
+                "btc_behaviors": len(self.btc_patterns.investor_behaviors) if self.btc_patterns else 0,
             },
         }
         if include_candles:
             payload["candles"] = to_wire(store.get_chart_candles())
+
+        # Paper trading stats
+        if self._paper_trading:
+            from backend.storage import repository as repo
+            pt_stats = repo.get_paper_trade_stats()
+            payload["paper_trading"] = pt_stats
+
+        # Paper trading & alerts
+        if self._paper_trading and signals and candle:
+            events = self._paper_trading.evaluate_signals(
+                detected_signals, candle, symbol=store.symbol, timeframe=store.timeframe,
+            )
+            for ev in events:
+                self._on_alert(ev)
+
+        for sig in signals:
+            alert = check_signal_alert(to_wire(sig))
+            if alert:
+                self._on_alert(alert)
+
+        if self.regime and self.regime.phase != self._last_regime_phase:
+            alert = check_regime_alert(self._last_regime_phase, self.regime.phase)
+            if alert:
+                self._on_alert(alert)
+            self._last_regime_phase = self.regime.phase
+
         return payload
 
 

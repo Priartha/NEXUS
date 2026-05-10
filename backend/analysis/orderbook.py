@@ -45,66 +45,94 @@ class OrderbookAnalyzer:
             ask=quote.ask,
             spread=spread,
             mid=(quote.bid + quote.ask) / 2.0,
+            bid_qty=quote.bid_qty or 0.0,
+            ask_qty=quote.ask_qty or 0.0,
         )
         self.history.append(snapshot)
 
-    def detect_imbalances(self, lookback: int = 20) -> list[OrderbookImbalance]:
+    def detect_imbalances(self, lookback: int = 100) -> list[OrderbookImbalance]:
         """
-        Detect bid/ask imbalances in recent orderbook data.
+        Detect bid/ask imbalances using quantity pressure at the best levels.
         
-        An imbalance occurs when one side significantly outnumbers the other,
-        suggesting directional pressure.
+        During quiet periods the mid price barely moves between ticks, but the
+        quantities at the best bid/ask change constantly. We measure the ratio of
+        bid quantity to total quantity — when one side dominates, pressure is building.
         """
-        if len(self.history) < 2:
+        if len(self.history) < 10:
             return []
 
         recent = list(self.history)[-lookback:]
         imbalances: list[OrderbookImbalance] = []
-        
-        # Calculate average spread for context
-        avg_spread = sum(snap.spread for snap in recent) / len(recent)
-        
-        for i, snap in enumerate(recent):
-            # Analyze this quote and previous quote
-            if i == 0:
+        window_size = max(10, len(recent) // 4)
+        step = max(1, window_size // 2)
+
+        for start in range(0, len(recent) - window_size + 1, step):
+            window = recent[start:start + window_size]
+            first, last = window[0], window[-1]
+
+            mid_change = last.mid - first.mid
+            price_move_pct = abs(mid_change) / first.mid if first.mid > 0 else 0
+
+            avg_spread = sum(s.spread for s in window) / window_size
+            full_avg_spread = sum(s.spread for s in recent) / len(recent)
+            spread_tight = full_avg_spread > 0 and avg_spread < full_avg_spread * 0.9
+
+            # Quantity pressure: ratio of bid qty to total qty over the window
+            total_bid_qty = sum(s.bid_qty for s in window)
+            total_ask_qty = sum(s.ask_qty for s in window)
+            total_qty = total_bid_qty + total_ask_qty
+
+            if total_qty == 0:
                 continue
-            
-            prev_snap = recent[i - 1]
-            spread_change = snap.spread - prev_snap.spread
-            mid_change = snap.mid - prev_snap.mid
-            
-            # Detect strong directional pressure
-            # If price moves significantly relative to spread change, there's directional pressure
-            price_move_pct = abs(mid_change) / snap.mid if snap.mid > 0 else 0
-            spread_change_pct = abs(spread_change) / avg_spread if avg_spread > 0 else 0
-            
-            # Strong imbalance: price moves > 0.05%, OR spread widens significantly
-            if price_move_pct > 0.0005 or spread_change_pct > 0.3:
-                if mid_change > 0:  # Moving up = selling pressure (ask aggression)
-                    side = "sell"
-                    imbalance_ratio = 1.3 + (spread_change_pct * 0.5)  # Ask more aggressive
-                elif mid_change < 0:  # Moving down = buying pressure (bid aggression)
-                    side = "buy"
-                    imbalance_ratio = 1.0 / (1.3 + (spread_change_pct * 0.5))  # Bid more aggressive
-                else:
-                    continue
-                
-                # Calculate strength based on both price move and spread anomaly
-                strength = min((price_move_pct * 100) + (spread_change_pct * 0.2), 1.0)
-                strength = max(strength, 0.3)  # Minimum confidence
-                
-                imbalance = OrderbookImbalance(
-                    id=stable_id("ob_imb", side, round(snap.mid, 2), snap.timestamp, i),
-                    timestamp=snap.timestamp,
-                    price_level=snap.mid,
-                    imbalance_ratio=imbalance_ratio,
-                    side=side,
-                    strength=strength,
-                    duration_ms=0,
-                )
-                imbalances.append(imbalance)
-        
-        return imbalances[-50:]  # Keep last 50
+
+            bid_qty_ratio = total_bid_qty / total_qty
+            ask_qty_ratio = 1.0 - bid_qty_ratio
+            qty_dominance = max(bid_qty_ratio, ask_qty_ratio)
+
+            # How much the balance shifted during the window
+            first_half = window[:len(window)//2]
+            second_half = window[len(window)//2:]
+            bid_qty_first = sum(s.bid_qty for s in first_half)
+            total_first = bid_qty_first + sum(s.ask_qty for s in first_half)
+            bid_qty_second = sum(s.bid_qty for s in second_half)
+            total_second = bid_qty_second + sum(s.ask_qty for s in second_half)
+            ratio_shift = 0.0
+            if total_first > 0 and total_second > 0:
+                ratio_first = bid_qty_first / total_first
+                ratio_second = bid_qty_second / total_second
+                ratio_shift = abs(ratio_second - ratio_first)
+
+            # Composite score: quantity dominance (50%), ratio shift (20%), price momentum (20%), spread tightness (10%)
+            qty_score = qty_dominance
+            shift_score = min(ratio_shift * 5, 1.0)
+            price_score = min(price_move_pct * 5000, 1.0)
+            tight_score = 0.15 if spread_tight else 0.0
+            composite = qty_score * 0.5 + shift_score * 0.2 + price_score * 0.2 + tight_score * 0.1
+
+            if composite < 0.45:
+                continue
+
+            if bid_qty_ratio > ask_qty_ratio:
+                side = "buy"
+                imbalance_ratio = 1.0 + (bid_qty_ratio - 0.5) * 2.0
+            else:
+                side = "sell"
+                imbalance_ratio = 1.0 + (ask_qty_ratio - 0.5) * 2.0
+
+            strength = min(composite, 1.0)
+            duration_ms = last.timestamp - first.timestamp if last.timestamp > first.timestamp else 0
+
+            imbalances.append(OrderbookImbalance(
+                id=stable_id("ob_imb", side, round(last.mid, 2), last.timestamp, start),
+                timestamp=last.timestamp,
+                price_level=last.mid,
+                imbalance_ratio=round(imbalance_ratio, 3),
+                side=side,
+                strength=round(strength, 3),
+                duration_ms=duration_ms,
+            ))
+
+        return imbalances[-30:]
 
     def update_imbalances(
         self, 
@@ -171,7 +199,7 @@ class OrderbookAnalyzer:
                     id=stable_id("ob_spd", status, round(snap.mid, 2), snap.timestamp),
                     timestamp=snap.timestamp,
                     spread=snap.spread,
-                    spread_pct=(snap.spread / snap.mid * 100) if snap.mid > 0 else 0.0,
+                    spread_pct=round((snap.spread / snap.mid * 100), 6) if snap.mid > 0 else 0.0,
                     spread_zscore=zscore,
                     bid=snap.bid,
                     ask=snap.ask,
@@ -212,7 +240,7 @@ class OrderbookAnalyzer:
             bid_touches = 0
             
             for snap in recent:
-                if snap.bid > 0 and abs(snap.bid - bid_price) / bid_price < 0.002:  # Within 0.2% of tier price
+                if snap.bid > 0 and bid_price > 0 and abs(snap.bid - bid_price) / bid_price < 0.002:  # Within 0.2% of tier price
                     bid_saturation += 1.0
                     bid_touches += 1
             
