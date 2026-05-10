@@ -10,7 +10,7 @@ $backendPython = if (Test-Path $rootVenv) { $rootVenv } else { Join-Path $backen
 $appUrl = "http://127.0.0.1:5173"
 
 function Write-Step($message) {
-  Write-Host "[ICT Terminal] $message" -ForegroundColor Cyan
+  Write-Host "[NEXUS] $message" -ForegroundColor Cyan
 }
 
 function Require-Command($name, $installHint) {
@@ -142,7 +142,7 @@ Write-Step "Starting backend and frontend"
 $startDirect = Join-Path $PSScriptRoot "start-direct.cmd"
 & cmd.exe /d /s /c ('"' + $startDirect + '"')
 if ($LASTEXITCODE -ne 0) {
-  throw "Failed to start ICT Terminal. Check logs in $logsDir."
+  throw "Failed to start NEXUS. Check logs in $logsDir."
 }
 
 Write-Step "Waiting for backend"
@@ -155,7 +155,7 @@ Write-Step "Opening app"
 & cmd.exe /d /s /c ('start "" "' + $appUrl + '"')
 
 Write-Host ""
-Write-Host "ICT Terminal is running." -ForegroundColor Green
+Write-Host "NEXUS is running." -ForegroundColor Green
 Write-Host "App:     $appUrl"
 Write-Host "Backend: http://127.0.0.1:8000"
 Write-Host "Logs:    $logsDir"

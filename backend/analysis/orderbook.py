@@ -1,5 +1,5 @@
 """
-Orderbook analysis module for ICT Terminal.
+Orderbook analysis module for NEXUS.
 
 Analyzes real-time orderbook data to detect:
 - Bid/Ask imbalances and pressure signals

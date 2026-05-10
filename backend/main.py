@@ -56,7 +56,7 @@ LOGGING_CONFIG = {
     "handlers": {
         "file": {
             "class": "logging.handlers.RotatingFileHandler",
-            "filename": str(logs_dir / "ict-terminal.log"),
+            "filename": str(logs_dir / "nexus.log"),
             "maxBytes": 10_000_000,  # 10MB
             "backupCount": 5,
             "formatter": "json",
@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Task {task.get_name()} failed during shutdown: {e}", exc_info=True)
 
 
-app = FastAPI(title="ICT Terminal", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="NEXUS", version="1.0.0", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_middleware(
     CORSMiddleware,
@@ -196,7 +196,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/")
 async def root() -> dict:
     return {
-        "name": "ICT Terminal",
+        "name": "NEXUS",
         "docs": "/docs",
         "health": "/health",
         "snapshot": "/snapshot",

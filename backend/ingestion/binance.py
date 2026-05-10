@@ -281,7 +281,7 @@ async def fetch_historical_candles(
     url = f"{base_url.rstrip('/')}/api/v3/klines"
     headers = {
         "Accept": "application/json",
-        "User-Agent": "Codex-ICT-Terminal/1.0",
+        "User-Agent": "NEXUS/1.0",
     }
     params = {
         "symbol": binance_symbol,

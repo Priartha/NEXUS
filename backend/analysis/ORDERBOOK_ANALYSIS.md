@@ -1,7 +1,7 @@
 """
-ORDERBOOK ANALYSIS - ICT Terminal
+ORDERBOOK ANALYSIS - NEXUS
 
-This module provides real and actual orderbook analysis for the ICT Terminal trading system.
+This module provides real and actual orderbook analysis for the NEXUS trading system.
 
 OVERVIEW
 ========

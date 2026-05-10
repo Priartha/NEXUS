@@ -20,7 +20,7 @@ async def fetch_historical_candles(
     url = f"{base_url.rstrip('/')}/v2/history/candles"
     headers = {
         "Accept": "application/json",
-        "User-Agent": "Codex-ICT-Terminal/1.0",
+        "User-Agent": "NEXUS/1.0",
     }
     params = {
         "resolution": timeframe,
@@ -59,7 +59,7 @@ async def fetch_option_tickers(
     url = f"{base_url.rstrip('/')}/v2/tickers"
     headers = {
         "Accept": "application/json",
-        "User-Agent": "Codex-ICT-Terminal/1.0",
+        "User-Agent": "NEXUS/1.0",
     }
     params = {
         "contract_types": "call_options,put_options",

@@ -52,4 +52,4 @@ Stop-ProjectListener 8000 "uvicorn"
 Stop-ProjectListener 5173 "vite"
 Stop-ProjectProcesses
 
-Write-Host "ICT Terminal stopped." -ForegroundColor Green
+Write-Host "NEXUS stopped." -ForegroundColor Green

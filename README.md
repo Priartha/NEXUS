@@ -1,4 +1,4 @@
-# ICT Terminal
+# NEXUS
 
 Real-time BTCUSD ICT charting MVP:
 
@@ -21,7 +21,7 @@ Real-time BTCUSD ICT charting MVP:
 Double-click:
 
 ```text
-Run ICT Terminal.cmd
+Run NEXUS.cmd
 ```
 
 This installs missing dependencies, starts backend and frontend in the background, and opens `http://127.0.0.1:5173`.
@@ -29,7 +29,7 @@ This installs missing dependencies, starts backend and frontend in the backgroun
 To stop the app, double-click:
 
 ```text
-Stop ICT Terminal.cmd
+Stop NEXUS.cmd
 ```
 
 Manual run:

@@ -14,24 +14,24 @@ if exist ".venv\Scripts\python.exe" (
 ) else if exist "backend\.venv\Scripts\python.exe" (
   set "PYTHON=backend\.venv\Scripts\python.exe"
 ) else (
-  echo [ICT Terminal] No Python venv found. Run 'python -m venv .venv' first.
+  echo [NEXUS] No Python venv found. Run 'python -m venv .venv' first.
   exit /b 1
 )
 
-echo [ICT Terminal] Starting backend...
+echo [NEXUS] Starting backend...
 start "" /b "%PYTHON%" -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 > "%ROOT%\logs\backend.out.log" 2> "%ROOT%\logs\backend.err.log"
 
-echo [ICT Terminal] Starting frontend...
+echo [NEXUS] Starting frontend...
 cd /d "%ROOT%\frontend"
 if exist "node_modules\.bin\vite.cmd" (
   start "" /b node node_modules\vite\bin\vite.js --host 127.0.0.1 --port 5173 > "%ROOT%\logs\frontend.out.log" 2> "%ROOT%\logs\frontend.err.log"
 ) else if exist "node_modules\.bin\vite" (
   start "" /b node node_modules\.bin\vite --host 127.0.0.1 --port 5173 > "%ROOT%\logs\frontend.out.log" 2> "%ROOT%\logs\frontend.err.log"
 ) else (
-  echo [ICT Terminal] Frontend packages not installed. Run 'npm install' in frontend/ first.
+  echo [NEXUS] Frontend packages not installed. Run 'npm install' in frontend/ first.
   exit /b 1
 )
 
-echo [ICT Terminal] Both servers started. Check logs\ for output.
+echo [NEXUS] Both servers started. Check logs\ for output.
 echo   Backend: http://127.0.0.1:8000
 echo   Frontend: http://127.0.0.1:5173
