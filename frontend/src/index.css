@@ -1,0 +1,41 @@
+:root {
+  font-family: "Press Start 2P", "Courier New", Courier, monospace;
+  color: #fff;
+  background: #000;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --bg: #000;
+  --surface: #070707;
+  --surface-strong: #111111;
+  --surface-soft: #0b0b0b;
+  --text: #ffffff;
+  --muted: #b8b8b8;
+  --border: rgba(255, 255, 255, 0.16);
+  --accent: #ffffff;
+  --accent-alt: #c8c8c8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #000;
+  color: #fff;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
