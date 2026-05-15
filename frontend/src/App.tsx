@@ -19,8 +19,11 @@ import {
 import './App.css'
 import { Chart } from './components/Chart'
 import DepthHeatmap from './components/DepthHeatmap'
-import VolumeProfile from './components/VolumeProfile'
+
 import MtfConfluence from './components/MtfConfluence'
+import AlertsPanel from './components/AlertsPanel'
+import BacktestPanel from './components/BacktestPanel'
+import PaperTradingPanel from './components/PaperTradingPanel'
 import { useAudioAlerts } from './hooks/useAudioAlerts'
 import { useMarketSocket } from './hooks/useMarketSocket'
 import { useChartStore } from './store/chartStore'
@@ -30,7 +33,7 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'mtf'
+type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'mtf' | 'alerts' | 'backtest' | 'trades'
 
 const SESSION_COLORS: Record<string, string> = {
   asian: '#8ab4f8',
@@ -70,8 +73,6 @@ function App() {
   const feedStatus = useChartStore((state) => state.feedStatus)
   const feedMessage = useChartStore((state) => state.feedMessage)
   const stats = useChartStore((state) => state.stats)
-  const volumeProfile = useChartStore((state) => state.volumeProfile)
-  const setVolumeProfile = useChartStore((state) => state.setVolumeProfile)
   const mtfConfluence = useChartStore((state) => state.mtfConfluence)
   const setMtfConfluence = useChartStore((state) => state.setMtfConfluence)
   const orderbook = useChartStore((state) => state.orderbook)
@@ -85,8 +86,9 @@ function App() {
   const latest = candles.at(-1)
   const previous = candles.at(-2)
   const displayPrice = quote?.mid ?? quote?.last_trade ?? quote?.mark_price ?? latest?.close
-  const change = displayPrice && previous ? displayPrice - previous.close : 0
-  const changePct = latest && previous ? (change / previous.close) * 100 : 0
+  const refPrice = previous?.close ?? latest?.open ?? displayPrice
+  const change = displayPrice && refPrice ? displayPrice - refPrice : 0
+  const changePct = refPrice && Number.isFinite(refPrice) && refPrice !== 0 ? (change / refPrice) * 100 : 0
   const connected = connectionStatus === 'open'
   const finalAction = aiIct?.grade === 'NO_TRADE' || aiIct?.direction === 'neutral'
     ? 'WAIT'
@@ -105,7 +107,7 @@ function App() {
   const optionExecutionStatus = optionContract?.qualified
     ? 'qualified'
     : 'watchlist'
-  const [selectedRiskReward, _setSelectedRiskReward] = useState<number | 'best'>('best')
+  const selectedRiskReward: number | 'best' = 'best'
   const [panelView, setPanelView] = useState<PanelView>('signals')
   const [panelOpen, setPanelOpen] = useState(true)
   const latestLiquidityEvent = liquidityEvents.at(-1)
@@ -133,26 +135,43 @@ function App() {
   const obSpreadDynamics = orderbook?.spread_dynamics ?? []
   const obDepthLevels = orderbook?.depth_levels ?? []
 
-  // ─── Volume Profile fetch ───────────────────────────
-  const tf = selectedTimeframe
-  useEffect(() => {
-    let cancelled = false
-    fetch(`/volume-profile?tf=${tf}&candles=100`)
-      .then((r) => r.json())
-      .then((data) => { if (!cancelled) setVolumeProfile(data) })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [lastApiCandle, tf, setVolumeProfile])
+  // ─── Fallback SR from recent candles ────────────────
+  const fallbackSR = useMemo(() => {
+    const recent = candles.slice(-48)
+    if (recent.length < 5) return null
+    const high = Math.max(...recent.map((c) => c.high))
+    const low = Math.min(...recent.map((c) => c.low))
+    const close = recent[recent.length - 1].close
+    const pivot = (high + low + close) / 3
+    return {
+      resistance: +(high - (pivot - low) + pivot).toFixed(1),
+      support: +(low - (high - pivot) + pivot).toFixed(1),
+      projected_high: +(pivot + (high - low)).toFixed(1),
+      projected_low: +(pivot - (high - low)).toFixed(1),
+    }
+  }, [candles])
+
+  const srResistance = regime?.range_high ?? projection?.expected_high ?? fallbackSR?.resistance
+  const srSupport = regime?.range_low ?? projection?.expected_low ?? fallbackSR?.support
+  const srProjectedHigh = projection?.expected_high ?? fallbackSR?.projected_high
+  const srProjectedLow = projection?.expected_low ?? fallbackSR?.projected_low
 
   // ─── MTF Confluence fetch ───────────────────────────
   useEffect(() => {
     let cancelled = false
-    fetch('/mtf-confluence')
-      .then((r) => r.json())
-      .then((data) => { if (!cancelled) setMtfConfluence(data) })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [lastApiCandle, setMtfConfluence])
+    const fetchConfluence = () => {
+      fetch('/mtf-confluence')
+        .then((r) => r.json())
+        .then((data) => { if (!cancelled) setMtfConfluence(data) })
+        .catch(() => {})
+    }
+    fetchConfluence()
+    const interval = window.setInterval(fetchConfluence, 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [setMtfConfluence])
 
   return (
     <main className="terminal">
@@ -278,7 +297,7 @@ function App() {
         {panelOpen && (
         <aside className="side-panel">
           <div className="panel-switch">
-            {(['signals', 'patterns', 'options', 'depth', 'volume', 'mtf'] as const).map((view) => (
+            {(['signals', 'patterns', 'options', 'depth', 'mtf', 'trades', 'alerts', 'backtest'] as const).map((view) => (
               <button
                 key={view}
                 className={panelView === view ? 'active' : ''}
@@ -287,19 +306,21 @@ function App() {
                 {view === 'signals' && 'Signals'}
                 {view === 'patterns' && (
                   <>
-                    Patterns
+                    Pats
                     {patterns.length > 0 && <span className="badge-count">{patterns.length}</span>}
                   </>
                 )}
                 {view === 'options' && (
                   <>
-                    Options
+                    Opts
                     {optionContract && <span className="badge-dot" />}
                   </>
                 )}
                 {view === 'depth' && 'Depth'}
-                {view === 'volume' && 'Volume'}
                 {view === 'mtf' && 'MTF'}
+                {view === 'trades' && 'Paper'}
+                {view === 'alerts' && 'Alerts'}
+                {view === 'backtest' && 'BT'}
               </button>
             ))}
           </div>
@@ -349,6 +370,30 @@ function App() {
                     <div><dt>Bias</dt><dd>{regime.bias}</dd></div>
                     <div><dt>Confidence</dt><dd>{(regime.confidence * 100).toFixed(0)}%</dd></div>
                   </dl>
+                </section>
+              )}
+
+              {(srResistance || srSupport) && (
+                <section>
+                  <h2><Target size={13} /> Support & Resistance</h2>
+                  <div className="sr-grid">
+                    <div className="sr-item resistance">
+                      <span className="sr-label">Resistance</span>
+                      <strong className="sr-value">${formatPrice(srResistance)}</strong>
+                    </div>
+                    <div className="sr-item">
+                      <span className="sr-label">Projected High</span>
+                      <strong className="sr-value">${formatPrice(srProjectedHigh)}</strong>
+                    </div>
+                    <div className="sr-item">
+                      <span className="sr-label">Projected Low</span>
+                      <strong className="sr-value">${formatPrice(srProjectedLow)}</strong>
+                    </div>
+                    <div className="sr-item support">
+                      <span className="sr-label">Support</span>
+                      <strong className="sr-value">${formatPrice(srSupport)}</strong>
+                    </div>
+                  </div>
                 </section>
               )}
 
@@ -616,22 +661,29 @@ function App() {
             </div>
           )}
 
-          {/* ─── VOLUME TAB ──────────────────────────── */}
-          {panelView === 'volume' && (
+          {/* ─── TRADES (Paper Trading) TAB ──────────── */}
+          {panelView === 'trades' && (
             <div className="panel-content">
               <section>
-                <h2><BarChart3 size={13} /> Volume Profile</h2>
-                {volumeProfile ? (
-                  <VolumeProfile
-                    bins={volumeProfile.bins}
-                    poc={volumeProfile.poc}
-                    value_area_low={volumeProfile.value_area_low}
-                    value_area_high={volumeProfile.value_area_high}
-                    total_volume={volumeProfile.total_volume}
-                  />
-                ) : (
-                  <p className="empty-state">Loading volume profile...</p>
-                )}
+                <PaperTradingPanel />
+              </section>
+            </div>
+          )}
+
+          {/* ─── ALERTS TAB ─────────────────────────── */}
+          {panelView === 'alerts' && (
+            <div className="panel-content">
+              <section>
+                <AlertsPanel />
+              </section>
+            </div>
+          )}
+
+          {/* ─── BACKTEST TAB ────────────────────────── */}
+          {panelView === 'backtest' && (
+            <div className="panel-content">
+              <section>
+                <BacktestPanel />
               </section>
             </div>
           )}
@@ -643,7 +695,7 @@ function App() {
                 <h2><Activity size={13} /> Orderbook Imbalances</h2>
                 {obImbalances.length > 0 ? (
                   <div className="depth-list">
-                    {obImbalances.slice(-8).reverse().map((imb: any) => (
+                    {obImbalances.slice(-8).reverse().map((imb) => (
                       <div key={imb.id} className={`depth-row ${imb.side === 'buy' ? 'bullish' : 'bearish'}`}>
                         <div className="depth-head">
                           <span className="depth-side">{imb.side === 'buy' ? 'BUY' : 'SELL'}</span>
@@ -672,7 +724,7 @@ function App() {
                 <section>
                   <h2><Target size={13} /> Accumulation / Distribution</h2>
                   <div className="depth-list">
-                    {obAccumulations.slice(-5).reverse().map((acc: any) => (
+                    {obAccumulations.slice(-5).reverse().map((acc) => (
                       <div key={acc.id} className={`depth-row ${acc.side === 'accumulation' ? 'bullish' : 'bearish'}`}>
                         <div className="depth-head">
                           <span className="depth-side">{acc.side === 'accumulation' ? 'ACCUMULATION' : 'DISTRIBUTION'}</span>
@@ -696,7 +748,7 @@ function App() {
                 <section>
                   <h2>Spread Dynamics</h2>
                   <dl className="facts compact">
-                    {obSpreadDynamics.slice(-4).reverse().map((sd: any) => (
+                    {obSpreadDynamics.slice(-4).reverse().map((sd) => (
                       <div key={sd.id}>
                         <dt>{sd.anomaly_type ?? sd.status}</dt>
                         <dd>{sd.spread_pct != null ? `${(sd.spread_pct * 100).toFixed(2)}%` : `${formatPrice(sd.spread)}`}</dd>
@@ -717,9 +769,9 @@ function App() {
                 <section>
                   <h2>Stats</h2>
                   <dl className="facts compact">
-                    <div><dt>Imbalances</dt><dd>{(stats as any).ob_imbalances ?? 0}</dd></div>
-                    <div><dt>Spread Anomalies</dt><dd>{(stats as any).ob_spread_anomalies ?? 0}</dd></div>
-                    <div><dt>Accumulations</dt><dd>{(stats as any).ob_accumulations ?? 0}</dd></div>
+                    <div><dt>Imbalances</dt><dd>{stats.ob_imbalances ?? 0}</dd></div>
+                    <div><dt>Spread Anomalies</dt><dd>{stats.ob_spread_anomalies ?? 0}</dd></div>
+                    <div><dt>Accumulations</dt><dd>{stats.ob_accumulations ?? 0}</dd></div>
                   </dl>
                 </section>
               )}

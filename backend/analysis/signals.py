@@ -117,7 +117,7 @@ def detect_trade_signals(
             confidence=confidence,
             metrics=local_metrics,
         )
-        if risk_profile["risk_of_ruin"] > 0.6 or risk_profile["cvar95_loss"] > (risk * 1.35):
+        if risk_profile["risk_of_ruin"] > 0.6 or risk_profile["cvar95_loss"] > (risk * 3.0):
             continue
         confidence = round(_clamp(confidence - risk_profile["penalty"], 0.2, 0.93), 2)
         reason = f"{reason}, kelly {risk_profile['kelly_fraction']:.3f}, cvar95 {risk_profile['cvar95_loss']:.2f}, ruin {risk_profile['risk_of_ruin']:.2f}"

@@ -9,6 +9,7 @@ import {
   LineStyle,
   type CrosshairMode,
   type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
   type SeriesMarker,
@@ -42,16 +43,19 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
   const [seriesApi, setSeriesApi] = useState<ISeriesApi<'Candlestick'> | null>(null)
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 })
   const [version, setVersion] = useState(0)
-  const [showMarks, setShowMarks] = useState(true)
-  const [showPatterns, setShowPatterns] = useState(true)
-  const [showStructure, setShowStructure] = useState(true)
-  const [showEMAs, setShowEMAs] = useState(true)
+  const [showMarks, setShowMarks] = useState(false)
+  const [showPatterns, setShowPatterns] = useState(false)
+  const [showStructure, setShowStructure] = useState(false)
+  const [showEMAs, setShowEMAs] = useState(false)
   const [tooltip, setTooltip] = useState<{
     x: number
     y: number
     data: ChartCandle | null
   } | null>(null)
   const fittedRef = useRef(false)
+  const isFollowingRef = useRef(true)
+  const candlesCountRef = useRef(0)
+  const srLinesRef = useRef<IPriceLine[]>([])
 
   const candles = useChartStore((state) => state.candles)
   const fvgs = useChartStore((state) => state.fvgs)
@@ -60,6 +64,8 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
   const structure = useChartStore((state) => state.structure)
   const aiIct = useChartStore((state) => state.aiIct)
   const btcPatterns = useChartStore((state) => state.btcPatterns) ?? DEMO_PATTERNS
+  const regime = useChartStore((state) => state.regime)
+  const projection = useChartStore((state) => state.projection)
 
   const featuredSignals = useMemo<TradeSignal[]>(() => {
     if (!aiIct || aiIct.direction === 'neutral' || aiIct.grade === 'NO_TRADE' || aiIct.entry == null || aiIct.stop_loss == null) {
@@ -202,7 +208,13 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
     const resizeObserver = new ResizeObserver(resize)
     resizeObserver.observe(container)
 
-    chart.timeScale().subscribeVisibleTimeRangeChange(() => setVersion((v) => v + 1))
+    chart.timeScale().subscribeVisibleTimeRangeChange(() => {
+      const visibleRange = chart.timeScale().getVisibleLogicalRange()
+      if (visibleRange?.to !== undefined) {
+        isFollowingRef.current = visibleRange.to >= (candlesCountRef.current - 2)
+      }
+      setVersion((v) => v + 1)
+    })
 
     // ── Crosshair tooltip ──
     const tooltipEl = tooltipRef.current
@@ -227,6 +239,8 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
 
     return () => {
       resizeObserver.disconnect()
+      srLinesRef.current.forEach((line) => seriesRef.current?.removePriceLine(line))
+      srLinesRef.current = []
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -241,19 +255,48 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
     }
   }, [])
 
+  const prevCandlesRef = useRef<typeof candles>([])
+  const lastCandleRef = useRef<ChartCandle | null>(null)
+
   // ─── Candle + volume updates ───────────────────────────
   useEffect(() => {
     if (!seriesRef.current || candles.length === 0) return
-    seriesRef.current.setData(candles)
-    volumeRef.current?.setData(
-      candles.map((c) => ({ time: c.time, value: c.volume, color: c.close >= c.open ? 'rgba(54,199,165,0.3)' : 'rgba(241,97,109,0.3)' }))
-    )
-    if (!fittedRef.current) {
-      const from = Math.max(0, candles.length - INITIAL_VISIBLE_BARS)
-      chartRef.current?.timeScale().setVisibleLogicalRange({ from, to: candles.length + RIGHT_OFFSET_BARS })
-      fittedRef.current = true
+
+    const prev = prevCandlesRef.current
+    const lastNew = candles[candles.length - 1]
+    const lastPrev = prev[prev.length - 1]
+    const isSameBar = prev.length > 0 && lastPrev && lastNew && lastNew.time === lastPrev.time
+
+    candlesCountRef.current = candles.length
+
+    if (isSameBar) {
+      seriesRef.current.update(lastNew)
+      volumeRef.current?.update({
+        time: lastNew.time,
+        value: lastNew.volume,
+        color: lastNew.close >= lastNew.open ? 'rgba(54,199,165,0.3)' : 'rgba(241,97,109,0.3)',
+      })
+      if (isFollowingRef.current) {
+        chartRef.current?.timeScale().scrollToRealTime()
+      }
+    } else {
+      seriesRef.current.setData(candles)
+      volumeRef.current?.setData(
+        candles.map((c) => ({ time: c.time, value: c.volume, color: c.close >= c.open ? 'rgba(54,199,165,0.3)' : 'rgba(241,97,109,0.3)' }))
+      )
+      if (!fittedRef.current || prev.length < candles.length || isFollowingRef.current) {
+        const from = Math.max(0, candles.length - INITIAL_VISIBLE_BARS)
+        chartRef.current?.timeScale().setVisibleLogicalRange({ from, to: candles.length + RIGHT_OFFSET_BARS })
+        fittedRef.current = true
+      }
     }
-    setVersion((v) => v + 1)
+
+    prevCandlesRef.current = candles
+    lastCandleRef.current = lastNew
+    candlesCountRef.current = candles.length
+    if (candles.length !== prev.length) {
+      setVersion((v) => v + 1)
+    }
   }, [candles])
 
   // ─── Signal markers ────────────────────────────────────
@@ -303,6 +346,48 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
     ema23Ref.current?.setData(ema23Data)
     ema99Ref.current?.setData(ema99Data)
   }, [showEMAs, candles])
+
+  // ─── Support/Resistance price lines ───────────────────
+  const fallbackSR = useMemo(() => {
+    const recent = candles.slice(-48)
+    if (recent.length < 5) return null
+    const high = Math.max(...recent.map((c) => c.high))
+    const low = Math.min(...recent.map((c) => c.low))
+    const close = recent[recent.length - 1].close
+    const pivot = (high + low + close) / 3
+    return {
+      resistance: +(high - (pivot - low) + pivot).toFixed(1),
+      support: +(low - (high - pivot) + pivot).toFixed(1),
+      projected_high: +(pivot + (high - low)).toFixed(1),
+      projected_low: +(pivot - (high - low)).toFixed(1),
+    }
+  }, [candles])
+
+  useEffect(() => {
+    srLinesRef.current.forEach((line) => seriesRef.current?.removePriceLine(line))
+    srLinesRef.current = []
+    if (!seriesRef.current) return
+
+    const entries: { price: number; color: string; title: string }[] = []
+
+    const ph = projection?.expected_high ?? fallbackSR?.projected_high
+    const rh = regime?.range_high
+    const rl = regime?.range_low
+    const pl = projection?.expected_low ?? fallbackSR?.projected_low
+
+    if (ph != null)
+      entries.push({ price: ph, color: '#ff5b6b', title: 'PH' })
+    if (rh != null && rh !== ph)
+      entries.push({ price: rh, color: '#f59f43', title: 'RH' })
+    if (rl != null && rl !== pl)
+      entries.push({ price: rl, color: '#1fe3a3', title: 'RL' })
+    if (pl != null)
+      entries.push({ price: pl, color: '#45b7d1', title: 'PL' })
+
+    srLinesRef.current = entries.map((e) =>
+      seriesRef.current!.createPriceLine(e),
+    )
+  }, [regime, projection, fallbackSR])
 
   // ─── Right-click reset ─────────────────────────────────
   const handleContextMenu = useCallback((e: React.MouseEvent) => {

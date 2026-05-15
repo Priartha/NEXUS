@@ -6,7 +6,7 @@ networks:
 
 services:
   nginx:
-    image: nginx:alpine
+    image: nginx:stable-alpine
     ports:
       - "80:80"
     volumes:

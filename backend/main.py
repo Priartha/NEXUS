@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from dotenv import load_dotenv
+load_dotenv()
 import logging
 import logging.config
 import time
@@ -33,7 +35,6 @@ from backend.storage import repository as repo
 from backend.analysis.backtest import BacktestEngine
 from backend.analysis.market_structure import detect_structure
 from backend.analysis.paper_trading import PaperTradingEngine
-from backend.analysis.volume_profile import compute_volume_profile
 
 paper_trading = PaperTradingEngine()
 
@@ -80,6 +81,7 @@ logging.config.dictConfig(LOGGING_CONFIG)
 limiter = Limiter(key_func=get_remote_address)
 manager = ConnectionManager()
 logger = logging.getLogger("backend")
+app_loop: asyncio.AbstractEventLoop | None = None
 
 class ErrorResponse(BaseModel):
     error_code: str
@@ -110,6 +112,21 @@ stores = {
 }
 def _pipeline_alert_handler(alert: dict) -> None:
     logger.info(f"Alert: {alert.get('title', '')}")
+    if app_loop is None or app_loop.is_closed():
+        logger.warning("Alert broadcast skipped because the app loop is not ready")
+        return
+
+    def _log_failure(done: asyncio.Task) -> None:
+        try:
+            done.result()
+        except Exception:
+            logger.exception("Alert broadcast failed")
+
+    def _schedule() -> None:
+        task = app_loop.create_task(manager.broadcast({"update_type": "alert", **alert}))
+        task.add_done_callback(_log_failure)
+
+    app_loop.call_soon_threadsafe(_schedule)
 
 pipelines = {
     timeframe: AnalysisPipeline(
@@ -136,6 +153,8 @@ def require_api_key(request: Request, x_api_key: str | None = Header(default=Non
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global app_loop
+    app_loop = asyncio.get_running_loop()
     init_db()
     if settings.market_data_provider.lower() == "binance":
         stream_task = asyncio.create_task(start_binance_stream(manager, stores, pipelines, settings))
@@ -264,7 +283,7 @@ async def health() -> dict:
 
 @dataclass
 class BacktestRequest:
-    symbol: str = "BTC/USDT"
+    symbol: str = "BTCUSDT"
     timeframe: str = "5m"
     candle_count: int = 500
     initial_balance: float = 10_000.0
@@ -273,6 +292,7 @@ class BacktestRequest:
 
 @app.post("/backtest/run")
 async def run_backtest(body: BacktestRequest) -> dict:
+    _valid_timeframe(body.timeframe)
     engine = BacktestEngine(
         initial_balance=body.initial_balance,
         position_size_pct=body.position_size_pct,
@@ -320,17 +340,6 @@ async def paper_trade_stats() -> dict:
     return repo.get_paper_trade_stats()
 
 
-# ─── Volume Profile ───────────────────────────────────────
-
-@app.get("/volume-profile")
-async def volume_profile(tf: str = Query(default=settings.timeframe),
-                         candles: int = Query(default=100, le=500)) -> dict:
-    tf = _valid_timeframe(tf)
-    store = stores[tf]
-    cs = store.get_chart_candles()[-candles:]
-    return compute_volume_profile(cs)
-
-
 # ─── MTF Confluence ─────────────────────────────────────
 
 @app.get("/mtf-confluence")
@@ -341,7 +350,7 @@ async def mtf_confluence() -> dict:
         pipe = pipelines[tf]
         candles = store.get_chart_candles()
         closed = store.get_closed_candles()
-        pipe.run(store, force_full=False)
+        await pipe.run_async(store, force_full=False)
         sw = to_wire(pipe.swings[-40:])
         ml = to_wire(pipe.metrics)
         reg = to_wire(pipe.regime)
@@ -387,21 +396,19 @@ async def get_journal(trade_id: str | None = None) -> list[dict]:
 
 
 @app.get("/snapshot")
-@limiter.limit("30/minute")
 async def snapshot(
     request: Request,
     tf: str = Query(default=settings.timeframe),
-    _authorized: None = Depends(require_api_key),
 ) -> dict:
     if tf not in supported_timeframes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {tf}. Supported: {list(supported_timeframes)}")
     timeframe = tf
-    payload = pipelines[timeframe].snapshot(stores[timeframe])
+    payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
     return _attach_realtime_context(payload, timeframe)
 
 
 @app.get("/sentiment")
-async def sentiment(request: Request, _authorized: None = Depends(require_api_key)) -> dict:
+async def sentiment(request: Request) -> dict:
     return to_wire(sentiment_service.current)
 
 
@@ -414,7 +421,7 @@ async def ai_ict(
     if tf not in supported_timeframes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {tf}. Supported: {list(supported_timeframes)}")
     timeframe = tf
-    payload = pipelines[timeframe].snapshot(stores[timeframe])
+    payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
     review = ai_ict_reviews.get(timeframe)
     if review is None or not _review_matches_payload(review, payload):
         review = ai_ict_service.local_review(payload, sentiment_service.current)
@@ -431,16 +438,21 @@ async def chart_ws(websocket: WebSocket, tf: str = settings.timeframe, api_key: 
     timeframe = _valid_timeframe(tf)
     await manager.connect(websocket, timeframe=timeframe)
     try:
-        payload = pipelines[timeframe].snapshot(stores[timeframe])
+        payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
         payload = _attach_realtime_context(payload, timeframe)
         await websocket.send_json(payload)
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for timeframe {timeframe}")
-        await manager.disconnect(websocket)
+    except RuntimeError as exc:
+        if "close message has been sent" in str(exc):
+            logger.info(f"WebSocket disconnected during send for timeframe {timeframe}")
+        else:
+            logger.error(f"WebSocket runtime error for timeframe {timeframe}: {exc}", exc_info=True)
     except Exception as e:
         logger.error(f"WebSocket error for timeframe {timeframe}: {e}", exc_info=True)
+    finally:
         await manager.disconnect(websocket)
 
 
@@ -508,7 +520,7 @@ async def refresh_ai_ict_loop() -> None:
 
 
 async def refresh_ai_ict_timeframe(timeframe: str) -> None:
-    payload = pipelines[timeframe].snapshot(stores[timeframe])
+    payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
     if _payload_analysis_timestamp(payload) is None or payload.get("metrics") is None:
         return
     _attach_options_context(payload)
@@ -559,10 +571,10 @@ async def refresh_options_loop() -> None:
             option_tickers_error = None
         except Exception as exc:
             option_tickers_error = str(exc)
-            logger.exception("options refresh failed")
+            logger.warning("Options refresh failed: %s", exc)
 
         for timeframe in supported_timeframes:
-            payload = pipelines[timeframe].snapshot(stores[timeframe])
+            payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
             _attach_options_context(payload)
             await manager.broadcast(
                 {

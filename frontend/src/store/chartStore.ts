@@ -23,7 +23,6 @@ import {
   type StructureLabel,
   type Swing,
   type TradeSignal,
-  type VolumeProfile,
   toChartCandle,
 } from '../types/market'
 
@@ -48,7 +47,6 @@ interface ChartStore {
   btcPatterns: BtcPatternContext | null
   stats: MarketStats | null
   paperTrading: PaperTradeStats | null
-  volumeProfile: VolumeProfile | null
   mtfConfluence: Record<string, MtfSnapshot> | null
   availableTimeframes: string[]
   selectedTimeframe: string
@@ -60,7 +58,6 @@ interface ChartStore {
   lastUpdateType: string
   setTimeframe: (timeframe: string) => void
   setConnectionStatus: (status: ConnectionStatus) => void
-  setVolumeProfile: (vp: VolumeProfile | null) => void
   setMtfConfluence: (mtf: Record<string, MtfSnapshot> | null) => void
   applyMessage: (message: MarketMessage) => void
 }
@@ -102,7 +99,6 @@ export const useChartStore = create<ChartStore>((set) => ({
   btcPatterns: null,
   stats: null,
   paperTrading: null,
-  volumeProfile: null,
   mtfConfluence: null,
   availableTimeframes: ['1m', '5m', '15m', '1h'],
   selectedTimeframe: '5m',
@@ -134,11 +130,11 @@ export const useChartStore = create<ChartStore>((set) => ({
       optionsContext: null,
       orderbook: null,
       stats: null,
+      mtfConfluence: null,
       feedStatus: state.selectedTimeframe === timeframe ? state.feedStatus : 'switching',
     })),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
-  setVolumeProfile: (vp) => set({ volumeProfile: vp }),
   setMtfConfluence: (mtf) => set({ mtfConfluence: mtf }),
 
   applyMessage: (message) =>
@@ -176,6 +172,19 @@ export const useChartStore = create<ChartStore>((set) => ({
         next.candles = message.candles.map(toChartCandle).slice(-700)
       } else if (message.candle) {
         next.candles = upsertCandle(state.candles, message.candle)
+      }
+
+      // Update live candle close with latest quote
+      if (message.quote && state.candles.length > 0) {
+        const lastCandle = state.candles[state.candles.length - 1]
+        if (!lastCandle.isClosed) {
+          const price = message.quote.last_trade || message.quote.mid || message.quote.mark_price
+          if (price && price !== lastCandle.close) {
+            console.log('Updating live candle close from', lastCandle.close, 'to', price)
+            const updatedCandle = { ...lastCandle, close: price }
+            next.candles = [...state.candles.slice(0, -1), updatedCandle]
+          }
+        }
       }
 
       if (message.candle) next.lastApiCandle = message.candle

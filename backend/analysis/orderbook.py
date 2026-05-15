@@ -32,6 +32,7 @@ class OrderbookAnalyzer:
         self.spread_dynamics: list[SpreadDynamics] = []
         self.depth_levels: list[OrderbookDepthLevel] = []
         self.accumulations: list[OrderbookAccumulation] = []
+        self._max_stored = 5000
 
     def add_quote(self, quote: MarketQuote) -> None:
         """Add a new market quote to the analyzer."""

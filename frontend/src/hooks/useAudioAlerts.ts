@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import type { Alert } from '../types/market'
 
 let ctx: AudioContext | null = null
 function getCtx(): AudioContext {
@@ -35,7 +36,7 @@ export function useAudioAlerts() {
       if (cancelled) return
       try {
         const res = await fetch('/alerts?unread_only=true&limit=5')
-        const alerts: any[] = await res.json()
+        const alerts: Alert[] = await res.json()
         const highSev = alerts.filter(
           (a) => (a.severity === 'high' || a.severity === 'critical') && a.timestamp > lastAlertTs.current
         )

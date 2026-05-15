@@ -20,6 +20,29 @@ logs/
 # Runtime database
 data/
 
+# Local scratch / imported repos
+_*.ps1
+_*.bat
+bt_*.json
+backend/_check_*.py
+backend/check_import.py
+backend/run.bat
+maverick-mcp/
+scripts/_*.ps1
+scripts/_*.py
+scripts/_*.bat
+scripts/debug_historical_seed.py
+scripts/fix-start.ps1
+scripts/fix-stop.ps1
+scripts/go-live.ps1
+scripts/kill-all.ps1
+scripts/launch.cmd
+scripts/restart-backend.ps1
+scripts/start-live.ps1
+scripts/test-frontend.ps1
+scripts/test-live.ps1
+scripts/test-nexus-status.ps1
+
 # Local environment
 .env
 .env.*

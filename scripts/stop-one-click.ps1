@@ -48,7 +48,7 @@ function Stop-ProjectProcesses() {
 
 Stop-PidFile "backend"
 Stop-PidFile "frontend"
-Stop-ProjectListener 8000 "uvicorn"
+Stop-ProjectListener 8080 "uvicorn"
 Stop-ProjectListener 5173 "vite"
 Stop-ProjectProcesses
 

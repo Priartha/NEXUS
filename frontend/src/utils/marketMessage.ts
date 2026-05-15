@@ -353,6 +353,9 @@ const MessageSchema = z.union([
 ])
 
 export function parseMarketMessage(value: unknown): MarketMessage | null {
+  // Silently skip update_type values not declared in the schema (e.g. "alert")
+  const maybe = value as Record<string, unknown> | null
+  if (maybe?.update_type === 'alert') return null
   const result = MessageSchema.safeParse(value)
   if (result.success) {
     return result.data as MarketMessage

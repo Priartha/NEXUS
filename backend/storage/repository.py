@@ -158,13 +158,15 @@ def save_backtest_run(run: dict) -> None:
         conn.execute("""
             INSERT OR REPLACE INTO backtest_runs
             (id, symbol, timeframe, start_date, end_date, candle_count,
+             initial_balance, final_balance,
              total_trades, winning_trades, losing_trades, total_pnl,
              total_pnl_pct, max_drawdown, max_drawdown_pct, sharpe_ratio,
              win_rate, avg_win, avg_loss, profit_factor, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             run["id"], run["symbol"], run["timeframe"],
             run["start_date"], run["end_date"], run["candle_count"],
+            run.get("initial_balance", 10000.0), run.get("final_balance"),
             run.get("total_trades", 0), run.get("winning_trades", 0),
             run.get("losing_trades", 0), run.get("total_pnl", 0.0),
             run.get("total_pnl_pct", 0.0), run.get("max_drawdown", 0.0),

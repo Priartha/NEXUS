@@ -375,6 +375,9 @@ export interface MarketStats {
   signals: number
   btc_patterns?: number
   btc_behaviors?: number
+  ob_imbalances?: number
+  ob_spread_anomalies?: number
+  ob_accumulations?: number
 }
 
 export interface MarketMessage {
@@ -452,6 +455,7 @@ export interface BacktestRun {
   candle_count: number
   initial_balance: number
   final_balance: number
+  created_at?: number
   total_pnl: number
   total_pnl_pct: number
   total_trades: number
@@ -497,24 +501,10 @@ export interface MtfSnapshot {
   order_blocks: OrderBlock[]
   liquidity: LiquidityLevel[]
   structure: StructureLabel[]
-  swings: any[]
+  swings: Swing[]
   metrics: MarketMetrics | null
   regime: MarketRegime | null
   current_price: number | null
-}
-
-export interface VolumeProfile {
-  bins: Array<{
-    price: number
-    volume: number
-    is_poc: boolean
-    is_value_area: boolean
-  }>
-  poc: number | null
-  poc_volume: number
-  value_area_low: number | null
-  value_area_high: number | null
-  total_volume: number
 }
 
 export interface Alert {
@@ -525,7 +515,7 @@ export interface Alert {
   symbol?: string | null
   title: string
   message?: string | null
-  data?: any
+  data?: unknown
   acknowledged: number
 }
 

@@ -37,8 +37,9 @@ async def seed_historical(
         limit=config.history_seed_candles,
     )
     store.seed(candles, now_ms=int(time.time() * 1000))
-    pipeline.run(store, force_full=True)
-    await manager.broadcast(pipeline.snapshot(store), timeframe=store.timeframe)
+    await pipeline.run_async(store, force_full=True)
+    payload = pipeline.snapshot(store)
+    await manager.broadcast(payload, timeframe=store.timeframe)
 
 
 async def seed_all_historical(
@@ -76,6 +77,7 @@ async def start_delta_stream(
     await seed_all_historical(stores, pipelines, manager, config)
 
     backoff = config.ws_reconnect_initial_seconds
+    last_quote_key: tuple[float | None, ...] | None = None
     while True:
         try:
             logger.info(f"Connecting to Delta WebSocket: {config.ws_url}")
@@ -132,6 +134,10 @@ async def start_delta_stream(
                         continue
                     quote = parse_quote_message(message, config.symbol)
                     if quote is not None:
+                        quote_key = _quote_key(quote)
+                        if quote_key == last_quote_key:
+                            continue
+                        last_quote_key = quote_key
                         logger.debug(f"Parsed quote: {quote}")
                         # Feed quote to all pipelines for orderbook analysis
                         for pipeline in pipelines.values():
@@ -171,9 +177,11 @@ async def start_delta_stream(
                     for timeframe, store in stores.items():
                         candle_closed = store.update_tick(tick.price, tick.qty, tick.timestamp_ms)
                         if candle_closed:
+                            pipeline = pipelines[timeframe]
+                            result = await pipeline.run_async(store)
                             timeframe_updates.append(
                                 asyncio.create_task(
-                                    manager.broadcast(pipelines[timeframe].run(store), timeframe=timeframe)
+                                    manager.broadcast(result, timeframe=timeframe)
                                 )
                             )
                         elif store.live_candle is not None:
@@ -196,7 +204,7 @@ async def start_delta_stream(
             logger.info("Delta stream cancelled")
             raise
         except Exception as exc:
-            logger.error(f"Delta WebSocket error: {exc}", exc_info=True)
+            logger.warning("Delta WebSocket disconnected: %s", exc)
             await manager.broadcast(
                             {
                                 "update_type": "status",
@@ -294,3 +302,14 @@ def _optional_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _quote_key(quote: MarketQuote) -> tuple[float | None, ...]:
+    return (
+        quote.bid,
+        quote.ask,
+        quote.mid,
+        quote.last_trade,
+        quote.mark_price,
+        quote.spot_price,
+    )

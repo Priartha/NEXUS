@@ -18,8 +18,9 @@ class Settings:
     market_data_provider: str = os.getenv("ICT_MARKET_DATA_PROVIDER", "binance")
     rest_base_url: str = os.getenv("ICT_REST_BASE_URL", os.getenv("DELTA_REST_BASE_URL", "https://api.india.delta.exchange"))
     ws_url: str = os.getenv("ICT_WS_URL", os.getenv("DELTA_WS_URL", "wss://public-socket.india.delta.exchange"))
-    market_data_rest_base_url: str = os.getenv("ICT_MARKET_DATA_REST_BASE_URL", os.getenv("ICT_REST_BASE_URL", os.getenv("DELTA_REST_BASE_URL", "https://api.binance.com")))
-    market_data_ws_url: str = os.getenv("ICT_MARKET_DATA_WS_URL", os.getenv("ICT_WS_URL", os.getenv("DELTA_WS_URL", "wss://stream.binance.com:9443")))
+    market_data_rest_base_url: str = os.getenv("ICT_MARKET_DATA_REST_BASE_URL", "https://api.binance.com")
+    market_data_ws_url: str = os.getenv("ICT_MARKET_DATA_WS_URL", "wss://stream.binance.com:9443")
+    market_data_rest_poll_seconds: float = float(os.getenv("ICT_MARKET_DATA_REST_POLL_SECONDS", "1"))
     options_rest_base_url: str = os.getenv("ICT_OPTIONS_REST_BASE_URL", os.getenv("DELTA_REST_BASE_URL", "https://api.india.delta.exchange"))
     ws_reconnect_initial_seconds: float = float(os.getenv("ICT_WS_RECONNECT_INITIAL_SECONDS", "2"))
     ws_reconnect_max_seconds: float = float(os.getenv("ICT_WS_RECONNECT_MAX_SECONDS", "30"))
@@ -49,6 +50,7 @@ class Settings:
         if origin.strip()
     )
     api_key: str = os.getenv("ICT_API_KEY", "")
+    log_level: str = os.getenv("ICT_LOG_LEVEL", "INFO")
 
 
 settings = Settings()

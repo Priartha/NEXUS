@@ -134,22 +134,78 @@ if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
 
 Stop-PidFile "backend"
 Stop-PidFile "frontend"
-Stop-ProjectListener 8000 "uvicorn"
+Stop-ProjectListener 8080 "uvicorn"
 Stop-ProjectListener 5173 "vite"
 Stop-ProjectProcesses
 
 Write-Step "Starting backend and frontend"
-$startDirect = Join-Path $PSScriptRoot "start-direct.cmd"
-& cmd.exe /d /s /c ('"' + $startDirect + '"')
-if ($LASTEXITCODE -ne 0) {
-  throw "Failed to start NEXUS. Check logs in $logsDir."
+$backendErrLog = Join-Path $logsDir "backend.err.log"
+$backendOutLog = Join-Path $logsDir "backend.out.log"
+$frontendErrLog = Join-Path $logsDir "frontend.err.log"
+$frontendOutLog = Join-Path $logsDir "frontend.out.log"
+$backendLogDir = Join-Path $root "logs"
+
+Write-Step "Starting backend on port 8080..."
+$env:NEXUS_ROOT = $root
+$startInfo = New-Object System.Diagnostics.ProcessStartInfo
+$startInfo.FileName = $backendPython
+$startInfo.Arguments = "-m uvicorn backend.main:app --host 127.0.0.1 --port 8080"
+$startInfo.WorkingDirectory = $root
+$startInfo.RedirectStandardOutput = $backendOutLog
+$startInfo.RedirectStandardError = $backendErrLog
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$backendProc = [System.Diagnostics.Process]::Start($startInfo)
+Write-Step "Backend PID: $($backendProc.Id)"
+
+Write-Step "Waiting for backend to initialize..."
+$backendReady = $false
+for ($i = 0; $i -lt 90; $i++) {
+  try {
+    $null = Invoke-WebRequest -Uri "http://127.0.0.1:8080/health" -TimeoutSec 1 -UseBasicParsing -ErrorAction SilentlyContinue
+    $backendReady = $true
+    break
+  } catch {}
+  Start-Sleep -Milliseconds 1000
 }
+if (-not $backendReady) {
+  throw "Backend did not become ready. Check $backendLogDir\backend.err.log"
+}
+Write-Step "Backend is live on http://127.0.0.1:8080"
 
-Write-Step "Waiting for backend"
-Wait-ForTcp 8000 "Backend"
+Write-Step "Starting frontend on port 5173..."
+$viteBin = Join-Path $frontendDir "node_modules\vite\bin\vite.js"
+if (-not (Test-Path $viteBin)) {
+  $viteBin = Join-Path $frontendDir "node_modules\.bin\vite.cmd"
+}
+if (-not (Test-Path $viteBin)) {
+  throw "Vite not found. Run 'npm install' in frontend/ first."
+}
+$feStartInfo = New-Object System.Diagnostics.ProcessStartInfo
+$feStartInfo.FileName = "node"
+$feStartInfo.Arguments = "`"$viteBin`" --host 127.0.0.1 --port 5173"
+$feStartInfo.WorkingDirectory = $frontendDir
+$feStartInfo.RedirectStandardOutput = $frontendOutLog
+$feStartInfo.RedirectStandardError = $frontendErrLog
+$feStartInfo.UseShellExecute = $false
+$feStartInfo.CreateNoWindow = $true
+$frontendProc = [System.Diagnostics.Process]::Start($feStartInfo)
+Write-Step "Frontend PID: $($frontendProc.Id)"
 
-Write-Step "Waiting for frontend"
-Wait-ForTcp 5173 "Frontend"
+Write-Step "Waiting for frontend to initialize..."
+$frontendReady = $false
+for ($i = 0; $i -lt 90; $i++) {
+  try {
+    $null = Invoke-WebRequest -Uri "http://127.0.0.1:5173" -TimeoutSec 1 -UseBasicParsing -ErrorAction SilentlyContinue
+    $frontendReady = $true
+    break
+  } catch {}
+  Start-Sleep -Milliseconds 1000
+}
+if (-not $frontendReady) {
+  Write-Step "WARNING: Frontend did not respond yet. It may still be starting."
+}
+Write-Step "Frontend is live on http://127.0.0.1:5173"
 
 Write-Step "Opening app"
 & cmd.exe /d /s /c ('start "" "' + $appUrl + '"')
@@ -157,7 +213,7 @@ Write-Step "Opening app"
 Write-Host ""
 Write-Host "NEXUS is running." -ForegroundColor Green
 Write-Host "App:     $appUrl"
-Write-Host "Backend: http://127.0.0.1:8000"
+Write-Host "Backend: http://127.0.0.1:8080"
 Write-Host "Logs:    $logsDir"
 Write-Host ""
 Write-Host "You can close this window. The app processes will keep running."

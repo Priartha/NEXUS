@@ -18,20 +18,27 @@ if exist ".venv\Scripts\python.exe" (
   exit /b 1
 )
 
-echo [NEXUS] Starting backend...
-start "" /b "%PYTHON%" -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 > "%ROOT%\logs\backend.out.log" 2> "%ROOT%\logs\backend.err.log"
+echo [NEXUS] Starting backend on port 8080...
+start "" /b "%PYTHON%" -m uvicorn backend.main:app --host 127.0.0.1 --port 8080 >> "%ROOT%\logs\backend.out.log" 2>> "%ROOT%\logs\backend.err.log"
 
-echo [NEXUS] Starting frontend...
+echo [NEXUS] Waiting for backend...
+timeout /t 6 >nul
+
+echo [NEXUS] Starting frontend on port 5173 (proxying to 8080)...
 cd /d "%ROOT%\frontend"
 if exist "node_modules\.bin\vite.cmd" (
-  start "" /b node node_modules\vite\bin\vite.js --host 127.0.0.1 --port 5173 > "%ROOT%\logs\frontend.out.log" 2> "%ROOT%\logs\frontend.err.log"
+  start "" /b node node_modules\vite\bin\vite.js --host 127.0.0.1 --port 5173 >> "%ROOT%\logs\frontend.out.log" 2>> "%ROOT%\logs\frontend.err.log"
 ) else if exist "node_modules\.bin\vite" (
-  start "" /b node node_modules\.bin\vite --host 127.0.0.1 --port 5173 > "%ROOT%\logs\frontend.out.log" 2> "%ROOT%\logs\frontend.err.log"
+  start "" /b node node_modules\.bin\vite --host 127.0.0.1 --port 5173 >> "%ROOT%\logs\frontend.out.log" 2>> "%ROOT%\logs\frontend.err.log"
 ) else (
   echo [NEXUS] Frontend packages not installed. Run 'npm install' in frontend/ first.
   exit /b 1
 )
 
-echo [NEXUS] Both servers started. Check logs\ for output.
-echo   Backend: http://127.0.0.1:8000
+echo.
+echo [NEXUS] Both servers started.
+echo   Backend: http://127.0.0.1:8080
 echo   Frontend: http://127.0.0.1:5173
+echo.
+echo Opening browser...
+start "" "http://127.0.0.1:5173"

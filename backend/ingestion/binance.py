@@ -54,8 +54,9 @@ async def seed_historical(
         limit=config.history_seed_candles,
     )
     store.seed(candles, now_ms=int(time.time() * 1000))
-    pipeline.run(store, force_full=True)
-    await manager.broadcast(pipeline.snapshot(store), timeframe=store.timeframe)
+    await pipeline.run_async(store, force_full=True)
+    payload = pipeline.snapshot(store)
+    await manager.broadcast(payload, timeframe=store.timeframe)
 
 
 async def seed_all_historical(
@@ -96,6 +97,7 @@ async def start_binance_stream(
     stream_symbol = _binance_symbol(config.symbol).lower()
     base_ws = config.market_data_ws_url.rstrip("/")
     stream_url = f"{base_ws}/stream?streams={stream_symbol}@trade/{stream_symbol}@bookTicker"
+    last_quote_key: tuple[float | None, ...] | None = None
 
     while True:
         try:
@@ -126,6 +128,10 @@ async def start_binance_stream(
 
                     quote = parse_quote_message(payload, config.symbol)
                     if quote is not None:
+                        quote_key = _quote_key(quote)
+                        if quote_key == last_quote_key:
+                            continue
+                        last_quote_key = quote_key
                         logger.debug(f"Parsed Binance quote: {quote}")
                         for pipeline in pipelines.values():
                             pipeline.add_quote(quote)
@@ -142,53 +148,12 @@ async def start_binance_stream(
                         continue
 
                     logger.debug(f"Parsed Binance trade tick: {tick}")
-                    trade_quote = MarketQuote(
-                        symbol=config.symbol,
-                        timestamp=tick.timestamp_ms,
-                        source="trades",
-                        last_trade=tick.price,
-                        latency_ms=max(0, int(time.time() * 1000) - tick.timestamp_ms),
-                    )
-                    for pipeline in pipelines.values():
-                        pipeline.add_quote(trade_quote)
-                    await manager.broadcast(
-                        {
-                            "update_type": "quote",
-                            "symbol": config.symbol,
-                            "quote": to_wire(trade_quote),
-                        }
-                    )
-
-                    timeframe_updates: list[asyncio.Future] = []
-                    for timeframe, store in stores.items():
-                        candle_closed = store.update_tick(tick.price, tick.qty, tick.timestamp_ms)
-                        if candle_closed:
-                            timeframe_updates.append(
-                                asyncio.create_task(
-                                    manager.broadcast(pipelines[timeframe].run(store), timeframe=timeframe)
-                                )
-                            )
-                        elif store.live_candle is not None:
-                            timeframe_updates.append(
-                                asyncio.create_task(
-                                    manager.broadcast(
-                                        {
-                                            "update_type": "tick",
-                                            "symbol": store.symbol,
-                                            "timeframe": store.timeframe,
-                                            "candle": to_wire(store.live_candle),
-                                        },
-                                        timeframe=timeframe,
-                                    )
-                                )
-                            )
-                    if timeframe_updates:
-                        await asyncio.gather(*timeframe_updates)
+                    await publish_tick(tick, manager, stores, pipelines, config, source="trades")
         except asyncio.CancelledError:
             logger.info("Binance stream cancelled")
             raise
         except Exception as exc:
-            logger.error(f"Binance WebSocket error: {exc}", exc_info=True)
+            logger.warning("Binance WebSocket disconnected: %s", exc)
             await manager.broadcast(
                 {
                     "update_type": "status",
@@ -198,7 +163,7 @@ async def start_binance_stream(
                     "symbol": config.symbol,
                 }
             )
-            await asyncio.sleep(backoff)
+            await poll_rest_quotes_for(backoff, manager, stores, pipelines, config)
             backoff = min(backoff * 1.8, config.ws_reconnect_max_seconds)
 
 
@@ -230,6 +195,95 @@ def parse_trade_message(message: dict, symbol: str) -> TradeTick | None:
         return None
 
     return TradeTick(price=price, qty=qty, timestamp_ms=timestamp_ms)
+
+
+async def publish_tick(
+    tick: TradeTick,
+    manager: ConnectionManager,
+    stores: dict[str, CandleStore],
+    pipelines: dict[str, AnalysisPipeline],
+    config: Settings,
+    source: str,
+) -> None:
+    quote = MarketQuote(
+        symbol=config.symbol,
+        timestamp=tick.timestamp_ms,
+        source=source,
+        last_trade=tick.price,
+        latency_ms=max(0, int(time.time() * 1000) - tick.timestamp_ms),
+    )
+    for pipeline in pipelines.values():
+        pipeline.add_quote(quote)
+    await manager.broadcast(
+        {
+            "update_type": "quote",
+            "symbol": config.symbol,
+            "quote": to_wire(quote),
+        }
+    )
+
+    timeframe_updates: list[asyncio.Future] = []
+    for timeframe, store in stores.items():
+        candle_closed = store.update_tick(tick.price, tick.qty, tick.timestamp_ms)
+        if candle_closed:
+            pipeline = pipelines[timeframe]
+            result = await pipeline.run_async(store)
+            timeframe_updates.append(
+                asyncio.create_task(manager.broadcast(result, timeframe=timeframe))
+            )
+        elif store.live_candle is not None:
+            timeframe_updates.append(
+                asyncio.create_task(
+                    manager.broadcast(
+                        {
+                            "update_type": "tick",
+                            "symbol": store.symbol,
+                            "timeframe": store.timeframe,
+                            "candle": to_wire(store.live_candle),
+                        },
+                        timeframe=timeframe,
+                    )
+                )
+            )
+    if timeframe_updates:
+        await asyncio.gather(*timeframe_updates)
+
+
+async def poll_rest_quotes_for(
+    seconds: float,
+    manager: ConnectionManager,
+    stores: dict[str, CandleStore],
+    pipelines: dict[str, AnalysisPipeline],
+    config: Settings,
+) -> None:
+    deadline = time.monotonic() + max(seconds, config.market_data_rest_poll_seconds)
+    while time.monotonic() < deadline:
+        try:
+            tick = await fetch_live_price_tick(config.market_data_rest_base_url, config.symbol)
+            await publish_tick(tick, manager, stores, pipelines, config, source="ticker")
+        except Exception as exc:
+            import logging
+
+            logging.getLogger("backend").warning("Binance REST live price fallback failed: %s", exc)
+        await asyncio.sleep(max(0.25, config.market_data_rest_poll_seconds))
+
+
+async def fetch_live_price_tick(base_url: str, symbol: str) -> TradeTick:
+    binance_symbol = _binance_symbol(symbol)
+    url = f"{base_url.rstrip('/')}/api/v3/ticker/price"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "NEXUS/1.0",
+    }
+    async with httpx.AsyncClient(timeout=5.0, headers=headers) as client:
+        response = await client.get(url, params={"symbol": binance_symbol})
+        response.raise_for_status()
+        body = response.json()
+
+    price = float(body["price"])
+    if not math.isfinite(price) or price <= 0:
+        raise RuntimeError(f"Invalid Binance ticker price: {body}")
+    return TradeTick(price=price, qty=0.0, timestamp_ms=int(time.time() * 1000))
 
 
 def parse_quote_message(message: dict, symbol: str) -> MarketQuote | None:
@@ -269,6 +323,17 @@ def _optional_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _quote_key(quote: MarketQuote) -> tuple[float | None, ...]:
+    return (
+        quote.bid,
+        quote.ask,
+        quote.mid,
+        quote.last_trade,
+        quote.mark_price,
+        quote.spot_price,
+    )
 
 
 async def fetch_historical_candles(

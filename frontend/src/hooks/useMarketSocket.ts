@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useChartStore } from '../store/chartStore'
 import { parseMarketMessage } from '../utils/marketMessage'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000'
-const WS_URL = import.meta.env.VITE_WS_URL ?? 'ws://127.0.0.1:8000/ws/chart'
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
+const LOCAL_WS_URL = 'ws://127.0.0.1:8080/ws/chart'
+const WS_URL = import.meta.env.VITE_WS_URL
+  ?? (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost' ? LOCAL_WS_URL : '/ws/chart')
 
 export function useMarketSocket() {
   const applyMessage = useChartStore((state) => state.applyMessage)
@@ -13,6 +15,7 @@ export function useMarketSocket() {
   const reconnectTimerRef = useRef<number | null>(null)
   const heartbeatRef = useRef<number | null>(null)
   const retryRef = useRef(1000)
+  const wsReceivedRef = useRef(false)
   const [session, setSession] = useState(0)
 
   const reconnect = useCallback(() => {
@@ -22,6 +25,7 @@ export function useMarketSocket() {
 
   useEffect(() => {
     let cancelled = false
+    wsReceivedRef.current = false
 
     async function loadSnapshot() {
       try {
@@ -29,9 +33,9 @@ export function useMarketSocket() {
         if (!response.ok) throw new Error(`Snapshot failed: ${response.status}`)
         const data = parseMarketMessage(await response.json())
         if (!data) throw new Error('Snapshot payload validation failed')
-        if (!cancelled) applyMessage(data)
+        if (!cancelled && !wsReceivedRef.current) applyMessage(data)
       } catch (error) {
-        if (!cancelled) {
+        if (!cancelled && !wsReceivedRef.current) {
           applyMessage({
             update_type: 'status',
             status: 'snapshot_error',
@@ -67,15 +71,17 @@ export function useMarketSocket() {
     websocket.onopen = () => {
       retryRef.current = 1000
       setConnectionStatus('open')
+      console.log('WebSocket connected to', WS_URL)
       heartbeatRef.current = window.setInterval(() => {
         if (websocket.readyState === WebSocket.OPEN) websocket.send('ping')
       }, 15000)
     }
 
     websocket.onmessage = (event) => {
+      wsReceivedRef.current = true
       try {
         const message = parseMarketMessage(JSON.parse(event.data))
-        if (!message) throw new Error('WebSocket payload validation failed')
+        if (!message) return
         applyMessage(message)
       } catch (error) {
         applyMessage({
@@ -91,6 +97,7 @@ export function useMarketSocket() {
     }
 
     websocket.onclose = () => {
+      console.log('WebSocket closed')
       if (heartbeatRef.current) window.clearInterval(heartbeatRef.current)
       setConnectionStatus('closed')
       scheduleReconnect()

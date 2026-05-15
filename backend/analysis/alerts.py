@@ -24,6 +24,7 @@ def create_alert(
         "title": title,
         "message": message,
         "data": data,
+        "acknowledged": 0,
     }
     repo.save_alert(alert)
     return alert

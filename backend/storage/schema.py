@@ -2,18 +2,29 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import threading
 from pathlib import Path
 
 
 DB_PATH = Path("data") / "nexus.db"
+_local = threading.local()
 
 
 def get_conn() -> sqlite3.Connection:
+    existing = getattr(_local, "_conn", None)
+    if existing is not None:
+        try:
+            existing.execute("SELECT 1")
+            return existing
+        except sqlite3.Error:
+            pass
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    _local._conn = conn
     return conn
 
 
@@ -79,6 +90,8 @@ def init_db() -> None:
             start_date INTEGER NOT NULL,
             end_date INTEGER NOT NULL,
             candle_count INTEGER NOT NULL,
+            initial_balance REAL DEFAULT 10000,
+            final_balance REAL,
             total_trades INTEGER DEFAULT 0,
             winning_trades INTEGER DEFAULT 0,
             losing_trades INTEGER DEFAULT 0,

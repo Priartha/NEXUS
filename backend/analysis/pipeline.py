@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from typing import Any, Callable
 
-from backend.analysis.alerts import check_signal_alert, check_regime_alert
+from backend.analysis.alerts import check_liquidity_alert, check_signal_alert, check_regime_alert
 from backend.analysis.btc_patterns import detect_btc_patterns
 from backend.analysis.fvg_detector import detect_fvgs, update_fvg_fills
 from backend.analysis.institutional import build_price_projection, compute_market_metrics
@@ -14,6 +15,7 @@ from backend.analysis.order_block import detect_order_blocks, update_order_block
 from backend.analysis.orderbook import OrderbookAnalyzer
 from backend.analysis.paper_trading import PaperTradingEngine
 from backend.analysis.regime import detect_market_regime
+from backend.storage import repository as repo
 from backend.analysis.signals import detect_trade_signals
 from backend.analysis.swing_detector import detect_swings
 from backend.engine.candle_store import CandleStore
@@ -72,6 +74,9 @@ class AnalysisPipeline:
 
         self._last_candle_count = 0
 
+        # Thread safety for async execution
+        self._lock = asyncio.Lock()
+
     def add_quote(self, quote: MarketQuote) -> None:
         """Add a market quote for orderbook analysis."""
         self.quote_history.append(quote)
@@ -98,6 +103,16 @@ class AnalysisPipeline:
             self._last_candle_count = len(candles)
         current = store.live_candle or store.latest_closed()
         return self._serialize(store, update_type=update_type, candle=current, include_candles=True)
+
+    async def run_async(self, store: CandleStore, force_full: bool = False) -> dict:
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self.run, store, force_full)
+
+    async def snapshot_async(self, store: CandleStore, update_type: str = "snapshot") -> dict:
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self.snapshot, store, update_type)
 
     def _full_recalculate(self, candles: list[Candle]) -> None:
         if not candles:
@@ -311,9 +326,12 @@ class AnalysisPipeline:
 
         # Paper trading stats
         if self._paper_trading:
-            from backend.storage import repository as repo
             pt_stats = repo.get_paper_trade_stats()
             payload["paper_trading"] = pt_stats
+
+        # Save signals before paper trading (foreign key reference)
+        for sig in signals:
+            repo.save_signal(to_wire(sig))
 
         # Paper trading & alerts
         if self._paper_trading and signals and candle:
@@ -325,6 +343,11 @@ class AnalysisPipeline:
 
         for sig in signals:
             alert = check_signal_alert(to_wire(sig))
+            if alert:
+                self._on_alert(alert)
+
+        for ev in self.liquidity_events:
+            alert = check_liquidity_alert(to_wire(ev))
             if alert:
                 self._on_alert(alert)
 

@@ -180,7 +180,7 @@ class BacktestEngine:
         max_dd_val = max((e["drawdown"] for e in equity), default=0)
         avg_win = sum(r["pnl"] for r in wins) / len(wins) if wins else 0
         avg_loss = abs(sum(r["pnl"] for r in losses) / len(losses)) if losses else 0
-        profit_factor = sum(r["pnl"] for r in wins) / abs(sum(r["pnl"] for r in losses)) if losses and sum(r["pnl"] for r in losses) != 0 else float("inf") if wins else 0
+        profit_factor = sum(r["pnl"] for r in wins) / abs(sum(r["pnl"] for r in losses)) if losses and sum(r["pnl"] for r in losses) != 0 else None if wins else 0
 
         returns = [e["account_balance"] / self.initial_balance - 1 for e in equity]
         avg_return = sum(returns) / len(returns) if returns else 0
@@ -204,7 +204,7 @@ class BacktestEngine:
             "win_rate": round(len(wins) / len(closed), 4) if closed else 0,
             "avg_win": round(avg_win, 2),
             "avg_loss": round(avg_loss, 2),
-            "profit_factor": round(profit_factor, 4) if isinstance(profit_factor, float) else profit_factor,
+            "profit_factor": round(profit_factor, 4) if profit_factor is not None and isinstance(profit_factor, float) else profit_factor,
             "max_drawdown": round(max_dd_val, 2),
             "max_drawdown_pct": round(max_dd, 4),
             "sharpe_ratio": round(sharpe, 4),
