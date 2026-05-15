@@ -158,6 +158,29 @@ export interface MarketMetrics {
   bias_score: number
   expected_move: number
   expected_move_pct: number
+  hurst_exponent: number
+  shannon_entropy: number
+  garch_volatility: number
+  garch_persistence: number
+  kalman_trend: number
+  kalman_trend_strength: number
+  markov_bull_prob: number
+  markov_bear_prob: number
+  markov_regime_certainty: number
+  monte_carlo_var95: number
+  monte_carlo_expected_return: number
+  monte_carlo_max_drawdown: number
+  fourier_dominant_period: number
+  fourier_cycle_strength: number
+  volume_profile_poc: number
+  volume_profile_vah: number
+  volume_profile_val: number
+  volume_profile_imbalance: number
+  return_skewness: number
+  return_kurtosis: number
+  fractal_dimension: number
+  ljung_box_statistic: number
+  autocorrelation_lag1: number
 }
 
 export interface PriceProjection {
@@ -320,6 +343,13 @@ export interface TradeSignal {
   cvar95_loss?: number
   risk_of_ruin?: number
   model: string
+  garch_volatility?: number
+  markov_regime?: string
+  markov_certainty?: number
+  monte_carlo_var95?: number
+  signal_decay?: number
+  bayesian_fused?: boolean
+  bayesian_signal_count?: number
 }
 
 export interface BtcPattern {
@@ -378,6 +408,44 @@ export interface MarketStats {
   ob_imbalances?: number
   ob_spread_anomalies?: number
   ob_accumulations?: number
+}
+
+export interface InstitutionalMetrics {
+  hurst_exponent: number
+  hurst_regime: 'mean_reverting' | 'trending' | 'random'
+  shannon_entropy: number
+  entropy_factor: number
+  garch_volatility: number
+  garch_persistence: number
+  kalman_trend: number
+  kalman_trend_strength: number
+  kalman_prediction_error: number
+  markov_bull_prob: number
+  markov_bear_prob: number
+  markov_transition_prob: number
+  markov_regime_certainty: number
+  monte_carlo_var95: number
+  monte_carlo_expected_return: number
+  monte_carlo_max_drawdown: number
+  monte_carlo_p5: number
+  monte_carlo_p50: number
+  monte_carlo_p95: number
+  fourier_dominant_period: number
+  fourier_cycle_strength: number
+  volume_profile_poc: number
+  volume_profile_vah: number
+  volume_profile_val: number
+  volume_profile_imbalance: number
+  return_skewness: number
+  return_kurtosis: number
+  fractal_dimension: number
+  ljung_box_statistic: number
+  autocorrelation_lag1: number
+  momentum_macd: number
+  momentum_macd_signal: number
+  momentum_macd_histogram: number
+  momentum_roc: number
+  momentum_tsi: number
 }
 
 export interface MarketMessage {
@@ -493,18 +561,6 @@ export interface EquityPoint {
   account_balance: number
   drawdown: number
   drawdown_pct: number
-}
-
-export interface MtfSnapshot {
-  candles: ApiCandle[]
-  fvgs: FVG[]
-  order_blocks: OrderBlock[]
-  liquidity: LiquidityLevel[]
-  structure: StructureLabel[]
-  swings: Swing[]
-  metrics: MarketMetrics | null
-  regime: MarketRegime | null
-  current_price: number | null
 }
 
 export interface Alert {

@@ -79,12 +79,6 @@ class BacktestEngine:
 
             signals = detect_trade_signals(
                 candles=window,
-                swings=swings,
-                structure=structure,
-                fvgs=fvgs,
-                order_blocks=order_blocks,
-                liquidity=liquidity,
-                liquidity_events=liquidity_events,
                 metrics=metrics,
             )
 

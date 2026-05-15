@@ -4,14 +4,9 @@ import asyncio
 from collections import deque
 from typing import Any, Callable
 
-from backend.analysis.alerts import check_liquidity_alert, check_signal_alert, check_regime_alert
+from backend.analysis.alerts import check_signal_alert, check_regime_alert
 from backend.analysis.btc_patterns import detect_btc_patterns
-from backend.analysis.fvg_detector import detect_fvgs, update_fvg_fills
 from backend.analysis.institutional import build_price_projection, compute_market_metrics
-from backend.analysis.liquidity import check_liquidity_sweeps, detect_equal_levels
-from backend.analysis.liquidity_engineering import detect_liquidity_events
-from backend.analysis.market_structure import detect_structure
-from backend.analysis.order_block import detect_order_blocks, update_order_block_breakers
 from backend.analysis.orderbook import OrderbookAnalyzer
 from backend.analysis.paper_trading import PaperTradingEngine
 from backend.analysis.regime import detect_market_regime
@@ -22,19 +17,14 @@ from backend.engine.candle_store import CandleStore
 from backend.models.types import (
     BtcPatternContext,
     Candle,
-    FVG,
-    LiquidityEvent,
-    LiquidityLevel,
     MarketMetrics,
     MarketQuote,
     MarketRegime,
-    OrderBlock,
     OrderbookAccumulation,
     OrderbookDepthLevel,
     OrderbookImbalance,
     PriceProjection,
     SpreadDynamics,
-    StructureLabel,
     Swing,
     TradeSignal,
     to_wire,
@@ -48,10 +38,6 @@ class AnalysisPipeline:
         self.swing_window = swing_window
         self.lookback = lookback
         self.swings: list[Swing] = []
-        self.fvgs: list[FVG] = []
-        self.order_blocks: list[OrderBlock] = []
-        self.liquidity: list[LiquidityLevel] = []
-        self.liquidity_events: list[LiquidityEvent] = []
         self.metrics: MarketMetrics | None = None
         self.projection: PriceProjection | None = None
         self.regime: MarketRegime | None = None
@@ -120,27 +106,18 @@ class AnalysisPipeline:
 
         window = candles[-self.lookback :]
         self.swings = detect_swings(candles, n=self.swing_window)[-250:]
-        self.fvgs = detect_fvgs(window)
-        self.order_blocks = detect_order_blocks(window, self.swings)
-        self.liquidity = detect_equal_levels(self.swings)
-
-        for candle in window:
-            self.fvgs = update_fvg_fills(self.fvgs, candle)
-            self.order_blocks = update_order_block_breakers(self.order_blocks, candle)
-            self.liquidity = check_liquidity_sweeps(self.liquidity, candle)
         self.metrics = compute_market_metrics(candles, self.swings)
-        self.liquidity_events = detect_liquidity_events(window, self.liquidity, self.metrics.atr14 if self.metrics else 0.0)[-80:]
-        self.regime = detect_market_regime(candles, self.metrics, self.liquidity_events)
-        self.projection = build_price_projection(candles, self.metrics, self.liquidity_events)
+        self.regime = detect_market_regime(candles, self.metrics, [])
+        self.projection = build_price_projection(candles, self.metrics, [])
 
         # BTC movement & investor behavior pattern analysis
         self.btc_patterns = detect_btc_patterns(
             candles=window,
             swings=self.swings,
-            fvgs=self.fvgs,
-            order_blocks=self.order_blocks,
-            liquidity=self.liquidity,
-            liquidity_events=self.liquidity_events,
+            fvgs=[],
+            order_blocks=[],
+            liquidity=[],
+            liquidity_events=[],
             metrics=self.metrics,
             regime=self.regime,
         )
@@ -160,30 +137,19 @@ class AnalysisPipeline:
         ]
         if new_swings:
             self.swings = sorted([*self.swings, *new_swings], key=lambda swing: swing.timestamp)[-250:]
-            self._merge_liquidity(detect_equal_levels(self.swings))
 
-        self.fvgs = update_fvg_fills(self.fvgs, latest)
-        if len(candles) >= 3:
-            self._merge_fvgs(detect_fvgs(candles[-3:]))
-
-        self.order_blocks = update_order_block_breakers(self.order_blocks, latest)
-        self._merge_order_blocks(detect_order_blocks(candles[-25:], self.swings))
-        self.liquidity = check_liquidity_sweeps(self.liquidity, latest)
         self.metrics = compute_market_metrics(candles, self.swings)
-        self._merge_liquidity_events(
-            detect_liquidity_events(candles[-8:], self.liquidity, self.metrics.atr14 if self.metrics else 0.0)
-        )
-        self.regime = detect_market_regime(candles, self.metrics, self.liquidity_events)
-        self.projection = build_price_projection(candles, self.metrics, self.liquidity_events)
+        self.regime = detect_market_regime(candles, self.metrics, [])
+        self.projection = build_price_projection(candles, self.metrics, [])
 
         # Incremental BTC pattern analysis
         self.btc_patterns = detect_btc_patterns(
             candles=recent,
             swings=self.swings,
-            fvgs=self.fvgs,
-            order_blocks=self.order_blocks,
-            liquidity=self.liquidity,
-            liquidity_events=self.liquidity_events,
+            fvgs=[],
+            order_blocks=[],
+            liquidity=[],
+            liquidity_events=[],
             metrics=self.metrics,
             regime=self.regime,
         )
@@ -206,30 +172,6 @@ class AnalysisPipeline:
         # Detect new accumulations
         new_accums = self.orderbook_analyzer.detect_accumulation_distribution(candles[-5:])
         self._merge_ob_accumulations(new_accums)
-
-    def _merge_fvgs(self, new_fvgs: list[FVG]) -> None:
-        current = {fvg.id: fvg for fvg in self.fvgs}
-        for fvg in new_fvgs:
-            current.setdefault(fvg.id, fvg)
-        self.fvgs = sorted(current.values(), key=lambda item: item.timestamp)[-150:]
-
-    def _merge_order_blocks(self, new_blocks: list[OrderBlock]) -> None:
-        current = {block.id: block for block in self.order_blocks}
-        for block in new_blocks:
-            current.setdefault(block.id, block)
-        self.order_blocks = sorted(current.values(), key=lambda item: item.timestamp)[-80:]
-
-    def _merge_liquidity(self, new_levels: list[LiquidityLevel]) -> None:
-        current = {level.id: level for level in self.liquidity}
-        for level in new_levels:
-            current.setdefault(level.id, level)
-        self.liquidity = sorted(current.values(), key=lambda item: item.price)[-120:]
-
-    def _merge_liquidity_events(self, new_events: list[LiquidityEvent]) -> None:
-        current = {event.id: event for event in self.liquidity_events}
-        for event in new_events:
-            current.setdefault(event.id, event)
-        self.liquidity_events = sorted(current.values(), key=lambda item: item.timestamp)[-80:]
 
     def _merge_ob_accumulations(self, new_accums: list[OrderbookAccumulation]) -> None:
         current = {accum.id: accum for accum in self.ob_accumulations}
@@ -268,19 +210,8 @@ class AnalysisPipeline:
                     self.ob_accumulations, latest_candle, latest_quote
                 )
 
-        structure: list[StructureLabel] = detect_structure(self.swings, closed_candles)
-        active_fvgs = [fvg for fvg in self.fvgs if not fvg.is_filled][-30:]
-        active_obs = [block for block in self.order_blocks if not block.is_breaker][-20:]
-        active_liquidity = [level for level in self.liquidity if not level.swept][-20:]
-        active_liquidity_events = self.liquidity_events[-20:]
         detected_signals: list[TradeSignal] = detect_trade_signals(
             candles=closed_candles,
-            swings=self.swings,
-            structure=structure,
-            fvgs=self.fvgs,
-            order_blocks=self.order_blocks,
-            liquidity=self.liquidity,
-            liquidity_events=self.liquidity_events,
             metrics=self.metrics,
         )
         signals = _select_primary_signal(detected_signals)
@@ -291,11 +222,6 @@ class AnalysisPipeline:
             "timeframe": store.timeframe,
             "candle": to_wire(candle) if candle else None,
             "swings": to_wire(self.swings[-80:]),
-            "structure": to_wire(structure[-60:]),
-            "fvgs": to_wire(active_fvgs),
-            "order_blocks": to_wire(active_obs),
-            "liquidity": to_wire(active_liquidity),
-            "liquidity_events": to_wire(active_liquidity_events),
             "signals": to_wire(signals),
             "metrics": to_wire(self.metrics),
             "projection": to_wire(self.projection),
@@ -309,10 +235,6 @@ class AnalysisPipeline:
             },
             "stats": {
                 "closed_candles": len(closed_candles),
-                "active_fvgs": len(active_fvgs),
-                "active_order_blocks": len(active_obs),
-                "active_liquidity": len(active_liquidity),
-                "liquidity_events": len(active_liquidity_events),
                 "signals": len(signals),
                 "ob_imbalances": len(self.ob_imbalances),
                 "ob_spread_anomalies": len([d for d in self.ob_spread_dynamics if d.status != "normal"]),
@@ -346,11 +268,6 @@ class AnalysisPipeline:
             if alert:
                 self._on_alert(alert)
 
-        for ev in self.liquidity_events:
-            alert = check_liquidity_alert(to_wire(ev))
-            if alert:
-                self._on_alert(alert)
-
         if self.regime and self.regime.phase != self._last_regime_phase:
             alert = check_regime_alert(self._last_regime_phase, self.regime.phase)
             if alert:
@@ -368,10 +285,9 @@ def _select_primary_signal(signals: list[TradeSignal]) -> list[TradeSignal]:
     primary = max(
         candidates,
         key=lambda signal: (
-            signal.confidence * 0.58
-            + min(signal.risk_reward / 3, 1.0) * 0.18
-            + signal.liquidity_score * 0.14
-            + max(signal.bias_score, 0.0) * 0.1,
+            signal.confidence * 0.6
+            + min(signal.risk_reward / 3, 1.0) * 0.3
+            + signal.win_probability * 0.1,
             signal.timestamp,
         ),
     )

@@ -4,12 +4,10 @@ import {
   ColorType,
   createChart,
   createSeriesMarkers,
-  HistogramSeries,
   LineSeries,
   LineStyle,
   type CrosshairMode,
   type IChartApi,
-  type IPriceLine,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
   type SeriesMarker,
@@ -19,8 +17,6 @@ import {
 import { useChartStore } from '../store/chartStore'
 import { DEMO_PATTERNS, toChartTime, type ChartCandle, type TradeSignal } from '../types/market'
 import { SignalOverlay } from './SignalOverlay'
-import { StructureOverlay } from './StructureOverlay'
-import { ZoneRenderer } from './ZoneRenderer'
 
 type CandleData = { time: Time; open: number; high: number; low: number; close: number }
 type LineData = { time: Time; value: number }
@@ -38,14 +34,11 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
   const ema9Ref = useRef<ISeriesApi<'Line'> | null>(null)
   const ema23Ref = useRef<ISeriesApi<'Line'> | null>(null)
   const ema99Ref = useRef<ISeriesApi<'Line'> | null>(null)
-  const volumeRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const [chartApi, setChartApi] = useState<IChartApi | null>(null)
   const [seriesApi, setSeriesApi] = useState<ISeriesApi<'Candlestick'> | null>(null)
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 })
   const [version, setVersion] = useState(0)
-  const [showMarks, setShowMarks] = useState(false)
   const [showPatterns, setShowPatterns] = useState(false)
-  const [showStructure, setShowStructure] = useState(false)
   const [showEMAs, setShowEMAs] = useState(false)
   const [tooltip, setTooltip] = useState<{
     x: number
@@ -55,17 +48,10 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
   const fittedRef = useRef(false)
   const isFollowingRef = useRef(true)
   const candlesCountRef = useRef(0)
-  const srLinesRef = useRef<IPriceLine[]>([])
 
   const candles = useChartStore((state) => state.candles)
-  const fvgs = useChartStore((state) => state.fvgs)
-  const orderBlocks = useChartStore((state) => state.orderBlocks)
-  const liquidity = useChartStore((state) => state.liquidity)
-  const structure = useChartStore((state) => state.structure)
   const aiIct = useChartStore((state) => state.aiIct)
   const btcPatterns = useChartStore((state) => state.btcPatterns) ?? DEMO_PATTERNS
-  const regime = useChartStore((state) => state.regime)
-  const projection = useChartStore((state) => state.projection)
 
   const featuredSignals = useMemo<TradeSignal[]>(() => {
     if (!aiIct || aiIct.direction === 'neutral' || aiIct.grade === 'NO_TRADE' || aiIct.entry == null || aiIct.stop_loss == null) {
@@ -141,6 +127,8 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
         borderColor: '#1a2230',
         scaleMargins: { top: 0.12, bottom: 0.12 },
         entireTextOnly: true,
+        autoScale: true,
+        invertScale: false,
       },
       timeScale: {
         borderColor: '#1a2230',
@@ -149,14 +137,25 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
         rightOffset: RIGHT_OFFSET_BARS,
         barSpacing: 8,
         minBarSpacing: 3,
+        fixLeftEdge: false,
+        fixRightEdge: false,
+      },
+      handleScroll: {
+        vertTouchDrag: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        mouseWheel: true,
+      },
+      handleScale: {
+        mouseWheel: true,
+        pinch: true,
+        axisPressedMouseMove: { time: true, price: true },
       },
       crosshair: {
         mode: 0 as unknown as CrosshairMode,
         vertLine: { color: '#4a5568', style: LineStyle.Dashed, width: 1, labelBackgroundColor: '#1a202c' },
         horzLine: { color: '#4a5568', style: LineStyle.Dashed, width: 1, labelBackgroundColor: '#1a202c' },
       },
-      handleScroll: { vertTouchDrag: true, pressedMouseMove: true, horzTouchDrag: true },
-      handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
     })
 
     const series = chart.addSeries(CandlestickSeries, {
@@ -179,30 +178,36 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
       color: '#45b7d1', lineWidth: 2, title: 'EMA 99',
     })
 
-    const volumeSeries = chart.addSeries(HistogramSeries, {
-      priceFormat: { type: 'volume' },
-      priceScaleId: 'volume',
-    })
-    chart.priceScale('volume').applyOptions({
-      scaleMargins: { top: 0.8, bottom: 0 },
-    })
-
     chartRef.current = chart
     seriesRef.current = series
     ema9Ref.current = ema9Series
     ema23Ref.current = ema23Series
     ema99Ref.current = ema99Series
-    volumeRef.current = volumeSeries
     markersRef.current = createSeriesMarkers(series, [], { autoScale: true })
     patternMarkersRef.current = createSeriesMarkers(series, [], { autoScale: true })
     setChartApi(chart)
     setSeriesApi(series)
 
+    console.log('[Chart] Chart initialized, series ready')
+
+    // Check if we already have candles in store
+    const storeCandles = useChartStore.getState().candles
+    if (storeCandles.length > 0) {
+      console.log(`[Chart] Store already has ${storeCandles.length} candles, applying immediately`)
+      series.setData(storeCandles)
+      fittedRef.current = true
+    }
+
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const resize = () => {
-      const next = { width: container.clientWidth, height: container.clientHeight }
-      chart.applyOptions({ width: next.width, height: next.height })
-      setDimensions(next)
-      setVersion((v) => v + 1)
+      if (resizeTimer) clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        const next = { width: container.clientWidth, height: container.clientHeight }
+        chart.applyOptions({ width: next.width, height: next.height })
+        setDimensions(next)
+        setVersion((v) => v + 1)
+        resizeTimer = null
+      }, 50)
     }
 
     const resizeObserver = new ResizeObserver(resize)
@@ -213,7 +218,6 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
       if (visibleRange?.to !== undefined) {
         isFollowingRef.current = visibleRange.to >= (candlesCountRef.current - 2)
       }
-      setVersion((v) => v + 1)
     })
 
     // ── Crosshair tooltip ──
@@ -238,16 +242,14 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
     resize()
 
     return () => {
+      if (resizeTimer) clearTimeout(resizeTimer)
       resizeObserver.disconnect()
-      srLinesRef.current.forEach((line) => seriesRef.current?.removePriceLine(line))
-      srLinesRef.current = []
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
       ema9Ref.current = null
       ema23Ref.current = null
       ema99Ref.current = null
-      volumeRef.current = null
       markersRef.current = null
       patternMarkersRef.current = null
       setChartApi(null)
@@ -269,22 +271,13 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
 
     candlesCountRef.current = candles.length
 
+    console.log(`[Chart] ${isSameBar ? 'Updating' : 'Setting'} ${candles.length} candles (prev: ${prev.length})`)
+
     if (isSameBar) {
       seriesRef.current.update(lastNew)
-      volumeRef.current?.update({
-        time: lastNew.time,
-        value: lastNew.volume,
-        color: lastNew.close >= lastNew.open ? 'rgba(54,199,165,0.3)' : 'rgba(241,97,109,0.3)',
-      })
-      if (isFollowingRef.current) {
-        chartRef.current?.timeScale().scrollToRealTime()
-      }
     } else {
       seriesRef.current.setData(candles)
-      volumeRef.current?.setData(
-        candles.map((c) => ({ time: c.time, value: c.volume, color: c.close >= c.open ? 'rgba(54,199,165,0.3)' : 'rgba(241,97,109,0.3)' }))
-      )
-      if (!fittedRef.current || prev.length < candles.length || isFollowingRef.current) {
+      if (!fittedRef.current || prev.length < candles.length) {
         const from = Math.max(0, candles.length - INITIAL_VISIBLE_BARS)
         chartRef.current?.timeScale().setVisibleLogicalRange({ from, to: candles.length + RIGHT_OFFSET_BARS })
         fittedRef.current = true
@@ -347,48 +340,6 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
     ema99Ref.current?.setData(ema99Data)
   }, [showEMAs, candles])
 
-  // ─── Support/Resistance price lines ───────────────────
-  const fallbackSR = useMemo(() => {
-    const recent = candles.slice(-48)
-    if (recent.length < 5) return null
-    const high = Math.max(...recent.map((c) => c.high))
-    const low = Math.min(...recent.map((c) => c.low))
-    const close = recent[recent.length - 1].close
-    const pivot = (high + low + close) / 3
-    return {
-      resistance: +(high - (pivot - low) + pivot).toFixed(1),
-      support: +(low - (high - pivot) + pivot).toFixed(1),
-      projected_high: +(pivot + (high - low)).toFixed(1),
-      projected_low: +(pivot - (high - low)).toFixed(1),
-    }
-  }, [candles])
-
-  useEffect(() => {
-    srLinesRef.current.forEach((line) => seriesRef.current?.removePriceLine(line))
-    srLinesRef.current = []
-    if (!seriesRef.current) return
-
-    const entries: { price: number; color: string; title: string }[] = []
-
-    const ph = projection?.expected_high ?? fallbackSR?.projected_high
-    const rh = regime?.range_high
-    const rl = regime?.range_low
-    const pl = projection?.expected_low ?? fallbackSR?.projected_low
-
-    if (ph != null)
-      entries.push({ price: ph, color: '#ff5b6b', title: 'PH' })
-    if (rh != null && rh !== ph)
-      entries.push({ price: rh, color: '#f59f43', title: 'RH' })
-    if (rl != null && rl !== pl)
-      entries.push({ price: rl, color: '#1fe3a3', title: 'RL' })
-    if (pl != null)
-      entries.push({ price: pl, color: '#45b7d1', title: 'PL' })
-
-    srLinesRef.current = entries.map((e) =>
-      seriesRef.current!.createPriceLine(e),
-    )
-  }, [regime, projection, fallbackSR])
-
   // ─── Right-click reset ─────────────────────────────────
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -402,10 +353,8 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
       switch (e.key.toLowerCase()) {
         case 'r': focusRecent(); break
         case 'f': fitAll(); break
-        case '1': setShowMarks((v) => !v); break
-        case '2': setShowPatterns((v) => !v); break
-        case '3': setShowStructure((v) => !v); break
-        case '4': setShowEMAs((v) => !v); break
+        case '1': setShowPatterns((v) => !v); break
+        case '2': setShowEMAs((v) => !v); break
       }
     }
     window.addEventListener('keydown', handleKey)
@@ -468,20 +417,6 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
       </div>
 
       {/* Overlays */}
-      {showMarks ? (
-        <ZoneRenderer
-          chart={chartApi} series={seriesApi}
-          width={dimensions.width} height={dimensions.height} version={version}
-          fvgs={fvgs.slice(-5)} orderBlocks={orderBlocks.slice(-4)} liquidity={liquidity.slice(-4)}
-        />
-      ) : null}
-      {showStructure ? (
-        <StructureOverlay
-          chart={chartApi} series={seriesApi}
-          width={dimensions.width} height={dimensions.height} version={version}
-          structure={structure.slice(-18)}
-        />
-      ) : null}
       <SignalOverlay
         chart={chartApi} series={seriesApi}
         width={dimensions.width} height={dimensions.height} version={version}
@@ -492,14 +427,8 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
         <button type="button" onClick={resetChart} title="Reset view (right-click)">Fit</button>
         <button type="button" onClick={focusRecent} title="Recent candles (R)">Latest</button>
         <div className="ctrl-sep" />
-        <button type="button" className={showMarks ? 'active' : ''} onClick={() => setShowMarks((v) => !v)}>
-          ICT
-        </button>
         <button type="button" className={showPatterns ? 'active' : ''} onClick={() => setShowPatterns((v) => !v)}>
           Pat.
-        </button>
-        <button type="button" className={showStructure ? 'active' : ''} onClick={() => setShowStructure((v) => !v)}>
-          Struct.
         </button>
         <button type="button" className={showEMAs ? 'active' : ''} onClick={() => setShowEMAs((v) => !v)}>
           EMAs

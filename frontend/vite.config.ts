@@ -8,7 +8,6 @@ export default defineConfig({
     hmr: false,
     proxy: {
       '/ws': { target: 'ws://127.0.0.1:8080', ws: true },
-      '/mtf-confluence': 'http://127.0.0.1:8080',
       '/alerts': 'http://127.0.0.1:8080',
       '/signals': 'http://127.0.0.1:8080',
       '/backtest': 'http://127.0.0.1:8080',
@@ -20,6 +19,7 @@ export default defineConfig({
       '/sentiment': 'http://127.0.0.1:8080',
       '/snapshot': 'http://127.0.0.1:8080',
       '/ai-ict': 'http://127.0.0.1:8080',
+      '/news': 'http://127.0.0.1:8080',
     },
   },
 })

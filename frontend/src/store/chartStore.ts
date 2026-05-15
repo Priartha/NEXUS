@@ -13,7 +13,6 @@ import {
   type MarketQuote,
   type MarketRegime,
   type MarketStats,
-  type MtfSnapshot,
   type OrderBlock,
   type OrderbookData,
   type OptionsContext,
@@ -47,7 +46,6 @@ interface ChartStore {
   btcPatterns: BtcPatternContext | null
   stats: MarketStats | null
   paperTrading: PaperTradeStats | null
-  mtfConfluence: Record<string, MtfSnapshot> | null
   availableTimeframes: string[]
   selectedTimeframe: string
   symbol: string
@@ -58,7 +56,6 @@ interface ChartStore {
   lastUpdateType: string
   setTimeframe: (timeframe: string) => void
   setConnectionStatus: (status: ConnectionStatus) => void
-  setMtfConfluence: (mtf: Record<string, MtfSnapshot> | null) => void
   applyMessage: (message: MarketMessage) => void
 }
 
@@ -99,7 +96,6 @@ export const useChartStore = create<ChartStore>((set) => ({
   btcPatterns: null,
   stats: null,
   paperTrading: null,
-  mtfConfluence: null,
   availableTimeframes: ['1m', '5m', '15m', '1h'],
   selectedTimeframe: '5m',
   symbol: 'BTCUSD',
@@ -130,16 +126,17 @@ export const useChartStore = create<ChartStore>((set) => ({
       optionsContext: null,
       orderbook: null,
       stats: null,
-      mtfConfluence: null,
       feedStatus: state.selectedTimeframe === timeframe ? state.feedStatus : 'switching',
     })),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
-  setMtfConfluence: (mtf) => set({ mtfConfluence: mtf }),
 
   applyMessage: (message) =>
     set((state) => {
-      if (message.update_type === 'status') {
+      const msg = message as Record<string, unknown>
+      const updateType = msg.update_type as string
+
+      if (updateType === 'status') {
         return {
           sentiment: message.sentiment ?? state.sentiment,
           aiIct: message.ai_ict ?? state.aiIct,
@@ -168,22 +165,29 @@ export const useChartStore = create<ChartStore>((set) => ({
         feedMessage: '',
       }
 
-      if (message.candles) {
-        console.log('Applying snapshot:', message.candles.length, 'candles')
-        next.candles = message.candles.map(toChartCandle).slice(-700)
+      // Handle snapshot candles
+      const rawCandles = msg.candles as ApiCandle[] | undefined
+      if (rawCandles && rawCandles.length > 0) {
+        console.log(`[Store] Applying ${rawCandles.length} candles from ${updateType}`)
+        next.candles = rawCandles.map(toChartCandle).slice(-700)
       } else if (message.candle) {
-        next.candles = upsertCandle(state.candles, message.candle)
+        // Single candle update (tick/close)
+        if (state.candles.length === 0) {
+          console.log('[Store] Single candle but no history, skipping')
+        } else {
+          next.candles = upsertCandle(state.candles, message.candle)
+        }
       }
 
-      // Update live candle close with latest quote
-      if (message.quote && state.candles.length > 0) {
-        const lastCandle = state.candles[state.candles.length - 1]
+      // Update live candle close with latest quote - use next.candles if available
+      const currentCandles = next.candles ?? state.candles
+      if (message.quote && currentCandles.length > 0) {
+        const lastCandle = currentCandles[currentCandles.length - 1]
         if (!lastCandle.isClosed) {
           const price = message.quote.last_trade || message.quote.mid || message.quote.mark_price
           if (price && price !== lastCandle.close) {
-            console.log('Updating live candle close from', lastCandle.close, 'to', price)
             const updatedCandle = { ...lastCandle, close: price }
-            next.candles = [...state.candles.slice(0, -1), updatedCandle]
+            next.candles = [...currentCandles.slice(0, -1), updatedCandle]
           }
         }
       }

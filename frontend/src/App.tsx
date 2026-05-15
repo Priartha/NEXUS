@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -19,8 +19,11 @@ import {
 import './App.css'
 import { Chart } from './components/Chart'
 import DepthHeatmap from './components/DepthHeatmap'
+import { InstitutionalMetricsPanel } from './components/InstitutionalMetricsPanel'
+import { MomentumPanel } from './components/MomentumPanel'
+import { RiskAnalyticsPanel } from './components/RiskAnalyticsPanel'
+import { BtcHeadlinesCorner } from './components/BtcHeadlinesCorner'
 
-import MtfConfluence from './components/MtfConfluence'
 import AlertsPanel from './components/AlertsPanel'
 import BacktestPanel from './components/BacktestPanel'
 import PaperTradingPanel from './components/PaperTradingPanel'
@@ -33,7 +36,7 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'mtf' | 'alerts' | 'backtest' | 'trades'
+type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum'
 
 const SESSION_COLORS: Record<string, string> = {
   asian: '#8ab4f8',
@@ -73,8 +76,6 @@ function App() {
   const feedStatus = useChartStore((state) => state.feedStatus)
   const feedMessage = useChartStore((state) => state.feedMessage)
   const stats = useChartStore((state) => state.stats)
-  const mtfConfluence = useChartStore((state) => state.mtfConfluence)
-  const setMtfConfluence = useChartStore((state) => state.setMtfConfluence)
   const orderbook = useChartStore((state) => state.orderbook)
 
   const ctx = btcPatterns ?? DEMO_PATTERNS
@@ -155,23 +156,6 @@ function App() {
   const srSupport = regime?.range_low ?? projection?.expected_low ?? fallbackSR?.support
   const srProjectedHigh = projection?.expected_high ?? fallbackSR?.projected_high
   const srProjectedLow = projection?.expected_low ?? fallbackSR?.projected_low
-
-  // ─── MTF Confluence fetch ───────────────────────────
-  useEffect(() => {
-    let cancelled = false
-    const fetchConfluence = () => {
-      fetch('/mtf-confluence')
-        .then((r) => r.json())
-        .then((data) => { if (!cancelled) setMtfConfluence(data) })
-        .catch(() => {})
-    }
-    fetchConfluence()
-    const interval = window.setInterval(fetchConfluence, 2000)
-    return () => {
-      cancelled = true
-      window.clearInterval(interval)
-    }
-  }, [setMtfConfluence])
 
   return (
     <main className="terminal">
@@ -297,7 +281,7 @@ function App() {
         {panelOpen && (
         <aside className="side-panel">
           <div className="panel-switch">
-            {(['signals', 'patterns', 'options', 'depth', 'mtf', 'trades', 'alerts', 'backtest'] as const).map((view) => (
+            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'trades', 'alerts', 'backtest'] as const).map((view) => (
               <button
                 key={view}
                 className={panelView === view ? 'active' : ''}
@@ -317,10 +301,12 @@ function App() {
                   </>
                 )}
                 {view === 'depth' && 'Depth'}
-                {view === 'mtf' && 'MTF'}
                 {view === 'trades' && 'Paper'}
                 {view === 'alerts' && 'Alerts'}
                 {view === 'backtest' && 'BT'}
+                {view === 'institutional' && 'Inst.'}
+                {view === 'risk' && 'Risk'}
+                {view === 'momentum' && 'Momentum'}
               </button>
             ))}
           </div>
@@ -651,16 +637,6 @@ function App() {
             </div>
           )}
 
-          {/* ─── MTF TAB ─────────────────────────────── */}
-          {panelView === 'mtf' && (
-            <div className="panel-content">
-              <section>
-                <h2><BarChart3 size={13} /> MTF Confluence</h2>
-                <MtfConfluence data={mtfConfluence} />
-              </section>
-            </div>
-          )}
-
           {/* ─── TRADES (Paper Trading) TAB ──────────── */}
           {panelView === 'trades' && (
             <div className="panel-content">
@@ -689,6 +665,24 @@ function App() {
           )}
 
           {/* ─── DEPTH TAB ──────────────────────────── */}
+          {panelView === 'institutional' && (
+            <div className="panel-content">
+              <InstitutionalMetricsPanel />
+            </div>
+          )}
+
+          {panelView === 'risk' && (
+            <div className="panel-content">
+              <RiskAnalyticsPanel />
+            </div>
+          )}
+
+          {panelView === 'momentum' && (
+            <div className="panel-content">
+              <MomentumPanel />
+            </div>
+          )}
+
           {panelView === 'depth' && (
             <div className="panel-content">
               <section>
@@ -780,6 +774,9 @@ function App() {
         </aside>
         )}
       </section>
+
+      {/* ─── BTC LIVE HEADLINES ────────────────────── */}
+      <BtcHeadlinesCorner />
     </main>
   )
 }

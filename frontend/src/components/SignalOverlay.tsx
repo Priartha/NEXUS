@@ -20,14 +20,6 @@ interface SignalLine {
   width: number
 }
 
-interface SignalBadge {
-  id: string
-  className: string
-  label: string
-  top: number
-  left: number
-}
-
 export function SignalOverlay({ chart, series, width, height, version, signals }: SignalOverlayProps) {
   void version
 
@@ -37,7 +29,6 @@ export function SignalOverlay({ chart, series, width, height, version, signals }
   const candleSeries = series
   const timeScale = chartApi.timeScale()
   const lines: SignalLine[] = []
-  const badges: SignalBadge[] = []
 
   function xFor(timestamp: number) {
     const coordinate = timeScale.timeToCoordinate(toChartTime(timestamp))
@@ -75,18 +66,6 @@ export function SignalOverlay({ chart, series, width, height, version, signals }
     addLine(signal, 'entry', signal.entry)
     addLine(signal, 'exit', signal.exit_price)
     addLine(signal, 'sl', signal.trailing_stop ?? signal.stop_loss)
-
-    const x = xFor(signal.timestamp)
-    const y = yFor(signal.entry)
-    if (x !== null && y !== null) {
-      badges.push({
-        id: signal.id,
-        className: `signal-badge ${signal.side}`,
-        label: `${signal.side.toUpperCase()} ${(signal.confidence * 100).toFixed(0)}%`,
-        top: Math.max(12, Math.min(height - 28, y - 16)),
-        left: Math.max(12, Math.min(width - 120, x + 8)),
-      })
-    }
   })
 
   return (
@@ -102,11 +81,6 @@ export function SignalOverlay({ chart, series, width, height, version, signals }
           }}
         >
           <span>{line.label}</span>
-        </div>
-      ))}
-      {badges.map((badge) => (
-        <div key={badge.id} className={badge.className} style={{ top: badge.top, left: badge.left }}>
-          {badge.label}
         </div>
       ))}
     </div>
