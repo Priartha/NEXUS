@@ -657,6 +657,22 @@ class AiIctService:
         if sentiment_label in {"bullish", "bearish"} and sentiment_label != direction and direction != "neutral":
             subtract(direction, 0.05, f"Sentiment conflict: {sentiment_label}")
 
+        # ── Multi-timeframe confluence check ──
+        mtf = _dict(payload.get("mtf_confluence"))
+        if mtf and mtf.get("confluence_factor"):
+            confluence_factor = float(mtf["confluence_factor"])
+            higher_tf = str(mtf.get("higher_tf_bias", "neutral"))
+            alignment = float(mtf.get("alignment_score", 0.5))
+            if direction == "bullish" and higher_tf == "bullish" and alignment > 0.6:
+                add("bullish", 0.06, f"MTF aligned bullish ({alignment:.0%} across {mtf.get('timeframes_checked', 0)} TFs)")
+            elif direction == "bearish" and higher_tf == "bearish" and alignment > 0.6:
+                add("bearish", 0.06, f"MTF aligned bearish ({alignment:.0%} across {mtf.get('timeframes_checked', 0)} TFs)")
+            elif direction != "neutral" and higher_tf not in {"neutral", direction}:
+                subtract(direction, 0.08, f"MTF conflict: higher TF {higher_tf}")
+            # Apply confluence factor to final score
+            if confluence_factor != 1.0:
+                scorecard[direction] *= confluence_factor
+
         # ── Final scoring ──
         separation = abs(scorecard[direction] - scorecard[opposite]) if direction != "neutral" else 0
         score = _clamp(scorecard[direction] + separation * 0.35, 0.0, 0.92) if direction != "neutral" else 0.0

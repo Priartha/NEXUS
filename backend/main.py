@@ -22,6 +22,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from backend.analysis.ai_ict import AiIctService
+from backend.analysis.mtf_confluence import compute_mtf_confluence
 from backend.analysis.options import build_options_context
 from backend.analysis.pipeline import AnalysisPipeline
 from backend.analysis.sentiment import SentimentService
@@ -382,6 +383,7 @@ async def snapshot(
         pipelines[timeframe].snapshot_async(stores[timeframe]),
         timeout=15.0,
     )
+    payload["mtf_confluence"] = compute_mtf_confluence(timeframe, stores, pipelines)
     return _attach_realtime_context(payload, timeframe)
 
 
@@ -671,6 +673,11 @@ async def refresh_ai_ict_timeframe(timeframe: str) -> None:
         return
     _attach_options_context(payload)
     payload["sentiment"] = to_wire(sentiment_service.current)
+
+    # Compute multi-timeframe confluence
+    mtf = compute_mtf_confluence(timeframe, stores, pipelines)
+    payload["mtf_confluence"] = mtf
+
     local_review = ai_ict_service.local_review(payload, sentiment_service.current)
     ai_ict_reviews[timeframe] = local_review
     if timeframe != _valid_timeframe(settings.timeframe):
