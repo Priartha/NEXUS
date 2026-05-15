@@ -26,10 +26,14 @@ class BacktestEngine:
         initial_balance: float = 10_000.0,
         position_size_pct: float = 0.02,
         max_concurrent: int = 1,
+        slippage_pct: float = 0.0002,  # 0.02% slippage per trade
+        commission_pct: float = 0.0004,  # 0.04% commission (round trip)
     ):
         self.initial_balance = float(initial_balance)
         self.position_size_pct = float(position_size_pct)
         self.max_concurrent = max_concurrent
+        self.slippage_pct = float(slippage_pct)
+        self.commission_pct = float(commission_pct)
 
     def run(
         self,
@@ -53,7 +57,7 @@ class BacktestEngine:
         metrics = None
 
         lookback = 80
-        min_candles = max(lookback, 30)
+        min_candles = max(lookback, 50)
         last_signal_ts = 0
 
         for i in range(min_candles, len(candles)):
@@ -77,27 +81,42 @@ class BacktestEngine:
             structure = detect_structure(swings, window)
             regime = detect_market_regime(window, metrics, liquidity_events)
 
+            # Detect signals only for the current candle (not re-scanning all)
             signals = detect_trade_signals(
                 candles=window,
                 metrics=metrics,
             )
 
+            # Filter: only new signals not already processed
             new_signals = [s for s in signals if s.timestamp > last_signal_ts]
             last_signal_ts = max((s.timestamp for s in signals), default=last_signal_ts)
 
             for sig in new_signals:
                 if len([t for t in open_trades if t["status"] == "open"]) >= self.max_concurrent:
                     continue
+                if sig.confidence < 0.45:
+                    continue
+
                 risk_per_trade = balance * self.position_size_pct
                 risk_per_unit = abs(sig.entry - sig.stop_loss)
                 quantity = risk_per_trade / risk_per_unit if risk_per_unit > 0 else 0
+
+                # Apply slippage to entry
+                slippage = sig.entry * self.slippage_pct
+                entry_with_slippage = sig.entry + slippage if sig.side == "buy" else sig.entry - slippage
+
+                # Apply commission
+                notional = entry_with_slippage * quantity
+                commission = notional * self.commission_pct
+
                 tp = sig.exit_price
                 trade = {
                     "id": str(uuid.uuid4()),
                     "signal_id": sig.id,
                     "timestamp": sig.timestamp,
                     "side": sig.side,
-                    "entry_price": sig.entry,
+                    "entry_price": round(entry_with_slippage, 2),
+                    "raw_entry": sig.entry,
                     "stop_loss": sig.stop_loss,
                     "take_profit": tp,
                     "quantity": quantity,
@@ -105,6 +124,8 @@ class BacktestEngine:
                     "confidence": sig.confidence,
                     "reason": sig.reason,
                     "risk_reward": sig.risk_reward,
+                    "slippage": round(slippage, 2),
+                    "commission": round(commission, 2),
                 }
                 open_trades.append(trade)
 
@@ -127,7 +148,8 @@ class BacktestEngine:
                 if hit_stop:
                     exit_price = sl
                     pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl_pct = pnl / (entry * qty) * 100
+                    pnl -= trade["commission"]  # Deduct commission
+                    pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
                     trade["exit_timestamp"] = current.timestamp
@@ -140,7 +162,8 @@ class BacktestEngine:
                 elif hit_target:
                     exit_price = tp
                     pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl_pct = pnl / (entry * qty) * 100
+                    pnl -= trade["commission"]  # Deduct commission
+                    pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
                     trade["exit_timestamp"] = current.timestamp
@@ -181,6 +204,16 @@ class BacktestEngine:
         std_returns = (sum((r - avg_return) ** 2 for r in returns) / len(returns)) ** 0.5 if len(returns) > 1 else 0
         sharpe = (avg_return / std_returns * math.sqrt(365)) if std_returns > 0 else 0
 
+        # Consecutive losses analysis
+        max_consecutive_losses = 0
+        current_consecutive = 0
+        for r in closed:
+            if r.get("pnl", 0) <= 0:
+                current_consecutive += 1
+                max_consecutive_losses = max(max_consecutive_losses, current_consecutive)
+            else:
+                current_consecutive = 0
+
         return {
             "id": str(uuid.uuid4()),
             "symbol": symbol,
@@ -202,6 +235,9 @@ class BacktestEngine:
             "max_drawdown": round(max_dd_val, 2),
             "max_drawdown_pct": round(max_dd, 4),
             "sharpe_ratio": round(sharpe, 4),
+            "max_consecutive_losses": max_consecutive_losses,
+            "slippage_pct": self.slippage_pct,
+            "commission_pct": self.commission_pct,
             "trades": results,
             "equity_curve": equity,
         }

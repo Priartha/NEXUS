@@ -459,7 +459,7 @@ class AiIctService:
         timeframe = str(payload.get("timeframe") or "5m")
         timestamp = int(candle.get("timestamp") or projection.get("timestamp") or metrics.get("timestamp") or int(time.time() * 1000))
 
-        scorecard = {"bullish": 0.18, "bearish": 0.18}
+        scorecard = {"bullish": 0.0, "bearish": 0.0}
         evidence: dict[str, list[str]] = {"bullish": [], "bearish": []}
         sentiment_label = sentiment.label
 
@@ -469,6 +469,12 @@ class AiIctService:
             scorecard[direction_key] += points
             evidence[direction_key].append(reason)
 
+        def subtract(direction_key: str, points: float, reason: str) -> None:
+            if direction_key not in scorecard or points <= 0:
+                return
+            scorecard[direction_key] = max(0.0, scorecard[direction_key] - points)
+            evidence[direction_key].append(f"[-{reason}]")
+
         buy_signal = _best_signal_for_side(signals, "buy")
         sell_signal = _best_signal_for_side(signals, "sell")
         for side, signal in (("buy", buy_signal), ("sell", sell_signal)):
@@ -477,57 +483,43 @@ class AiIctService:
             direction_key = "bullish" if side == "buy" else "bearish"
             signal_confidence = float(signal.get("confidence") or 0.0)
             rr = float(signal.get("risk_reward") or 0.0)
-            add(
-                direction_key,
-                signal_confidence * 0.28 + min(rr / 3.0, 1.0) * 0.08,
-                f"{side.upper()} signal {signal_confidence:.0%} confidence, {rr:.1f}R structure",
-            )
+            if signal_confidence >= 0.50 and rr >= 2.0:
+                add(
+                    direction_key,
+                    signal_confidence * 0.22 + min(rr / 4.0, 1.0) * 0.06,
+                    f"{side.upper()} signal {signal_confidence:.0%} conf, {rr:.1f}R",
+                )
 
         projection_direction = str(projection.get("direction") or "neutral")
         if projection_direction in {"bullish", "bearish"}:
             projection_confidence = float(projection.get("probability") or 0.5)
-            add(projection_direction, projection_confidence * 0.14, f"Statistical projection {projection_confidence:.0%}")
+            if projection_confidence >= 0.55:
+                add(projection_direction, projection_confidence * 0.10, f"Projection {projection_confidence:.0%}")
 
         regime_phase = str(regime.get("phase") or "")
         regime_bias = str(regime.get("bias") or "")
         regime_confidence = float(regime.get("confidence") or 0.0)
         if regime_phase == "accumulation":
-            add("bullish", 0.1 + regime_confidence * 0.06, f"Accumulation phase {regime_confidence:.0%}")
+            add("bullish", 0.08 + regime_confidence * 0.04, f"Accumulation {regime_confidence:.0%}")
         elif regime_phase == "distribution":
-            add("bearish", 0.1 + regime_confidence * 0.06, f"Distribution phase {regime_confidence:.0%}")
-        elif regime_bias in {"bullish", "bearish"}:
-            add(regime_bias, regime_confidence * 0.06, f"Regime bias {regime_bias} {regime_confidence:.0%}")
+            add("bearish", 0.08 + regime_confidence * 0.04, f"Distribution {regime_confidence:.0%}")
         elif regime_phase in {"consolidation", "range_bound"}:
-            scorecard["bullish"] -= 0.04
-            scorecard["bearish"] -= 0.04
+            subtract("bullish", 0.06, "Consolidation phase")
+            subtract("bearish", 0.06, "Consolidation phase")
 
         if sentiment_label in {"bullish", "bearish"}:
-            add(sentiment_label, sentiment.confidence * 0.07, f"AI sentiment {sentiment_label} {sentiment.confidence:.0%}")
+            add(sentiment_label, sentiment.confidence * 0.05, f"AI sentiment {sentiment_label}")
 
-        # BTC movement & investor behavior patterns
+        # BTC patterns
         btc_patterns = _dict(payload.get("btc_patterns"))
         if btc_patterns:
             pat_signal = str(btc_patterns.get("pattern_signal") or "neutral")
             bull_pat_score = float(btc_patterns.get("bullish_pattern_score") or 0.0)
             bear_pat_score = float(btc_patterns.get("bearish_pattern_score") or 0.0)
-            if pat_signal == "bullish":
-                add("bullish", min(bull_pat_score * 0.18, 0.18), f"BTC pattern cluster: {len(btc_patterns.get('patterns',[]))} patterns score {bull_pat_score:.3f}")
-                for b in btc_patterns.get("investor_behaviors", [])[-3:]:
-                    b_side = str(b.get("side") or "")
-                    b_type = str(b.get("behavior_type") or "")
-                    b_conf = float(b.get("confidence") or 0.0)
-                    b_intensity = float(b.get("intensity") or 0.0)
-                    if b_side == "bullish":
-                        add("bullish", min(b_intensity * 0.1, 0.1), f"Investor behavior: {b_type} ({b_conf:.0%} conf)")
-            elif pat_signal == "bearish":
-                add("bearish", min(bear_pat_score * 0.18, 0.18), f"BTC pattern cluster: {len(btc_patterns.get('patterns',[]))} patterns score {bear_pat_score:.3f}")
-                for b in btc_patterns.get("investor_behaviors", [])[-3:]:
-                    b_side = str(b.get("side") or "")
-                    b_type = str(b.get("behavior_type") or "")
-                    b_conf = float(b.get("confidence") or 0.0)
-                    b_intensity = float(b.get("intensity") or 0.0)
-                    if b_side == "bearish":
-                        add("bearish", min(b_intensity * 0.1, 0.1), f"Investor behavior: {b_type} ({b_conf:.0%} conf)")
+            if pat_signal == "bullish" and bull_pat_score > 0.15:
+                add("bullish", min(bull_pat_score * 0.12, 0.12), f"BTC patterns score {bull_pat_score:.3f}")
+            elif pat_signal == "bearish" and bear_pat_score > 0.15:
+                add("bearish", min(bear_pat_score * 0.12, 0.12), f"BTC patterns score {bear_pat_score:.3f}")
 
         # ── Statistical evidence factors ──
         close = float(candle.get("close") or 0.0) or _as_float(candles[-1].get("close")) if candles else 0.0
@@ -542,138 +534,100 @@ class AiIctService:
         trend_score_val = _as_float(metrics.get("trend_score"), 0.0)
         atr14 = _as_float(metrics.get("atr14"), 0.0)
 
-        # ── Institutional math: Hurst, Entropy, Expected Value ──
         close_series = [float(c.get("close") or 0.0) for c in candles if float(c.get("close") or 0.0) > 0]
-        if len(close_series) >= 50:
-            hurst = _hurst_exponent(close_series)
-            entropy = _shannon_entropy(close_series)
-            hurst_bias = "mean_reverting" if hurst < 0.4 else "trending" if hurst > 0.6 else "random"
-            # Hurst regime alignment boosts conviction
-            if hurst < 0.4:
-                add("bullish" if vwap_dev_pct < 0 else "bearish", 0.05, f"Hurst {hurst:.2f} mean-reverting regime")
-            elif hurst > 0.6:
-                add("bullish" if trend_score_val > 0 else "bearish", 0.05, f"Hurst {hurst:.2f} trending regime")
-            # Low entropy = structured market = higher signal trust
-            if entropy < 0.6:
-                add("bullish" if scorecard.get("bullish", 0) >= scorecard.get("bearish", 0) else "bearish", 0.04, f"Entropy {entropy:.2f} structured market")
-        else:
-            hurst = 0.5
-            entropy = 1.0
 
-        # ── Advanced institutional math: GARCH, Kalman, Markov, Monte Carlo, Fourier, Volume Profile ──
+        # ── Advanced institutional math ──
         if len(close_series) >= 50:
-            # GARCH(1,1) volatility forecast
             returns = [math.log(close_series[i] / close_series[i - 1]) for i in range(1, len(close_series))]
             garch_vol, garch_persistence = _garch11_forecast(returns[-60:] if len(returns) >= 60 else returns)
-            if garch_vol > 0:
-                vol_extreme = "high" if garch_vol > 0.02 else "low" if garch_vol < 0.005 else "normal"
-                if vol_extreme == "low":
-                    add("bullish" if vwap_dev_pct < 0 else "bearish", 0.03, f"GARCH vol low {garch_vol:.4f} (reversion edge)")
-                elif vol_extreme == "high" and garch_persistence > 0.9:
-                    add("bullish" if trend_score_val > 0 else "bearish", 0.03, f"GARCH vol clustering {garch_persistence:.2f}")
-
-            # Kalman filter trend strength
             kalman = _kalman_filter_trend(close_series[-80:] if len(close_series) >= 80 else close_series)
-            if kalman["trend_strength"] > 0.6:
-                trend_dir = "bullish" if kalman["trend"] > 0 else "bearish"
-                add(trend_dir, kalman["trend_strength"] * 0.04, f"Kalman trend {trend_dir} strength {kalman['trend_strength']:.2f}")
-
-            # Markov regime switching
             markov = _markov_regime_switching(returns[-60:] if len(returns) >= 60 else returns)
-            if markov["regime_certainty"] > 0.5:
-                regime_dir = "bullish" if markov["bull_prob"] > markov["bear_prob"] else "bearish"
-                add(regime_dir, markov["regime_certainty"] * 0.04, f"Markov {regime_dir} certainty {markov['regime_certainty']:.2f}")
-
-            # Monte Carlo VaR
             mc_results = _monte_carlo_paths(close_series[-1], kalman["trend"], garch_vol if garch_vol > 0 else 0.01, steps=20, simulations=200)
-            if mc_results["var95"] < 0.03:
-                add("bullish" if scorecard.get("bullish", 0) >= scorecard.get("bearish", 0) else "bearish", 0.03, f"MC VaR95 low {mc_results['var95']:.2%}")
-            elif mc_results["var95"] > 0.06:
-                scorecard["bullish"] -= 0.03
-                scorecard["bearish"] -= 0.03
-
-            # Fourier cycle detection
             dominant_period, cycle_strength = _fourier_dominant_cycle(close_series[-100:] if len(close_series) >= 100 else close_series)
-            if cycle_strength > 0.4 and 15 <= dominant_period <= 50:
-                add("bullish" if vwap_dev_pct < 0 else "bearish", cycle_strength * 0.03, f"Fourier cycle {dominant_period:.0f} strength {cycle_strength:.2f}")
+            vol_profile = _volume_profile_analysis(candles[-50:] if len(candles) >= 50 else candles)
+            skew, kurt = _skewness_kurtosis(returns[-60:] if len(returns) >= 60 else returns)
+            fractal_dim = _fractal_dimension(close_series[-80:] if len(close_series) >= 80 else close_series)
+
+            hurst = _hurst_exponent(close_series)
+            entropy = _shannon_entropy(close_series)
+
+            # Hurst regime
+            if hurst < 0.4:
+                add("bullish" if vwap_dev_pct < -0.005 else "bearish" if vwap_dev_pct > 0.005 else "", 0.04, f"Hurst {hurst:.2f} mean-reverting")
+            elif hurst > 0.6:
+                add("bullish" if trend_score_val > 0.1 else "bearish" if trend_score_val < -0.1 else "", 0.04, f"Hurst {hurst:.2f} trending")
+
+            # Kalman trend
+            if kalman["trend_strength"] > 0.7:
+                trend_dir = "bullish" if kalman["trend"] > 0 else "bearish"
+                add(trend_dir, kalman["trend_strength"] * 0.03, f"Kalman {trend_dir} {kalman['trend_strength']:.2f}")
+
+            # Markov regime
+            if markov["regime_certainty"] > 0.6:
+                regime_dir = "bullish" if markov["bull_prob"] > markov["bear_prob"] else "bearish"
+                add(regime_dir, markov["regime_certainty"] * 0.03, f"Markov {regime_dir} {markov['regime_certainty']:.2f}")
+
+            # Monte Carlo VaR penalty
+            if mc_results["var95"] > 0.06:
+                subtract("bullish", 0.04, f"MC VaR95 {mc_results['var95']:.2%}")
+                subtract("bearish", 0.04, f"MC VaR95 {mc_results['var95']:.2%}")
 
             # Volume profile
-            vol_profile = _volume_profile_analysis(candles[-50:] if len(candles) >= 50 else candles)
-            if vol_profile["volume_imbalance"] > 0.3:
-                add("bullish", vol_profile["volume_imbalance"] * 0.03, f"Volume profile bullish imbalance {vol_profile['volume_imbalance']:.2f}")
-            elif vol_profile["volume_imbalance"] < -0.3:
-                add("bearish", abs(vol_profile["volume_imbalance"]) * 0.03, f"Volume profile bearish imbalance {vol_profile['volume_imbalance']:.2f}")
+            if abs(vol_profile["volume_imbalance"]) > 0.35:
+                vol_dir = "bullish" if vol_profile["volume_imbalance"] > 0 else "bearish"
+                add(vol_dir, abs(vol_profile["volume_imbalance"]) * 0.03, f"Vol imbalance {vol_profile['volume_imbalance']:.2f}")
 
-            # Skewness/Kurtosis
-            skew, kurt = _skewness_kurtosis(returns[-60:] if len(returns) >= 60 else returns)
-            if abs(skew) > 1.0:
+            # Skewness
+            if abs(skew) > 1.2:
                 skew_dir = "bullish" if skew > 0 else "bearish"
-                add(skew_dir, 0.02, f"Return skewness {skew:.2f} ({skew_dir} tail)")
-            if kurt > 4.0:
-                add("bullish" if scorecard.get("bullish", 0) >= scorecard.get("bearish", 0) else "bearish", 0.02, f"Fat tails kurtosis {kurt:.2f}")
+                add(skew_dir, 0.02, f"Skew {skew:.2f}")
 
             # Fractal dimension
-            fractal_dim = _fractal_dimension(close_series[-80:] if len(close_series) >= 80 else close_series)
-            if fractal_dim < 1.3:
-                add("bullish" if trend_score_val > 0 else "bearish", 0.02, f"Fractal dim {fractal_dim:.2f} (smooth trend)")
-            elif fractal_dim > 1.7:
-                scorecard["bullish"] -= 0.02
-                scorecard["bearish"] -= 0.02
+            if fractal_dim < 1.25:
+                add("bullish" if trend_score_val > 0.1 else "bearish" if trend_score_val < -0.1 else "", 0.02, f"Fractal {fractal_dim:.2f}")
+            elif fractal_dim > 1.75:
+                subtract("bullish", 0.02, f"Fractal chaos {fractal_dim:.2f}")
+                subtract("bearish", 0.02, f"Fractal chaos {fractal_dim:.2f}")
 
-        # Expected value from signal confidence and risk/reward
-        for side_key, sig in (("bullish", buy_signal), ("bearish", sell_signal)):
-            if sig:
-                sig_side = "bullish" if sig.get("side") == "buy" else "bearish"
-                sc = float(sig.get("confidence") or 0.0)
-                rr = float(sig.get("risk_reward") or 0.0)
-                ev = sc * rr - (1.0 - sc)
-                ev_ratio = ev / max(rr, 0.1)
-                if ev_ratio > 0.15:
-                    add(sig_side, min(ev_ratio * 0.08, 0.08), f"Expected value {ev_ratio:.2f}R (EV={ev:.3f})")
-
-        # VWAP deviation z-score: large deviation = mean reversion edge
-        if abs(vwap_dev_pct) >= 0.003:
-            vwap_factor = min(abs(vwap_dev_pct) * 1.5, 0.12)
+        # VWAP deviation: only significant deviations matter
+        if abs(vwap_dev_pct) >= 0.008:
+            vwap_factor = min(abs(vwap_dev_pct) * 1.2, 0.10)
             vwap_dir = "bullish" if vwap_dev_pct < 0 else "bearish"
-            add(vwap_dir, vwap_factor, f"VWAP deviation {vwap_dev_pct*100:.2f}% ({vwap_dir})")
+            add(vwap_dir, vwap_factor, f"VWAP dev {vwap_dev_pct*100:.2f}%")
 
-        # Bollinger Band %b: extremes signal reversal pressure
-        if bb_b <= 0.15:
-            add("bullish", 0.06 + (0.15 - bb_b) * 0.2, f"BB lower touch (%b={bb_b:.2f})")
-        elif bb_b >= 0.85:
-            add("bearish", 0.06 + (bb_b - 0.85) * 0.2, f"BB upper touch (%b={bb_b:.2f})")
+        # Bollinger Band %b: only at extremes
+        if bb_b <= 0.10:
+            add("bullish", 0.05 + (0.10 - bb_b) * 0.15, f"BB extreme low %b={bb_b:.2f}")
+        elif bb_b >= 0.90:
+            add("bearish", 0.05 + (bb_b - 0.90) * 0.15, f"BB extreme high %b={bb_b:.2f}")
 
-        # RSI regime
-        if rsi14 <= 35:
-            add("bullish", 0.08 + (35 - rsi14) * 0.005, f"RSI oversold {rsi14:.1f}")
-        elif rsi14 <= 42:
-            add("bullish", 0.04, f"RSI near oversold {rsi14:.1f}")
-        elif rsi14 >= 65:
-            add("bearish", 0.08 + (rsi14 - 65) * 0.005, f"RSI overbought {rsi14:.1f}")
-        elif rsi14 >= 58:
-            add("bearish", 0.04, f"RSI near overbought {rsi14:.1f}")
+        # RSI: only at true extremes
+        if rsi14 <= 28:
+            add("bullish", 0.06 + (28 - rsi14) * 0.004, f"RSI deeply oversold {rsi14:.1f}")
+        elif rsi14 >= 72:
+            add("bearish", 0.06 + (rsi14 - 72) * 0.004, f"RSI deeply overbought {rsi14:.1f}")
 
-        # Trend score: positive = bullish, negative = bearish
-        if abs(trend_score_val) >= 0.15:
+        # Trend score: only significant trends
+        if abs(trend_score_val) >= 0.25:
             trend_dir = "bullish" if trend_score_val > 0 else "bearish"
-            add(trend_dir, min(abs(trend_score_val) * 0.12, 0.10), f"Regression trend slope {trend_score_val:.3f} ({trend_dir})")
+            add(trend_dir, min(abs(trend_score_val) * 0.10, 0.08), f"Trend {trend_dir} {trend_score_val:.3f}")
 
         # Volume confirmation
-        if volume_z >= 1.0:
+        if volume_z >= 1.5:
             vol_dir = "bullish" if scorecard["bullish"] >= scorecard["bearish"] else "bearish"
-            add(vol_dir, min(volume_z * 0.03, 0.06), f"Volume z-score {volume_z:.2f} ({vol_dir})")
+            add(vol_dir, min(volume_z * 0.02, 0.04), f"Volume spike z={volume_z:.1f}")
 
         volume_pulse = _live_volume_pulse(candle, candles)
-        if volume_pulse >= 1.35:
+        if volume_pulse >= 1.5:
             pulse_dir = "bullish" if scorecard["bullish"] >= scorecard["bearish"] else "bearish"
-            add(pulse_dir, min(0.05, (volume_pulse - 1.0) * 0.08), f"Live volume pulse {volume_pulse:.2f}x")
+            add(pulse_dir, min(0.03, (volume_pulse - 1.0) * 0.05), f"Vol pulse {volume_pulse:.1f}x")
 
-        # Premium/discount pricing extreme
+        # Premium/discount
         premium_discount = _as_float(metrics.get("premium_discount"), 0.0)
-        if premium_discount <= -0.25:
-            add("bullish", 0.035, "Discount-side pricing extreme")
-        elif premium_discount >= 0.25:
-            add("bearish", 0.035, "Premium-side pricing extreme")
+        if premium_discount <= -0.30:
+            add("bullish", 0.03, "Deep discount pricing")
+        elif premium_discount >= 0.30:
+            add("bearish", 0.03, "Deep premium pricing")
 
         # Options momentum
         call_candidate = _dict(options_context.get("call_candidate"))
@@ -682,56 +636,63 @@ class AiIctService:
         bearish_momentum = _as_float(options_context.get("bearish_momentum_score"), 0.0)
         minimum_momentum = _as_float(options_context.get("minimum_momentum_score"), 0.40)
         if call_candidate.get("qualified") and bullish_momentum >= minimum_momentum:
-            add(
-                "bullish",
-                min(_as_float(call_candidate.get("score"), 0.0) * 0.11, 0.11),
-                f"CALL Greeks qualified {call_candidate.get('symbol')} momentum {bullish_momentum:.0%}",
-            )
+            add("bullish", min(_as_float(call_candidate.get("score"), 0.0) * 0.08, 0.08), f"CALL qualified momentum {bullish_momentum:.0%}")
         if put_candidate.get("qualified") and bearish_momentum >= minimum_momentum:
-            add(
-                "bearish",
-                min(_as_float(put_candidate.get("score"), 0.0) * 0.11, 0.11),
-                f"PUT Greeks qualified {put_candidate.get('symbol')} momentum {bearish_momentum:.0%}",
-            )
+            add("bearish", min(_as_float(put_candidate.get("score"), 0.0) * 0.08, 0.08), f"PUT qualified momentum {bearish_momentum:.0%}")
 
-        direction = "bullish" if scorecard["bullish"] >= scorecard["bearish"] else "bearish"
-        opposite = "bearish" if direction == "bullish" else "bullish"
-        separation = abs(scorecard[direction] - scorecard[opposite])
-        score = _clamp(scorecard[direction] + separation * 0.42, 0.0, 0.95)
-        confirmations = evidence[direction][:7]
+        # ── Conflict detection: penalize when subsystems disagree ──
+        direction = "bullish" if scorecard["bullish"] > scorecard["bearish"] else "bearish" if scorecard["bearish"] > scorecard["bullish"] else "neutral"
+        opposite = "bearish" if direction == "bullish" else "bullish" if direction == "bearish" else ""
+
+        # Check for conflicts between signal and regime
+        if buy_signal and sell_signal:
+            subtract("bullish", 0.08, "Both buy and sell signals active")
+            subtract("bearish", 0.08, "Both buy and sell signals active")
+
+        # Check for conflict between projection and regime
+        if projection_direction != "neutral" and regime_bias != "neutral" and projection_direction != regime_bias:
+            subtract(projection_direction, 0.06, f"Projection conflicts with regime ({regime_bias})")
+
+        # Check sentiment conflict
+        if sentiment_label in {"bullish", "bearish"} and sentiment_label != direction and direction != "neutral":
+            subtract(direction, 0.05, f"Sentiment conflict: {sentiment_label}")
+
+        # ── Final scoring ──
+        separation = abs(scorecard[direction] - scorecard[opposite]) if direction != "neutral" else 0
+        score = _clamp(scorecard[direction] + separation * 0.35, 0.0, 0.92) if direction != "neutral" else 0.0
+        confirmations = evidence[direction][:7] if direction != "neutral" else []
         blockers: list[str] = []
 
-        if scorecard[direction] < 0.52:
-            blockers.append("Combined confluence is below execution threshold")
-        if separation < 0.12:
-            blockers.append("Bullish and bearish evidence are too close")
+        # Strict thresholds for execution
+        if scorecard[direction] < 0.35:
+            blockers.append("Combined confluence below execution threshold")
+        if separation < 0.15:
+            blockers.append("Bullish and bearish evidence too close (no clear edge)")
         phase_block = _phase_block_reason(payload, direction)
         if phase_block:
             blockers.append(phase_block)
         options_block = _options_block_reason(payload, direction)
         if options_block:
             blockers.append(options_block)
-        if sentiment_label in {"bullish", "bearish"} and not _sentiment_aligns(direction, sentiment_label):
-            blockers.append(f"AI sentiment conflict: {sentiment_label}")
 
         execution_block = phase_block or options_block
         if execution_block:
             direction = "neutral"
-            score = min(score, 0.49)
+            score = min(score, 0.45)
             confirmations = []
             blockers = _prepend_unique(blockers, execution_block)
-        elif scorecard[direction] < 0.48:
+        elif scorecard[direction] < 0.30:
             direction = "neutral"
-            score = min(score, 0.49)
+            score = min(score, 0.45)
             confirmations = []
-            blockers = ["No execution-grade directional edge"]
+            blockers.append("No execution-grade directional edge")
 
         if direction in {"bullish", "bearish"}:
             active_signal = buy_signal if direction == "bullish" else sell_signal
             if active_signal is None:
-                blockers.append(f"No active {direction.upper()} signal supports this direction")
+                blockers.append(f"No active {direction.upper()} signal")
                 direction = "neutral"
-                score = min(score, 0.49)
+                score = min(score, 0.45)
                 confirmations = []
 
         price_plan = _build_price_plan(
@@ -743,9 +704,9 @@ class AiIctService:
             metrics=metrics,
             projection=projection,
         )
-        score = _clamp(score, 0.0, 0.95)
+        score = _clamp(score, 0.0, 0.92)
         grade, readiness = _grade(score)
-        confidence = min(0.95, score * 0.96)
+        confidence = min(0.92, score * 0.94)
         selected_option = _option_for_direction(payload, direction)
 
         if grade == "NO_TRADE":
@@ -787,7 +748,7 @@ class AiIctService:
                 behavior_context = f" {best_b.get('behavior_type','').replace('_',' ')} detected ({best_b.get('confidence',0):.0%} conf);"
 
         if action == "WAIT":
-            wait_reason = blockers[0] if blockers else "Execution-grade confirmation is not present"
+            wait_reason = blockers[0] if blockers else "Execution-grade confirmation not present"
             summary = f"WAIT setup: NO_TRADE / avoid. Phase {regime_phase or 'unknown'};{behavior_context} {wait_reason}."
         else:
             summary = f"{action} setup: {grade} / {readiness}. Phase {regime_phase or 'unknown'};{behavior_context} one 1:3 plan from VWAP, Bollinger, RSI, volume, trend, and statistical confluence."

@@ -214,6 +214,16 @@ class AnalysisPipeline:
             candles=closed_candles,
             metrics=self.metrics,
         )
+
+        # ── Signal quality filter: remove stale/low-quality signals ──
+        if closed_candles:
+            latest_ts = closed_candles[-1].timestamp
+            max_age_ms = 30 * 60 * 1000  # 30 minutes max age
+            detected_signals = [
+                s for s in detected_signals
+                if (latest_ts - s.timestamp) < max_age_ms and s.confidence >= 0.42
+            ]
+
         signals = _select_primary_signal(detected_signals)
 
         payload = {

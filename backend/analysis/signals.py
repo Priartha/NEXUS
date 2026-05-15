@@ -514,7 +514,7 @@ def detect_trade_signals(
     metrics: MarketMetrics | None = None,
     reward_multiple: float = 3.0,
 ) -> list[TradeSignal]:
-    if len(candles) < 30:
+    if len(candles) < 50:
         return []
 
     ordered = sorted(candles, key=lambda c: c.timestamp)
@@ -549,7 +549,7 @@ def detect_trade_signals(
     # ── Monte Carlo risk simulation ──
     latest_price = closes[-1]
     mc_drift = kalman["trend"]
-    mc_vol = garch_vol if garch_vol > 0 else (returns[-1] if returns else 0.01)
+    mc_vol = garch_vol if garch_vol > 0 else (abs(returns[-1]) if returns else 0.01)
     mc_results = _monte_carlo_paths(latest_price, mc_drift, mc_vol, steps=20, simulations=300)
 
     # ── Compute statistical series ──
@@ -568,16 +568,23 @@ def detect_trade_signals(
 
     rsi_series = _rsi(closes, 14)
 
-    # ── Linear regression slope (activated dead code) ──
+    # ── Linear regression slope ──
     trend_slope = _linear_regression_slope(closes[-30:] if len(closes) >= 30 else closes)
-    # ── Pearson correlation between price and volume (activated dead code) ──
     price_vol_corr = _pearson_r(closes[-30:], volumes[-30:]) if len(closes) >= 30 else 0.0
+
+    # ── ADX-like trend strength (using EMA spread + price position) ──
+    ema20_val = sma20[-1] if sma20 else 0
+    ema50_val = sma50[-1] if sma50 else 0
+    ema_spread_pct = abs(ema20_val - ema50_val) / max(ema50_val, 1e-10) * 100
+    is_trending_market = ema_spread_pct > 0.15 and abs(trend_slope) > closes[-1] * 0.0001
+    is_ranging_market = not is_trending_market and hurst < 0.55
 
     signals: list[TradeSignal] = []
     latest = ordered[-1]
+    current_ts = latest.timestamp
 
-    # Only scan the most recent lookback for signals
-    lookback = min(80, len(ordered))
+    # Only scan the most recent candles for signals (last 20)
+    lookback = min(20, len(ordered))
     scan_start = len(ordered) - lookback
 
     for i in range(scan_start, len(ordered)):
@@ -593,146 +600,170 @@ def detect_trade_signals(
         roc_i = roc_series[i] if i < len(roc_series) else 0.0
         tsi_i = tsi_series[i] if i < len(tsi_series) else 0.0
 
-        prefix = ordered[: i + 1]
-        prefix_closes = closes[: i + 1]
-
-        # Statistical checks at this candle
         z = _zscore(cl, sma20_i, std20_i)
         bb_b = (cl - bollinger_lower[i]) / (bollinger_upper[i] - bollinger_lower[i]) if (bollinger_upper[i] - bollinger_lower[i]) > 0 else 0.5
         vwap_dev = ((cl - vwap_i) / vwap_i * 100) if vwap_i > 0 else 0.0
         vol_z = _zscore(volumes[i], vol_sma[i], math.sqrt(sum((volumes[j] - vol_sma[i]) ** 2 for j in range(max(0, i - 19), i + 1)) / 20)) if vol_sma[i] > 0 and i >= 19 else 0.0
-        bb_squeeze = bb_width[i] < bb_sma[i] * 0.8 if bb_sma[i] > 0 else False
+        bb_squeeze = bb_width[i] < bb_sma[i] * 0.7 if bb_sma[i] > 0 else False
 
-        # ── Adaptive regime alignment for signal boosting ──
         is_mean_reverting = hurst_bias == "mean_reverting"
         is_trending = hurst_bias == "trending"
 
-        # ── Signal type 1: VWAP Mean Reversion ──
-        if abs(vwap_dev) >= 0.5 and not _has_recent_signal(signals, c.timestamp, 5):
-            side = "buy" if cl < vwap_i else "sell"
-            entry = vwap_i
-            entry_reason = f"VWAP reversion at {abs(vwap_dev):.2f}% deviation"
-            stop = entry - atr14 * 1.5 if side == "buy" else entry + atr14 * 1.5
-            risk = abs(entry - stop)
-            target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
-            confidence = _vwap_reversion_confidence(vwap_dev, vol_z, rsi_i, bb_b, hurst, entropy_factor, garch_vol, kalman["trend_strength"])
-            _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
-
-        # ── Signal type 2: Bollinger Band touch + continuation ──
-        if (cl <= bollinger_lower[i] or cl >= bollinger_upper[i]) and bb_width[i] > (bb_sma[i] * 0.5 if bb_sma[i] > 0 else 0):
-            side = "buy" if cl <= bollinger_lower[i] else "sell"
-            entry = cl
-            entry_reason = f"BB touch {'lower' if side == 'buy' else 'upper'} (z={z:.2f})"
-            stop = entry - atr14 * 1.2 if side == "buy" else entry + atr14 * 1.2
-            risk = abs(entry - stop)
-            target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
-            confidence = _bb_reversal_confidence(z, bb_b, rsi_i, vol_z, hurst, entropy_factor, skew, kurt)
-            _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
-
-        # ── Signal type 3: Volatility Squeeze Breakout ──
-        if bb_squeeze and i > 0:
-            prev_range = hi - lo
-            cur_range = ordered[i - 1].high - ordered[i - 1].low if i > 0 else 0
-            expansion = prev_range > cur_range * 1.8 and prev_range > atr14 * 0.5
-            if expansion:
-                body_dir = "bullish" if cl > ordered[i - 1].close else "bearish"
-                side = "buy" if body_dir == "bullish" else "sell"
-                entry = cl
-                entry_reason = f"BB squeeze breakout {body_dir}"
+        # ── Signal type 1: VWAP Mean Reversion (STRICTER: requires 1.0%+ deviation + RSI extreme + volume) ──
+        if abs(vwap_dev) >= 1.0 and not _has_recent_signal(signals, c.timestamp, 8):
+            rsi_extreme = (rsi_i < 30 and cl < vwap_i) or (rsi_i > 70 and cl > vwap_i)
+            vol_confirm = vol_z > 0.8
+            if rsi_extreme and vol_confirm:
+                side = "buy" if cl < vwap_i else "sell"
+                entry = vwap_i
+                entry_reason = f"VWAP reversion at {abs(vwap_dev):.2f}% dev, RSI {rsi_i:.0f}"
                 stop = entry - atr14 * 1.5 if side == "buy" else entry + atr14 * 1.5
                 risk = abs(entry - stop)
                 target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
-                confidence = _squeeze_breakout_confidence(prev_range, atr14, vol_z, hurst, entropy_factor, garch_persistence, cycle_strength)
+                confidence = _vwap_reversion_confidence(vwap_dev, vol_z, rsi_i, bb_b, hurst, entropy_factor, garch_vol, kalman["trend_strength"])
                 _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
 
-        # ── Signal type 4: Statistical Pullback ──
-        if sma20_i > 0 and std20_i > 0:
-            pullback_buy = cl < sma20_i - 0.5 * std20_i and rsi_i < 45 and sma20_i > sma50[i] if i >= 49 else False
-            pullback_sell = cl > sma20_i + 0.5 * std20_i and rsi_i > 55 and sma20_i < sma50[i] if i >= 49 else False
-            if pullback_buy:
-                side = "buy"
+        # ── Signal type 2: Bollinger Band Reversal (STRICTER: requires RSI extreme + volume spike + z-score) ──
+        if cl <= bollinger_lower[i] or cl >= bollinger_upper[i]:
+            bb_width_ok = bb_width[i] > (bb_sma[i] * 0.4 if bb_sma[i] > 0 else 0)
+            rsi_extreme = (cl <= bollinger_lower[i] and rsi_i < 30) or (cl >= bollinger_upper[i] and rsi_i > 70)
+            z_extreme = abs(z) > 1.8
+            if bb_width_ok and (rsi_extreme or z_extreme) and not _has_recent_signal(signals, c.timestamp, 8):
+                side = "buy" if cl <= bollinger_lower[i] else "sell"
                 entry = cl
-                entry_reason = f"Statistical pullback to SMA20 (z={z:.2f}, RSI={rsi_i:.0f})"
-                stop = entry - atr14 * 1.5
+                entry_reason = f"BB {'lower' if side == 'buy' else 'upper'} reversal, z={z:.2f}, RSI={rsi_i:.0f}"
+                stop = entry - atr14 * 1.5 if side == "buy" else entry + atr14 * 1.5
                 risk = abs(entry - stop)
-                target = entry + risk * reward_multiple
+                target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
+                confidence = _bb_reversal_confidence(z, bb_b, rsi_i, vol_z, hurst, entropy_factor, skew, kurt)
+                _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
+
+        # ── Signal type 3: Volatility Squeeze Breakout (STRICTER: requires volume confirmation + trend alignment) ──
+        if bb_squeeze and i > 1:
+            prev_candle = ordered[i - 1]
+            prev_range = prev_candle.high - prev_candle.low
+            cur_range = hi - lo
+            expansion = cur_range > prev_range * 1.5 and cur_range > atr14 * 0.6
+            vol_confirm = vol_z > 1.0
+            if expansion and vol_confirm and not _has_recent_signal(signals, c.timestamp, 10):
+                body_dir = "bullish" if cl > prev_candle.close else "bearish"
+                # Require trend alignment for breakout
+                trend_aligned = (body_dir == "bullish" and (trend_slope > 0 or not is_ranging_market)) or \
+                                (body_dir == "bearish" and (trend_slope < 0 or not is_ranging_market))
+                if trend_aligned or vol_z > 1.5:
+                    side = "buy" if body_dir == "bullish" else "sell"
+                    entry = cl
+                    entry_reason = f"BB squeeze breakout {body_dir}, vol z={vol_z:.1f}"
+                    stop = entry - atr14 * 1.5 if side == "buy" else entry + atr14 * 1.5
+                    risk = abs(entry - stop)
+                    target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
+                    confidence = _squeeze_breakout_confidence(cur_range, atr14, vol_z, hurst, entropy_factor, garch_persistence, cycle_strength)
+                    _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
+
+        # ── Signal type 4: Statistical Pullback (STRICTER: requires trend context + volume drying up) ──
+        if sma20_i > 0 and std20_i > 0 and i >= 49:
+            in_uptrend = sma20_i > sma50[i] and trend_slope > 0
+            in_downtrend = sma20_i < sma50[i] and trend_slope < 0
+            pullback_buy = in_uptrend and cl < sma20_i - 0.8 * std20_i and rsi_i < 40 and vol_z < -0.3
+            pullback_sell = in_downtrend and cl > sma20_i + 0.8 * std20_i and rsi_i > 60 and vol_z < -0.3
+            if (pullback_buy or pullback_sell) and not _has_recent_signal(signals, c.timestamp, 8):
+                side = "buy" if pullback_buy else "sell"
+                entry = cl
+                entry_reason = f"Trend pullback to SMA20, z={z:.2f}, RSI={rsi_i:.0f}"
+                stop = entry - atr14 * 1.5 if side == "buy" else entry + atr14 * 1.5
+                risk = abs(entry - stop)
+                target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
                 confidence = _pullback_confidence(z, rsi_i, vol_z, hurst, entropy_factor, trend_slope, kalman["trend_strength"])
                 _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
-            elif pullback_sell:
-                side = "sell"
+
+        # ── Signal type 5: RSI Divergence (STRICTER: check 3-candle lookback, require volume confirmation) ──
+        if i >= 8:
+            lookback_div = 3
+            prev_cl = closes[i - lookback_div]
+            prev_rsi = rsi_series[i - lookback_div]
+            price_lower = cl < prev_cl - atr14 * 0.3
+            price_higher = cl > prev_cl + atr14 * 0.3
+            rsi_rising = rsi_i > prev_rsi + 3
+            rsi_falling = rsi_i < prev_rsi - 3
+            vol_confirm = vol_z > 0.5
+            divergence_bullish = price_lower and rsi_rising and rsi_i < 38 and vol_confirm
+            divergence_bearish = price_higher and rsi_falling and rsi_i > 62 and vol_confirm
+            if (divergence_bullish or divergence_bearish) and not _has_recent_signal(signals, c.timestamp, 8):
+                side = "buy" if divergence_bullish else "sell"
                 entry = cl
-                entry_reason = f"Statistical pullback to SMA20 (z={z:.2f}, RSI={rsi_i:.0f})"
-                stop = entry + atr14 * 1.5
+                stop = entry - atr14 * 1.5 if side == "buy" else entry + atr14 * 1.5
                 risk = abs(entry - stop)
-                target = entry - risk * reward_multiple
-                confidence = _pullback_confidence(z, rsi_i, vol_z, hurst, entropy_factor, trend_slope, kalman["trend_strength"])
-                _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
+                target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
+                div_conf = 0.58 if abs(rsi_i - 50) > 15 else 0.52
+                entry_reason = f"RSI {'bullish' if side == 'buy' else 'bearish'} divergence ({lookback_div}c, RSI {rsi_i:.0f})"
+                _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, div_conf, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
 
-        # ── Signal type 5: RSI Divergence ──
-        if i >= 5:
-            prev_rsi = rsi_series[i - 1]
-            prev_close = closes[i - 1]
-            divergence_bullish = cl < prev_close and rsi_i > prev_rsi and rsi_i < 40
-            divergence_bearish = cl > prev_close and rsi_i < prev_rsi and rsi_i > 60
-            if divergence_bullish:
-                _add_signal(signals, ordered, "buy", c.timestamp, cl, cl - atr14 * 1.5, cl + atr14 * 1.5 * reward_multiple, 0.62, f"RSI bullish divergence (RSI {rsi_i:.0f} > {prev_rsi:.0f} while price fell)", metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
-            elif divergence_bearish:
-                _add_signal(signals, ordered, "sell", c.timestamp, cl, cl + atr14 * 1.5, cl - atr14 * 1.5 * reward_multiple, 0.62, f"RSI bearish divergence (RSI {rsi_i:.0f} < {prev_rsi:.0f} while price rose)", metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
-
-        # ── Signal type 6: MACD Momentum Crossover ──
-        if i >= 30 and not _has_recent_signal(signals, c.timestamp, 5):
+        # ── Signal type 6: MACD Momentum Crossover (STRICTER: require trend alignment + volume) ──
+        if i >= 30 and not _has_recent_signal(signals, c.timestamp, 8):
             macd_prev = macd_data[i - 1] if i - 1 < len(macd_data) else None
             if macd_prev and macd_i:
                 macd_cross_bullish = macd_prev["histogram"] < 0 and macd_i["histogram"] > 0
                 macd_cross_bearish = macd_prev["histogram"] > 0 and macd_i["histogram"] < 0
-                if macd_cross_bullish:
+                if macd_cross_bullish and (trend_slope > 0 or vol_z > 1.0):
                     side = "buy"
                     entry = cl
-                    entry_reason = f"MACD bullish crossover (hist {macd_i['histogram']:.3f})"
+                    entry_reason = f"MACD bullish crossover, hist {macd_i['histogram']:.3f}"
                     stop = entry - atr14 * 1.5
                     risk = abs(entry - stop)
                     target = entry + risk * reward_multiple
                     confidence = _momentum_confidence(macd_i["histogram"], roc_i, tsi_i, vol_z, hurst, entropy_factor, fractal_dim)
                     _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
-                elif macd_cross_bearish:
+                elif macd_cross_bearish and (trend_slope < 0 or vol_z > 1.0):
                     side = "sell"
                     entry = cl
-                    entry_reason = f"MACD bearish crossover (hist {macd_i['histogram']:.3f})"
+                    entry_reason = f"MACD bearish crossover, hist {macd_i['histogram']:.3f}"
                     stop = entry + atr14 * 1.5
                     risk = abs(entry - stop)
                     target = entry - risk * reward_multiple
                     confidence = _momentum_confidence(-macd_i["histogram"], -roc_i, -tsi_i, vol_z, hurst, entropy_factor, fractal_dim)
                     _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
 
-        # ── Signal type 7: Volume Profile Support/Resistance ──
-        if i >= 50 and not _has_recent_signal(signals, c.timestamp, 5):
+        # ── Signal type 7: Volume Profile POC Test (STRICTER: require reclaim/rejection) ──
+        if i >= 50 and not _has_recent_signal(signals, c.timestamp, 8):
             poc = vol_profile["poc"]
-            vah = vol_profile["vah"]
-            val = vol_profile["val"]
-            if poc > 0 and abs(cl - poc) / poc < 0.005:
-                side = "buy" if cl >= poc else "sell"
-                entry = cl
-                entry_reason = f"Volume POC test (POC={poc:.2f}, imbalance={vol_profile['volume_imbalance']:.2f})"
-                stop = entry - atr14 * 1.5 if side == "buy" else entry + atr14 * 1.5
-                risk = abs(entry - stop)
-                target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
-                confidence = _volume_profile_confidence(vol_profile["volume_imbalance"], z, vol_z, hurst, entropy_factor, markov["regime_certainty"])
-                _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
+            if poc > 0 and abs(cl - poc) / poc < 0.003:
+                prev_c = ordered[i - 1] if i > 0 else c
+                reclaim_bullish = prev_c.close < poc and cl >= poc and vol_z > 0.5
+                rejection_bearish = prev_c.close > poc and cl <= poc and vol_z > 0.5
+                if reclaim_bullish or rejection_bearish:
+                    side = "buy" if reclaim_bullish else "sell"
+                    entry = cl
+                    entry_reason = f"Volume POC {'reclaim' if side == 'buy' else 'rejection'} (POC={poc:.0f})"
+                    stop = entry - atr14 * 1.5 if side == "buy" else entry + atr14 * 1.5
+                    risk = abs(entry - stop)
+                    target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
+                    confidence = _volume_profile_confidence(vol_profile["volume_imbalance"], z, vol_z, hurst, entropy_factor, markov["regime_certainty"])
+                    _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
 
-        # ── Signal type 8: Cycle-Based Reversal ──
-        if cycle_strength > 0.3 and dominant_period > 10 and i >= int(dominant_period) and not _has_recent_signal(signals, c.timestamp, 5):
+        # ── Signal type 8: Cycle-Based Reversal (STRICTER: higher strength threshold) ──
+        if cycle_strength > 0.45 and dominant_period > 10 and i >= int(dominant_period) and not _has_recent_signal(signals, c.timestamp, 10):
             cycle_phase = (i % int(dominant_period)) / dominant_period
-            if cycle_phase < 0.15 or cycle_phase > 0.85:
-                side = "buy" if cycle_phase < 0.15 else "sell"
+            if cycle_phase < 0.12 or cycle_phase > 0.88:
+                side = "buy" if cycle_phase < 0.12 else "sell"
                 entry = cl
-                entry_reason = f"Cycle reversal (period={dominant_period:.0f}, strength={cycle_strength:.2f}, phase={cycle_phase:.2f})"
+                entry_reason = f"Cycle reversal (period={dominant_period:.0f}, strength={cycle_strength:.2f})"
                 stop = entry - atr14 * 1.5 if side == "buy" else entry + atr14 * 1.5
                 risk = abs(entry - stop)
                 target = entry + risk * reward_multiple if side == "buy" else entry - risk * reward_multiple
                 confidence = _cycle_reversal_confidence(cycle_strength, dominant_period, cycle_phase, vol_z, hurst, entropy_factor)
                 _add_signal(signals, ordered, side, c.timestamp, entry, stop, target, confidence, entry_reason, metrics, atr14, hurst, entropy_factor, garch_vol, markov, mc_results)
 
-    # ── Bayesian fusion for same-side signal clusters ──
+    # ── Post-processing: filter low-confidence signals, apply Bayesian fusion ──
+    if not signals:
+        return []
+
+    # Remove signals with confidence below minimum threshold
+    min_confidence = 0.40
+    signals = [s for s in signals if s.confidence >= min_confidence]
+    if not signals:
+        return []
+
+    # Group by side and apply Bayesian fusion
     fused: dict[str, TradeSignal] = {}
     side_groups: dict[str, list[TradeSignal]] = {"buy": [], "sell": []}
     for sig in signals:
@@ -741,8 +772,6 @@ def detect_trade_signals(
             fused[key] = sig
         side_groups[sig.side].append(sig)
 
-    # Apply Bayesian fusion: when multiple signals exist on same side,
-    # use the posterior as a confidence boost for the best signal
     result: list[TradeSignal] = []
     for side in ("buy", "sell"):
         side_sigs = [s for s in fused.values() if s.side == side]
@@ -751,49 +780,48 @@ def detect_trade_signals(
         side_sigs.sort(key=lambda s: s.confidence, reverse=True)
         best_sig = side_sigs[0]
 
-        # Fuse confidences of all signals on this side (up to 5 most recent)
+        # Apply Bayesian fusion for signal clusters
         cluster = side_groups[side][-5:]
         if len(cluster) > 1:
-            likelihoods = [s.confidence for s in cluster if s.id != best_sig.id]
+            likelihoods = [s.confidence for s in cluster if s.id != best_sig.id][:4]
             fused_conf = _bayesian_fuse(best_sig.confidence, likelihoods)
             best_sig.confidence = round(max(best_sig.confidence, fused_conf), 2)
             best_sig.reason += f" | Bayesian fused ({len(cluster)} signals)"
 
-        # Apply entropy filter: low entropy (structured market) boosts confidence
+        # Entropy filter: low entropy boosts confidence
         if entropy_factor > 0.4:
-            boost = _clamp(entropy_factor * 0.08, 0.0, 0.08)
-            best_sig.confidence = round(_clamp(best_sig.confidence + boost, 0.2, 0.92), 2)
+            boost = _clamp(entropy_factor * 0.06, 0.0, 0.06)
+            best_sig.confidence = round(_clamp(best_sig.confidence + boost, 0.2, 0.90), 2)
 
-        # Apply Hurst alignment boost
-        if is_mean_reverting and side == "buy" and best_sig.side == "buy":
-            if "BB touch" in best_sig.reason or "VWAP reversion" in best_sig.reason:
-                best_sig.confidence = round(_clamp(best_sig.confidence + 0.04, 0.2, 0.92), 2)
-        if is_trending:
-            if "squeeze breakout" in best_sig.reason or "pullback" in best_sig.reason:
-                best_sig.confidence = round(_clamp(best_sig.confidence + 0.04, 0.2, 0.92), 2)
+        # Hurst alignment boost
+        if is_mean_reverting and "BB" in best_sig.reason or "VWAP" in best_sig.reason:
+            best_sig.confidence = round(_clamp(best_sig.confidence + 0.03, 0.2, 0.90), 2)
+        if is_trending and ("squeeze breakout" in best_sig.reason or "pullback" in best_sig.reason):
+            best_sig.confidence = round(_clamp(best_sig.confidence + 0.03, 0.2, 0.90), 2)
 
-        # Apply GARCH volatility clustering boost
+        # GARCH volatility clustering boost
         if garch_persistence > 0.9:
-            best_sig.confidence = round(_clamp(best_sig.confidence + 0.03, 0.2, 0.92), 2)
-            best_sig.reason += f" | GARCH persistence {garch_persistence:.2f}"
+            best_sig.confidence = round(_clamp(best_sig.confidence + 0.02, 0.2, 0.90), 2)
 
-        # Apply Markov regime certainty boost
+        # Markov regime alignment
         if markov["regime_certainty"] > 0.6:
             regime_side = "buy" if markov["bull_prob"] > markov["bear_prob"] else "sell"
             if regime_side == side:
-                best_sig.confidence = round(_clamp(best_sig.confidence + 0.03, 0.2, 0.92), 2)
-                best_sig.reason += f" | Markov {regime_side} {markov['regime_certainty']:.2f}"
+                best_sig.confidence = round(_clamp(best_sig.confidence + 0.02, 0.2, 0.90), 2)
 
-        # Apply Monte Carlo VaR filter
-        if mc_results["var95"] > 0.05:
-            best_sig.confidence = round(_clamp(best_sig.confidence - 0.05, 0.2, 0.92), 2)
+        # Monte Carlo VaR penalty
+        if mc_results["var95"] > 0.06:
+            best_sig.confidence = round(_clamp(best_sig.confidence - 0.06, 0.2, 0.90), 2)
             best_sig.reason += f" | MC VaR95 {mc_results['var95']:.2%}"
 
-        # Apply signal decay based on timestamp
-        current_ts = ordered[-1].timestamp
-        decay = _signal_decay(best_sig.timestamp, current_ts, half_life_minutes=15)
-        if decay < 0.8:
-            best_sig.confidence = round(_clamp(best_sig.confidence * decay, 0.2, 0.92), 2)
+        # Signal decay
+        decay = _signal_decay(best_sig.timestamp, current_ts, half_life_minutes=12)
+        if decay < 0.85:
+            best_sig.confidence = round(_clamp(best_sig.confidence * decay, 0.2, 0.90), 2)
+
+        # Final quality gate: reject if confidence dropped below threshold
+        if best_sig.confidence < 0.42:
+            continue
 
         result.append(best_sig)
 
