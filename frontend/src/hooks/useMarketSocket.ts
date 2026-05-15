@@ -26,16 +26,28 @@ export function useMarketSocket() {
   useEffect(() => {
     let cancelled = false
     wsReceivedRef.current = false
+    let retryCount = 0
 
     async function loadSnapshot() {
+      if (cancelled) return
       try {
-        const response = await fetch(`${API_BASE}/snapshot?tf=${encodeURIComponent(selectedTimeframe)}`)
-        if (!response.ok) throw new Error(`Snapshot failed: ${response.status}`)
-        const data = parseMarketMessage(await response.json())
-        if (!data) throw new Error('Snapshot payload validation failed')
-        if (!cancelled && !wsReceivedRef.current) applyMessage(data)
+        const url = `${API_BASE || ''}/snapshot?tf=${encodeURIComponent(selectedTimeframe)}`
+        console.log('Fetching HTTP snapshot from', url)
+        const response = await fetch(url)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const json = await response.json()
+        const nc = json.candles?.length ?? 0
+        console.log('HTTP snapshot:', nc, 'candles, stats:', JSON.stringify(json.stats))
+        if (!nc) throw new Error('Snapshot has zero candles')
+        const data = parseMarketMessage(json)
+        if (!data) throw new Error('Zod validation failed')
+        if (!cancelled && !wsReceivedRef.current) {
+          console.log('Applying HTTP snapshot:', nc, 'candles')
+          applyMessage(data)
+        }
       } catch (error) {
         if (!cancelled && !wsReceivedRef.current) {
+          console.warn('HTTP snapshot error:', error)
           applyMessage({
             update_type: 'status',
             status: 'snapshot_error',
@@ -45,9 +57,19 @@ export function useMarketSocket() {
       }
     }
 
+    // Try HTTP snapshot immediately and retry up to 3 times
     loadSnapshot()
+    const retryTimer = window.setInterval(() => {
+      if (cancelled || wsReceivedRef.current) return
+      retryCount++
+      if (retryCount > 3) return window.clearInterval(retryTimer) // eslint-disable-line
+      console.log('Retrying HTTP snapshot, attempt', retryCount)
+      loadSnapshot()
+    }, 4000)
+
     return () => {
       cancelled = true
+      window.clearInterval(retryTimer)
     }
   }, [applyMessage, selectedTimeframe, session])
 
@@ -80,7 +102,9 @@ export function useMarketSocket() {
     websocket.onmessage = (event) => {
       wsReceivedRef.current = true
       try {
-        const message = parseMarketMessage(JSON.parse(event.data))
+        const parsed = JSON.parse(event.data)
+        console.log('WS received:', parsed.update_type, parsed.candles?.length ?? 0, 'candles, stats:', parsed.stats)
+        const message = parseMarketMessage(parsed)
         if (!message) return
         applyMessage(message)
       } catch (error) {

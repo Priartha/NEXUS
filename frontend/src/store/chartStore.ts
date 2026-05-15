@@ -169,6 +169,7 @@ export const useChartStore = create<ChartStore>((set) => ({
       }
 
       if (message.candles) {
+        console.log('Applying snapshot:', message.candles.length, 'candles')
         next.candles = message.candles.map(toChartCandle).slice(-700)
       } else if (message.candle) {
         next.candles = upsertCandle(state.candles, message.candle)

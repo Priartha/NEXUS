@@ -403,7 +403,10 @@ async def snapshot(
     if tf not in supported_timeframes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {tf}. Supported: {list(supported_timeframes)}")
     timeframe = tf
-    payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
+    payload = await asyncio.wait_for(
+        pipelines[timeframe].snapshot_async(stores[timeframe]),
+        timeout=15.0,
+    )
     return _attach_realtime_context(payload, timeframe)
 
 
@@ -438,11 +441,17 @@ async def chart_ws(websocket: WebSocket, tf: str = settings.timeframe, api_key: 
     timeframe = _valid_timeframe(tf)
     await manager.connect(websocket, timeframe=timeframe)
     try:
-        payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
+        payload = await asyncio.wait_for(
+            pipelines[timeframe].snapshot_async(stores[timeframe]),
+            timeout=10.0,
+        )
         payload = _attach_realtime_context(payload, timeframe)
         await websocket.send_json(payload)
         while True:
             await websocket.receive_text()
+    except asyncio.TimeoutError:
+        logger.error(f"WebSocket snapshot_async timed out for {timeframe} - pipeline lock or thread pool contention")
+        await websocket.close(code=1011)
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for timeframe {timeframe}")
     except RuntimeError as exc:
@@ -520,7 +529,14 @@ async def refresh_ai_ict_loop() -> None:
 
 
 async def refresh_ai_ict_timeframe(timeframe: str) -> None:
-    payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
+    try:
+        payload = await asyncio.wait_for(
+            pipelines[timeframe].snapshot_async(stores[timeframe]),
+            timeout=12.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"ai_ict snapshot timed out for {timeframe}")
+        return
     if _payload_analysis_timestamp(payload) is None or payload.get("metrics") is None:
         return
     _attach_options_context(payload)

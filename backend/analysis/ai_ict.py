@@ -270,6 +270,16 @@ class AiIctService:
             liquidity_score = float(bearish_event.get("engineered_score") or 0.0)
             add("bearish", min(liquidity_score * 0.13, 0.13), f"Buy-side sweep engineered {liquidity_score:.0%}")
 
+        trend_score_val = float(metrics.get("trend_score") or 0.0)
+        if trend_score_val > 0.25 and bearish_event:
+            dampen = min(trend_score_val * 0.4, 0.25)
+            scorecard["bearish"] -= dampen
+            evidence["bearish"].append(f"Trend filter: strong uptrend dampens bearish reversal ({dampen:.2f})")
+        elif trend_score_val < -0.25 and bullish_event:
+            dampen = min(abs(trend_score_val) * 0.4, 0.25)
+            scorecard["bullish"] -= dampen
+            evidence["bullish"].append(f"Trend filter: strong downtrend dampens bullish reversal ({dampen:.2f})")
+
         for direction_key in ("bullish", "bearish"):
             if _has_direction(fvgs, direction_key):
                 add(direction_key, 0.05, f"{direction_key} FVG confluence")

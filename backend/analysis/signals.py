@@ -326,7 +326,17 @@ def _confidence_and_reason(
     event = _best_liquidity_event(liquidity_events, event_side, candle.timestamp)
     if event:
         liquidity_score = event.engineered_score
-        score += min(0.16, event.engineered_score * 0.16)
+        event_bonus = min(0.16, event.engineered_score * 0.16)
+        if metrics and abs(metrics.bias_score) > 0.25:
+            trend_against = (
+                (event_side == "sell_side" and metrics.bias_score < 0) or
+                (event_side == "buy_side" and metrics.bias_score > 0)
+            )
+            if trend_against:
+                dampen = min(abs(metrics.bias_score) * 0.5, 0.5)
+                event_bonus *= (1.0 - dampen)
+                reasons.append(f"trend-dampened sweep ({dampen:.0%})")
+        score += event_bonus
         reasons.append(f"engineered {event.side.replace('_', '-')} sweep {event.engineered_score:.2f}")
 
     if label.kind.value == "CHoCH":
