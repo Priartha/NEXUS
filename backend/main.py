@@ -342,6 +342,11 @@ async def paper_trade_stats() -> dict:
     return repo.get_paper_trade_stats()
 
 
+@app.post("/paper-trades/toggle")
+async def toggle_paper_trading() -> dict:
+    return {"ok": True, "message": "Paper trading toggle requested. Configure in settings."}
+
+
 # ─── MTF Confluence ─────────────────────────────────────
 
 # ─── Signals Journal ──────────────────────────────────────

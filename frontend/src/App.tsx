@@ -281,7 +281,7 @@ function App() {
         {panelOpen && (
         <aside className="side-panel">
           <div className="panel-switch">
-            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'trades', 'alerts', 'backtest'] as const).map((view) => (
+            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'alerts'] as const).map((view) => (
               <button
                 key={view}
                 className={panelView === view ? 'active' : ''}
@@ -301,12 +301,21 @@ function App() {
                   </>
                 )}
                 {view === 'depth' && 'Depth'}
-                {view === 'trades' && 'Paper'}
                 {view === 'alerts' && 'Alerts'}
-                {view === 'backtest' && 'BT'}
                 {view === 'institutional' && 'Inst.'}
                 {view === 'risk' && 'Risk'}
                 {view === 'momentum' && 'Momentum'}
+              </button>
+            ))}
+            <div className="panel-switch-sep" />
+            {(['trades', 'backtest'] as const).map((view) => (
+              <button
+                key={view}
+                className={`lab-tab ${panelView === view ? 'active' : ''}`}
+                onClick={() => setPanelView(view)}
+              >
+                {view === 'trades' && 'Paper'}
+                {view === 'backtest' && 'BT'}
               </button>
             ))}
           </div>

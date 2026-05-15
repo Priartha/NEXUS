@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { BarChart3, Play, TrendingDown, DollarSign, Target, Zap } from 'lucide-react'
+import { BarChart3, Play, TrendingDown, DollarSign, Target, Zap, AlertTriangle, CheckCircle, XCircle } from 'lucide-react'
 import type { BacktestRun } from '../types/market'
 import { formatPrice } from '../types/market'
 
@@ -9,6 +9,9 @@ export default function BacktestPanel() {
   const [running, setRunning] = useState(false)
   const [candleCount, setCandleCount] = useState(500)
   const [positionSize, setPositionSize] = useState(2)
+  const [trades, setTrades] = useState<any[]>([])
+  const [equityCurve, setEquityCurve] = useState<any[]>([])
+  const [showTrades, setShowTrades] = useState(false)
 
   const fetchRuns = useCallback(async () => {
     try {
@@ -18,12 +21,14 @@ export default function BacktestPanel() {
   }, [])
 
   useEffect(() => {
-    const initial = setTimeout(() => void fetchRuns(), 0)
-    return () => clearTimeout(initial)
+    fetchRuns()
   }, [fetchRuns])
 
   const runBacktest = async () => {
     setRunning(true)
+    setShowTrades(false)
+    setTrades([])
+    setEquityCurve([])
     try {
       const res = await fetch('/backtest/run', {
         method: 'POST',
@@ -39,16 +44,30 @@ export default function BacktestPanel() {
   const loadRunDetail = async (runId: string) => {
     try {
       const res = await fetch(`/backtest/runs/${runId}`)
-      setSelectedRun(await res.json())
+      const data = await res.json()
+      setSelectedRun(data)
+      setTrades(data.trades || [])
+      setEquityCurve(data.equity_curve || [])
+      setShowTrades(true)
     } catch { /* ignore */ }
   }
+
+  const verdict = selectedRun ? (() => {
+    if (selectedRun.win_rate >= 0.50 && selectedRun.profit_factor != null && selectedRun.profit_factor >= 1.5 && selectedRun.max_drawdown_pct < 0.15) {
+      return { label: 'GOOD MODEL', icon: CheckCircle, color: '#36c7a5' }
+    }
+    if (selectedRun.win_rate < 0.40 || (selectedRun.profit_factor != null && selectedRun.profit_factor < 1.0)) {
+      return { label: 'BAD MODEL', icon: XCircle, color: '#f1616d' }
+    }
+    return { label: 'NEEDS WORK', icon: AlertTriangle, color: '#f59f43' }
+  })() : null
 
   return (
     <div className="bt-panel">
       <div className="bt-panel-hdr">
         <BarChart3 size={14} className="bt-hdr-icon" />
         <span>Strategy Backtest</span>
-        <span className="bt-hdr-badge">v1</span>
+        <span className="bt-hdr-badge">v2</span>
       </div>
 
       <div className="bt-controls">
@@ -61,7 +80,7 @@ export default function BacktestPanel() {
           <label className="bt-ctl-label">Risk</label>
           <div className="bt-ctl-unit-wrap">
             <input className="bt-ctl-input" type="number" value={positionSize}
-              onChange={(e) => setPositionSize(Number(e.target.value))} min={0.5} max={100} step={0.5} />
+              onChange={(e) => setPositionSize(Number(e.target.value))} min={0.5} max={10} step={0.5} />
             <span className="bt-ctl-unit">%</span>
           </div>
         </div>
@@ -72,6 +91,14 @@ export default function BacktestPanel() {
 
       {selectedRun && (
         <div className="bt-result">
+          {verdict && (
+            <div className="bt-verdict" style={{ borderColor: verdict.color }}>
+              <verdict.icon size={14} color={verdict.color} />
+              <span style={{ color: verdict.color, fontWeight: 700 }}>{verdict.label}</span>
+              <span className="bt-verdict-sub">WR {(selectedRun.win_rate * 100).toFixed(0)}% · PF {selectedRun.profit_factor != null ? selectedRun.profit_factor.toFixed(2) : '∞'} · DD {(selectedRun.max_drawdown_pct * 100).toFixed(1)}%</span>
+            </div>
+          )}
+
           <div className="bt-result-grid">
             <div className={`bt-cell ${selectedRun.total_pnl >= 0 ? 'green' : 'red'}`}>
               <div className="bt-cell-label">PnL</div>
@@ -111,7 +138,52 @@ export default function BacktestPanel() {
             <span><DollarSign size={11} /> Avg Win <strong className="green">+${selectedRun.avg_win.toFixed(2)}</strong></span>
             <span><TrendingDown size={11} /> Avg Loss <strong className="red">-${selectedRun.avg_loss.toFixed(2)}</strong></span>
             <span><Target size={11} /> RR <strong>{selectedRun.total_trades > 0 ? (selectedRun.avg_win / Math.max(selectedRun.avg_loss, 0.01)).toFixed(2) : '--'}</strong></span>
+            {selectedRun.max_consecutive_losses != null && (
+              <span><AlertTriangle size={11} /> Max Loss Streak <strong className="red">{selectedRun.max_consecutive_losses}</strong></span>
+            )}
           </div>
+
+          {equityCurve.length > 0 && (
+            <div className="bt-equity-mini">
+              <svg viewBox={`0 0 ${equityCurve.length} 40`} className="bt-equity-svg" preserveAspectRatio="none">
+                {(() => {
+                  const vals = equityCurve.map(e => e.account_balance)
+                  const min = Math.min(...vals)
+                  const max = Math.max(...vals)
+                  const range = max - min || 1
+                  const points = vals.map((v, i) => `${i},${40 - ((v - min) / range) * 36}`).join(' ')
+                  const isProfit = vals[vals.length - 1] >= vals[0]
+                  return (
+                    <>
+                      <polyline points={points} fill="none" stroke={isProfit ? '#36c7a5' : '#f1616d'} strokeWidth="1.5" />
+                    </>
+                  )
+                })()}
+              </svg>
+              <span className="bt-equity-label">Equity Curve</span>
+            </div>
+          )}
+
+          {showTrades && trades.length > 0 && (
+            <div className="bt-trades-section">
+              <div className="bt-trades-hdr">
+                <span>Trades ({trades.length})</span>
+                <button className="bt-trades-toggle" onClick={() => setShowTrades(false)}>Close</button>
+              </div>
+              <div className="bt-trades-list">
+                {trades.slice(0, 30).map((t, i) => (
+                  <div key={i} className={`bt-trade-row ${t.pnl >= 0 ? 'green' : 'red'}`}>
+                    <span className="bt-t-num">{i + 1}</span>
+                    <span className="bt-t-side">{t.side?.toUpperCase()}</span>
+                    <span className="bt-t-entry">${t.entry_price?.toFixed(0)}</span>
+                    <span className="bt-t-exit">${t.exit_price?.toFixed(0)}</span>
+                    <span className="bt-t-pnl">{t.pnl >= 0 ? '+' : ''}{t.pnl?.toFixed(2)}</span>
+                    <span className="bt-t-reason">{t.close_reason}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -137,7 +209,8 @@ export default function BacktestPanel() {
       {!selectedRun && runs.length === 0 && (
         <div className="bt-empty">
           <Zap size={24} className="bt-empty-icon" />
-          <p>Configure parameters and execute a backtest to begin.</p>
+          <p>Configure parameters and execute a backtest to see if the model works on past data.</p>
+          <p className="bt-empty-hint">Good model = 50%+ win rate, profit factor > 1.5, drawdown < 15%</p>
         </div>
       )}
     </div>
