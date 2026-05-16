@@ -34,6 +34,12 @@ data/
 .env.*
 !.env.example
 
+# Local scratch
+backend/_check_*.py
+backend/check_import.py
+backend/run.bat
+maverick-mcp/
+
 # OS / editor
 .DS_Store
 Thumbs.db
