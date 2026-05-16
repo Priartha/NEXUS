@@ -133,7 +133,7 @@ export const useChartStore = create<ChartStore>((set) => ({
 
   applyMessage: (message) =>
     set((state) => {
-      const msg = message as Record<string, unknown>
+      const msg = message as unknown as Record<string, unknown>
       const updateType = msg.update_type as string
 
       if (updateType === 'status') {

@@ -11,6 +11,7 @@ export default defineConfig({
       '/alerts': 'http://127.0.0.1:8000',
       '/signals': 'http://127.0.0.1:8000',
       '/backtest': 'http://127.0.0.1:8000',
+      '/csv-import': 'http://127.0.0.1:8000',
       '/paper-trades': 'http://127.0.0.1:8000',
       '/journal': 'http://127.0.0.1:8000',
       '/health': 'http://127.0.0.1:8000',
@@ -22,6 +23,8 @@ export default defineConfig({
       '/news': 'http://127.0.0.1:8000',
       '/scanner': 'http://127.0.0.1:8000',
       '/risk': 'http://127.0.0.1:8000',
+      '/demo': 'http://127.0.0.1:8000',
+      '/history': 'http://127.0.0.1:8000',
     },
   },
 })

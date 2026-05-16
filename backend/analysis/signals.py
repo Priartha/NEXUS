@@ -104,18 +104,18 @@ def _find_nearest_fvg(candles: list[Candle], fvgs: list[FVG], current_price: flo
 
 def _find_nearest_ob(candles: list[Candle], order_blocks: list[OrderBlock], current_price: float, direction: str) -> OrderBlock | None:
     """Find the nearest valid order block in the direction of trade."""
-    active = [ob for ob in order_blocks if ob.status != "broken"]
+    active = [ob for ob in order_blocks if not ob.is_breaker]
     if not active:
         return None
 
     if direction == "buy":
-        below = [ob for ob in active if ob.high < current_price and ob.type == "bullish"]
+        below = [ob for ob in active if ob.bottom < current_price and ob.direction == "bullish"]
         if below:
-            return max(below, key=lambda ob: ob.high)
+            return max(below, key=lambda ob: ob.bottom)
     else:
-        above = [ob for ob in active if ob.low > current_price and ob.type == "bearish"]
+        above = [ob for ob in active if ob.top > current_price and ob.direction == "bearish"]
         if above:
-            return min(above, key=lambda ob: ob.low)
+            return min(above, key=lambda ob: ob.top)
     return None
 
 
@@ -183,10 +183,10 @@ def detect_trade_signals(
     liquidity_events: list[LiquidityEvent] | None = None,
     swings: list[Swing] | None = None,
     reward_multiple: float = 3.0,
+    regime: Any = None,
 ) -> list[TradeSignal]:
-    """ICT-based signal generation with multi-factor confluence.
-    Requires: trend + FVG/OB + liquidity sweep + killzone + volume confirmation.
-    Returns at most 1 signal with 1:3 RR."""
+    """Momentum breakout signal generation with ATR-based risk management.
+    Enters on pullbacks in established trends with tight ATR stops."""
     if len(candles) < 100:
         return []
 
@@ -214,8 +214,8 @@ def detect_trade_signals(
     signals: list[TradeSignal] = []
 
     for direction in ["buy", "sell"]:
-        is_uptrend = direction == "buy" and trend_strength > 0.25
-        is_downtrend = direction == "sell" and trend_strength < -0.25
+        is_uptrend = direction == "buy" and trend_strength > 0.20
+        is_downtrend = direction == "sell" and trend_strength < -0.20
 
         if not (is_uptrend or is_downtrend):
             continue
@@ -225,13 +225,13 @@ def detect_trade_signals(
 
         if is_uptrend:
             pullback_pct = (latest.close - sma20_i) / sma20_i * 100
-            if not (-2.5 < pullback_pct < 0.5):
+            if not (-3.0 < pullback_pct < 0.5):
                 continue
             if not (25 < rsi_i < 60):
                 continue
         else:
             pullback_pct = (latest.close - sma20_i) / sma20_i * 100
-            if not (-0.5 < pullback_pct < 2.5):
+            if not (-0.5 < pullback_pct < 3.0):
                 continue
             if not (40 < rsi_i < 75):
                 continue
@@ -247,7 +247,7 @@ def detect_trade_signals(
         ob = _find_nearest_ob(ordered, order_blocks, latest.close, direction)
         if ob:
             confluence_score += 0.15
-            reasons.append(f"OB {ob.type} active")
+            reasons.append(f"OB {ob.direction} active")
 
         sweep = _has_liquidity_sweep(liquidity_events, direction)
         if sweep:
@@ -268,35 +268,27 @@ def detect_trade_signals(
             confluence_score += 0.10
             reasons.append(f"Killzone: {session}")
 
-        if confluence_score < 0.45:
+        if confluence_score < 0.60:
             continue
+
+        if not in_killzone:
+            continue
+
+        entry = latest.close
+        stop_distance = atr14 * 1.0
 
         if is_uptrend:
-            entry = latest.close
-            stop = sma50_i
-            if ob:
-                stop = min(stop, ob.high - atr14 * 0.3)
-            if fvg:
-                stop = min(stop, fvg.bottom - atr14 * 0.2)
-            if stop >= entry:
-                stop = entry - atr14 * 1.5
+            stop = entry - stop_distance
+            target = entry + stop_distance * 2.0
         else:
-            entry = latest.close
-            stop = sma50_i
-            if ob:
-                stop = max(stop, ob.low + atr14 * 0.3)
-            if fvg:
-                stop = max(stop, fvg.top + atr14 * 0.2)
-            if stop <= entry:
-                stop = entry + atr14 * 1.5
+            stop = entry + stop_distance
+            target = entry - stop_distance * 2.0
 
         risk = abs(entry - stop)
-        if risk < atr14 * 0.5:
+        if atr14 < 10:
             continue
 
-        target = entry + (risk * reward_multiple) if is_uptrend else entry - (risk * reward_multiple)
-
-        confidence = _clamp(0.45 + confluence_score * 0.55, 0.45, 0.92)
+        confidence = _clamp(0.45 + confluence_score * 0.50, 0.45, 0.92)
 
         signal = _make_signal(
             side=direction,

@@ -6,7 +6,6 @@ import {
   BrainCircuit,
   ChevronLeft,
   ChevronRight,
-  Clock,
   Eye,
   Gauge,
   Orbit,
@@ -26,10 +25,9 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Minus,
-  Sparkles,
   Radar,
   Timer,
-  Percent,
+  Settings,
 } from 'lucide-react'
 import './App.css'
 import { Chart } from './components/Chart'
@@ -37,6 +35,9 @@ import DepthHeatmap from './components/DepthHeatmap'
 import { InstitutionalMetricsPanel } from './components/InstitutionalMetricsPanel'
 import { MomentumPanel } from './components/MomentumPanel'
 import { RiskAnalyticsPanel } from './components/RiskAnalyticsPanel'
+import { AnalyticsPanel } from './components/AnalyticsPanel'
+import { StrategyConfigPanel } from './components/StrategyConfigPanel'
+import { ForwardTestPanel } from './components/ForwardTestPanel'
 import { BtcHeadlinesCorner } from './components/BtcHeadlinesCorner'
 
 import AlertsPanel from './components/AlertsPanel'
@@ -51,7 +52,7 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum'
+type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'analytics' | 'config' | 'forward'
 
 const SESSION_COLORS: Record<string, string> = {
   asian: '#8ab4f8',
@@ -95,13 +96,11 @@ function App() {
   const fvgs = useChartStore((state) => state.fvgs)
   const orderBlocks = useChartStore((state) => state.orderBlocks)
   const liquidity = useChartStore((state) => state.liquidity)
-  const swings = useChartStore((state) => state.swings)
-  const signals = useChartStore((state) => state.signals)
 
   const ctx = btcPatterns ?? DEMO_PATTERNS
-  const patterns = ctx.patterns
-  const behaviors = ctx.investor_behaviors
-  const patternSignal = ctx.pattern_signal
+  const patterns = ctx?.patterns ?? []
+  const behaviors = ctx?.investor_behaviors ?? []
+  const patternSignal = ctx?.pattern_signal ?? 'neutral'
   const isDemo = !btcPatterns
 
   const latest = candles.at(-1)
@@ -133,10 +132,6 @@ function App() {
   const [panelOpen, setPanelOpen] = useState(true)
   const latestLiquidityEvent = liquidityEvents.at(-1)
 
-  const topPatterns = useMemo(
-    () => [...patterns].sort((a, b) => b.score - a.score).slice(0, 5),
-    [patterns],
-  )
   const topBehaviors = useMemo(
     () => [...behaviors].sort((a, b) => b.confidence - a.confidence).slice(0, 4),
     [behaviors],
@@ -150,13 +145,10 @@ function App() {
   const avgScore = patterns.length
     ? patterns.reduce((s, p) => s + p.score, 0) / patterns.length
     : 0
-  const bestPattern = patterns.length
-    ? patterns.reduce((a, b) => (a.confidence > b.confidence ? a : b))
-    : null
   const activeFvgs = fvgs.filter((f) => !f.is_filled)
-  const activeOBs = orderBlocks.filter((ob) => ob.status !== 'broken')
+  const activeOBs = orderBlocks.filter((ob) => !ob.is_breaker)
   const activeLiquidity = liquidity.filter((l) => !l.swept)
-  const sessionColor = SESSION_COLORS[ctx.session ?? ''] ?? '#888'
+  const sessionColor = SESSION_COLORS[ctx?.session ?? ''] ?? '#888'
   const regimeColor = REGIME_COLORS[regime?.phase ?? ''] ?? '#888'
   const obImbalances = orderbook?.imbalances ?? []
   const obAccumulations = orderbook?.accumulations ?? []
@@ -222,7 +214,7 @@ function App() {
           </span>
           {ctx && (
             <span className="session-badge" style={{ borderColor: sessionColor, color: sessionColor }}>
-              {ctx.session}
+              {ctx?.session ?? '--'}
             </span>
           )}
           <span className="quote-source">{quote?.source ?? 'candle'}</span>
@@ -253,7 +245,7 @@ function App() {
 
       {/* ─── STATUS STRIP ──────────────────────────── */}
       <section className="status-strip">
-        <Metric icon={<Activity size={16} />} label="Feed" value={feedStatus.replaceAll('_', ' ')} />
+        <Metric icon={<Activity size={16} />} label="Feed" value={(feedStatus ?? 'unknown').replaceAll('_', ' ')} />
         <Metric icon={<Target size={16} />} label="Signal" value={finalAction} />
         <Metric icon={<Gauge size={16} />} label="Momentum" value={momentumText} />
         <Metric icon={<BrainCircuit size={16} />} label="Option" value={optionContract?.symbol ?? 'WAIT'} />
@@ -325,7 +317,7 @@ function App() {
         {panelOpen && (
         <aside className="side-panel">
           <div className="panel-switch">
-            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'alerts', 'trades', 'backtest'] as const).map((view) => (
+            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'alerts', 'trades', 'backtest', 'forward', 'config', 'analytics'] as const).map((view) => (
               <button
                 key={view}
                 className={panelView === view ? 'active' : ''}
@@ -352,6 +344,24 @@ function App() {
                 {view === 'momentum' && 'Momentum'}
                 {view === 'trades' && 'Paper'}
                 {view === 'backtest' && 'BT'}
+                {view === 'forward' && (
+                  <>
+                    <Activity size={11} />
+                    Demo
+                  </>
+                )}
+                {view === 'config' && (
+                  <>
+                    <Settings size={11} />
+                    Config
+                  </>
+                )}
+                {view === 'analytics' && (
+                  <>
+                    <BarChart2 size={11} />
+                    Analytics
+                  </>
+                )}
               </button>
             ))}
           </div>
@@ -472,6 +482,20 @@ function App() {
                   </div>
                 </section>
               )}
+
+              <section>
+                <h2><Settings size={13} /> Active Strategy</h2>
+                <dl className="facts compact">
+                  <div><dt>Stop Loss</dt><dd>0.5× ATR</dd></div>
+                  <div><dt>Breakeven</dt><dd>@ 0.5R</dd></div>
+                  <div><dt>TP1 / TP2</dt><dd>1.0R / 1.5R</dd></div>
+                  <div><dt>Max Hold</dt><dd>12 bars (1h)</dd></div>
+                  <div><dt>ADX Filter</dt><dd>Yes (&gt;20)</dd></div>
+                  <div><dt>Limit Orders</dt><dd>Yes</dd></div>
+                  <div><dt>Min Confidence</dt><dd>55%</dd></div>
+                  <div><dt>Cooldown</dt><dd>12 candles</dd></div>
+                </dl>
+              </section>
             </div>
           )}
 
@@ -557,11 +581,11 @@ function App() {
                 <div className="pattern-scores-row">
                   <div className="score-chip bullish">
                     <span className="score-chip-label">Bull Score</span>
-                    <span className="score-chip-value">{ctx.bullish_pattern_score.toFixed(3)}</span>
+                    <span className="score-chip-value">{(ctx?.bullish_pattern_score ?? 0).toFixed(3)}</span>
                   </div>
                   <div className="score-chip bearish">
                     <span className="score-chip-label">Bear Score</span>
-                    <span className="score-chip-value">{ctx.bearish_pattern_score.toFixed(3)}</span>
+                    <span className="score-chip-value">{(ctx?.bearish_pattern_score ?? 0).toFixed(3)}</span>
                   </div>
                   <div className="score-chip">
                     <span className="score-chip-label">Avg Conf</span>
@@ -577,7 +601,7 @@ function App() {
                 <div className="context-grid">
                   <div className="context-item">
                     <span className="ctx-label">Session</span>
-                    <strong className="ctx-value" style={{ color: sessionColor }}>{ctx.session}</strong>
+                    <strong className="ctx-value" style={{ color: sessionColor }}>{ctx?.session ?? '--'}</strong>
                   </div>
                   <div className="context-item">
                     <span className="ctx-label">Regime</span>
@@ -585,7 +609,7 @@ function App() {
                   </div>
                   <div className="context-item">
                     <span className="ctx-label">Volatility</span>
-                    <strong className="ctx-value">{ctx.volatility_regime}</strong>
+                    <strong className="ctx-value">{ctx?.volatility_regime ?? '--'}</strong>
                   </div>
                   <div className="context-item">
                     <span className="ctx-label">Signal</span>
@@ -674,11 +698,11 @@ function App() {
               )}
 
               {/* Fractal Clusters */}
-              {ctx.fractal_clusters.length > 0 && (
+              {(ctx?.fractal_clusters?.length ?? 0) > 0 && (
                 <section>
                   <h2><Waves size={13} /> Fractal Clusters</h2>
                   <div className="cluster-pills">
-                    {ctx.fractal_clusters.map((c) => (
+                    {ctx!.fractal_clusters.map((c) => (
                       <span key={c} className="pill fractal-pill">{c.replace('near_pivot_', '$')}</span>
                     ))}
                   </div>
@@ -1003,6 +1027,24 @@ function App() {
                   </dl>
                 </section>
               )}
+            </div>
+          )}
+
+          {panelView === 'analytics' && (
+            <div className="panel-content analytics-panel-content">
+              <AnalyticsPanel />
+            </div>
+          )}
+
+          {panelView === 'forward' && (
+            <div className="panel-content forward-test-panel-content">
+              <ForwardTestPanel />
+            </div>
+          )}
+
+          {panelView === 'config' && (
+            <div className="panel-content strategy-config-panel-content">
+              <StrategyConfigPanel />
             </div>
           )}
         </aside>

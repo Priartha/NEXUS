@@ -26,10 +26,12 @@ class BacktestEngine:
         initial_balance: float = 10_000.0,
         position_size_pct: float = 0.02,
         max_concurrent: int = 1,
-        slippage_pct: float = 0.0002,  # 0.02% slippage per trade
-        commission_pct: float = 0.0004,  # 0.04% commission (round trip)
-        max_hold_bars: int = 25,  # Max bars to hold a trade
-        breakeven_threshold: float = 1.0,  # Move SL to breakeven after 1R profit
+        slippage_pct: float = 0.0001,
+        commission_pct: float = 0.0002,
+        max_hold_bars: int = 10,
+        breakeven_threshold: float = 1.0,
+        trailing_stop: bool = False,
+        trailing_atr_multiplier: float = 1.0,
     ):
         self.initial_balance = float(initial_balance)
         self.position_size_pct = float(position_size_pct)
@@ -38,6 +40,8 @@ class BacktestEngine:
         self.commission_pct = float(commission_pct)
         self.max_hold_bars = max_hold_bars
         self.breakeven_threshold = breakeven_threshold
+        self.trailing_stop = trailing_stop
+        self.trailing_atr_multiplier = trailing_atr_multiplier
 
     def run(
         self,
@@ -93,6 +97,7 @@ class BacktestEngine:
                 order_blocks=order_blocks,
                 liquidity_events=liquidity_events,
                 swings=swings,
+                regime=regime,
             )
 
             # Filter: only new signals not already processed
@@ -150,19 +155,20 @@ class BacktestEngine:
                 bars_held = trade.get("bars_held", 0) + 1
                 trade["bars_held"] = bars_held
 
-                # ── Trailing stop: move to breakeven after 1R profit ──
-                risk = abs(entry - trade.get("initial_sl", sl))
-                if risk > 0:
-                    if side == "buy":
-                        profit_r = (current.high - entry) / risk
-                        if profit_r >= self.breakeven_threshold:
-                            trade["stop_loss"] = max(trade["stop_loss"], entry)
-                            sl = trade["stop_loss"]
-                    else:
-                        profit_r = (entry - current.low) / risk
-                        if profit_r >= self.breakeven_threshold:
-                            trade["stop_loss"] = min(trade["stop_loss"], entry)
-                            sl = trade["stop_loss"]
+                # ── Trailing stop: only when explicitly enabled ──
+                if self.trailing_stop:
+                    risk = abs(entry - trade.get("initial_sl", sl))
+                    if risk > 0:
+                        if side == "buy":
+                            profit_r = (current.high - entry) / risk
+                            if profit_r >= self.breakeven_threshold:
+                                trade["stop_loss"] = max(trade["stop_loss"], entry)
+                                sl = trade["stop_loss"]
+                        else:
+                            profit_r = (entry - current.low) / risk
+                            if profit_r >= self.breakeven_threshold:
+                                trade["stop_loss"] = min(trade["stop_loss"], entry)
+                                sl = trade["stop_loss"]
 
                 # ── Time-based exit ──
                 if bars_held >= self.max_hold_bars:

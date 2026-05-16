@@ -241,7 +241,7 @@ class AnalysisPipeline:
         for ob in new_obs:
             if ob.id not in existing_ids:
                 merged.append(ob)
-        return [ob for ob in merged if ob.status != "broken"][-30:]
+        return [ob for ob in merged if not ob.is_breaker][-30:]
 
     def _merge_liquidity_events(self, new_events: list[LiquidityEvent]) -> list[LiquidityEvent]:
         existing_ids = {e.id for e in self.liquidity_events}
@@ -361,6 +361,155 @@ class AnalysisPipeline:
             self._last_regime_phase = self.regime.phase
 
         return payload
+
+    def get_state(self) -> dict | None:
+        """Get current pipeline state for history recording."""
+        if not self.metrics or not self.regime:
+            return None
+
+        closed = self._get_closed_candles_for_state()
+        latest = closed[-1] if closed else None
+        price = latest.close if latest else 0
+
+        patterns = []
+        if self.btc_patterns:
+            for p in self.btc_patterns.patterns:
+                patterns.append({
+                    "id": p.id,
+                    "name": p.name,
+                    "direction": p.direction,
+                    "confidence": p.confidence,
+                    "score": p.score,
+                    "description": p.description,
+                    "candle_count": p.candle_count,
+                    "completed": p.completed,
+                })
+
+        fvgs_active = [f for f in self.fvgs if not f.is_filled]
+        obs_active = [ob for ob in self.order_blocks if not ob.is_breaker]
+
+        return {
+            "symbol": getattr(self, "_symbol", "BTCUSDT"),
+            "timeframe": getattr(self, "_timeframe", "5m"),
+            "price": price,
+            "change_pct": ((price - closed[-2].close) / closed[-2].close * 100) if len(closed) >= 2 else 0,
+            "regime": {
+                "phase": self.regime.phase,
+                "bias": self.regime.bias,
+                "confidence": self.regime.confidence,
+                "range_high": self.regime.range_high,
+                "range_low": self.regime.range_low,
+                "range_mid": self.regime.range_mid,
+                "width_pct": self.regime.width_pct,
+                "atr_compression": self.regime.atr_compression,
+                "efficiency_ratio": self.regime.efficiency_ratio,
+                "volume_state": self.regime.volume_state,
+                "reason": self.regime.reason,
+            },
+            "metrics": {
+                "rsi14": self.metrics.rsi14,
+                "atr14": self.metrics.atr14,
+                "ema20": self.metrics.ema20,
+                "ema50": self.metrics.ema50,
+                "vwap": self.metrics.vwap,
+                "vwap_distance_pct": self.metrics.vwap_distance_pct,
+                "volume_zscore": self.metrics.volume_zscore,
+                "realized_volatility": self.metrics.realized_volatility,
+                "trend_score": self.metrics.trend_score,
+                "volatility_score": self.metrics.volatility_score,
+                "institutional_bias": self.metrics.institutional_bias,
+                "bias_score": self.metrics.bias_score,
+                "expected_move": self.metrics.expected_move,
+                "hurst_exponent": self.metrics.hurst_exponent,
+                "shannon_entropy": self.metrics.shannon_entropy,
+                "garch_volatility": self.metrics.garch_volatility,
+                "kalman_trend_strength": self.metrics.kalman_trend_strength,
+                "markov_bull_prob": self.metrics.markov_bull_prob,
+                "markov_bear_prob": self.metrics.markov_bear_prob,
+                "monte_carlo_var95": self.metrics.monte_carlo_var95,
+                "fourier_dominant_period": self.metrics.fourier_dominant_period,
+                "volume_profile_poc": self.metrics.volume_profile_poc,
+                "volume_profile_imbalance": self.metrics.volume_profile_imbalance,
+                "return_skewness": self.metrics.return_skewness,
+                "return_kurtosis": self.metrics.return_kurtosis,
+                "fractal_dimension": self.metrics.fractal_dimension,
+            },
+            "patterns": patterns,
+            "fvgs": [{"id": f.id, "direction": f.direction, "top": f.top, "bottom": f.bottom} for f in fvgs_active],
+            "order_blocks": [{"id": ob.id, "direction": ob.direction, "high": ob.high, "low": ob.low} for ob in obs_active],
+            "liquidity": [{"id": l.id, "side": l.side, "price": l.price} for l in self.liquidity],
+            "liquidity_events": [
+                {
+                    "id": e.id,
+                    "side": e.side,
+                    "swept_level": e.swept_level,
+                    "sweep_price": e.sweep_price,
+                    "close_price": e.close_price,
+                    "sweep_depth": e.sweep_depth,
+                    "displacement": e.displacement,
+                    "reclaimed": e.reclaimed,
+                    "engineered_score": e.engineered_score,
+                    "reason": e.reason,
+                    "level_kind": e.level_kind,
+                    "level_price": e.level_price,
+                    "touch_count": e.touch_count,
+                }
+                for e in self.liquidity_events
+            ],
+            "sentiment": getattr(self, "_sentiment", {}),
+            "ai_decision": getattr(self, "_ai_decision", {}),
+            "orderbook": {
+                "bid": self.orderbook_analyzer.current_bid if hasattr(self.orderbook_analyzer, "current_bid") else None,
+                "ask": self.orderbook_analyzer.current_ask if hasattr(self.orderbook_analyzer, "current_ask") else None,
+                "spread": self.orderbook_analyzer.current_spread if hasattr(self.orderbook_analyzer, "current_spread") else None,
+                "spread_pct": self.orderbook_analyzer.current_spread_pct if hasattr(self.orderbook_analyzer, "current_spread_pct") else None,
+                "mid": self.orderbook_analyzer.current_mid if hasattr(self.orderbook_analyzer, "current_mid") else None,
+                "imbalance_count": len(self.ob_imbalances),
+                "accumulation_count": len([a for a in self.ob_accumulations if a.status == "active"]),
+                "spread_anomaly_count": len([d for d in self.ob_spread_dynamics if d.status != "normal"]),
+                "raw_imbalances": to_wire(self.ob_imbalances[-10:]),
+                "raw_accumulations": to_wire(self.ob_accumulations[-10:]),
+            },
+            "candle_count": len(closed),
+            "session": self.metrics.session if hasattr(self.metrics, "session") else None,
+            "halving_phase": self.metrics.halving_phase if hasattr(self.metrics, "halving_phase") else None,
+            "volatility_regime": self.metrics.volatility_regime if hasattr(self.metrics, "volatility_regime") else None,
+        }
+
+    def get_closed_candles(self) -> list[dict]:
+        """Get closed candles for archiving."""
+        closed = self._get_closed_candles_for_state()
+        return [
+            {
+                "timestamp": c.timestamp,
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume,
+                "is_closed": True,
+            }
+            for c in closed
+        ]
+
+    def _get_closed_candles_for_state(self) -> list[Candle]:
+        """Get closed candles from the store (requires store reference)."""
+        # This is a placeholder - the store reference needs to be passed
+        # For now, return empty list. The recorder will need to be updated
+        # to pass the store reference or the pipeline needs to store it.
+        return []
+
+    def set_store_reference(self, store: CandleStore) -> None:
+        """Set reference to candle store for state extraction."""
+        self._symbol = store.symbol
+        self._timeframe = store.timeframe
+        self._store = store
+
+    def _get_closed_candles_for_state(self) -> list[Candle]:
+        """Get closed candles from the stored reference."""
+        if hasattr(self, "_store"):
+            return self._store.get_closed_candles()
+        return []
 
 
 def _select_primary_signal(signals: list[TradeSignal]) -> list[TradeSignal]:

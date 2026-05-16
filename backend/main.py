@@ -39,6 +39,11 @@ from backend.analysis.backtest import BacktestEngine
 from backend.analysis.paper_trading import PaperTradingEngine
 from backend.analysis.risk_manager import RiskManager
 from backend.analysis.symbol_scanner import MultiSymbolScanner
+from backend.analysis.csv_import import parse_csv, get_supported_formats
+from backend.api.history_routes import router as history_router
+from backend.api.demo_routes import router as demo_router
+from backend.storage.history_recorder import recorder as history_recorder
+from backend.analysis.daily_reports import daily_reporter
 
 paper_trading = PaperTradingEngine()
 risk_manager = RiskManager()
@@ -141,6 +146,8 @@ pipelines = {
     )
     for timeframe in supported_timeframes
 }
+for timeframe, pipeline in pipelines.items():
+    pipeline.set_store_reference(stores[timeframe])
 ai_ict_reviews = {timeframe: None for timeframe in supported_timeframes}
 option_tickers: list[dict] = []
 option_tickers_error: str | None = None
@@ -183,10 +190,23 @@ async def lifespan(app: FastAPI):
     sentiment_task = asyncio.create_task(refresh_sentiment_loop())
     ai_ict_task = asyncio.create_task(refresh_ai_ict_loop())
     options_task = asyncio.create_task(refresh_options_loop())
+    
+    # Start history recorder (uses primary timeframe pipeline)
+    primary_tf = supported_timeframes[0]
+    primary_pipeline = pipelines[primary_tf]
+    await history_recorder.start(primary_pipeline)
+    logger.info(f"History recorder started for timeframe {primary_tf}")
+    
+    # Start daily report generator
+    await daily_reporter.start()
+    logger.info("Daily report generator started")
+    
     try:
         yield
     finally:
         logger.info("Shutting down background tasks")
+        await history_recorder.stop()
+        await daily_reporter.stop()
         for task in (stream_task, sentiment_task, ai_ict_task, options_task):
             task.cancel()
         for task in (stream_task, sentiment_task, ai_ict_task, options_task):
@@ -200,6 +220,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="NEXUS", version="1.0.0", lifespan=lifespan)
 app.state.limiter = limiter
+app.include_router(history_router)
+app.include_router(demo_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.cors_origins),
@@ -304,9 +326,12 @@ async def health() -> dict:
 class BacktestRequest(BaseModel):
     symbol: str = "BTCUSDT"
     timeframe: str = "5m"
-    candle_count: int = 500
+    candle_count: int = 1000
     initial_balance: float = 10_000.0
     position_size_pct: float = 0.02
+    max_hold_bars: int = 25
+    breakeven_threshold: float = 1.0
+    trailing_stop: bool = False
 
 
 @app.post("/backtest/run")
@@ -314,16 +339,19 @@ async def run_backtest(body: BacktestRequest) -> dict:
     store = stores.get(body.timeframe)
     if not store:
         raise HTTPException(status_code=400, detail=f"Invalid timeframe: {body.timeframe}")
-    
+
     candles = store.get_closed_candles()
     if len(candles) < 80:
         raise HTTPException(status_code=400, detail=f"Not enough candles: {len(candles)} (need at least 80)")
-    
+
     candles = candles[-body.candle_count:]
-    
+
     engine = BacktestEngine(
         initial_balance=body.initial_balance,
         position_size_pct=body.position_size_pct,
+        max_hold_bars=body.max_hold_bars,
+        breakeven_threshold=body.breakeven_threshold,
+        trailing_stop=body.trailing_stop,
     )
     result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
     repo.save_backtest_run(result)
@@ -380,6 +408,94 @@ async def reset_paper_trades() -> dict:
 async def reset_backtest_data() -> dict:
     count = repo.reset_backtests()
     return {"ok": True, "message": f"Cleared {count} backtest runs"}
+
+
+# ─── CSV Import ───────────────────────────────────────────
+
+class CsvImportRequest(BaseModel):
+    content: str
+    format: str = "auto"
+    symbol: str = "BTCUSDT"
+    timeframe: str = "5m"
+    custom_mapping: dict[str, str] | None = None
+
+
+@app.get("/csv-import/formats")
+async def get_csv_formats() -> list[dict]:
+    """Get list of supported CSV formats."""
+    return get_supported_formats()
+
+
+@app.post("/csv-import/parse")
+async def parse_csv_data(body: CsvImportRequest) -> dict:
+    """Parse CSV content and return candle data."""
+    if not body.content or not body.content.strip():
+        raise HTTPException(status_code=400, detail="Empty CSV content")
+
+    result = parse_csv(
+        content=body.content,
+        format_type=body.format,
+        custom_mapping=body.custom_mapping,
+        timeframe=body.timeframe,
+        symbol=body.symbol,
+    )
+
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["errors"])
+
+    return {
+        "success": True,
+        "metadata": result["metadata"],
+        "warnings": result["warnings"],
+        "candle_count": result["count"],
+    }
+
+
+@app.post("/csv-import/backtest")
+async def backtest_csv(body: CsvImportRequest) -> dict:
+    """Parse CSV and run backtest on imported data."""
+    if not body.content or not body.content.strip():
+        raise HTTPException(status_code=400, detail="Empty CSV content")
+
+    result = parse_csv(
+        content=body.content,
+        format_type=body.format,
+        custom_mapping=body.custom_mapping,
+        timeframe=body.timeframe,
+        symbol=body.symbol,
+    )
+
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["errors"])
+
+    candles = result["candles"]
+    if len(candles) < 80:
+        raise HTTPException(status_code=400, detail=f"Not enough candles: {len(candles)} (need at least 80)")
+
+    engine = BacktestEngine(
+        initial_balance=10000,
+        position_size_pct=0.02,
+        max_hold_bars=10,
+        breakeven_threshold=1.0,
+        trailing_stop=False,
+        slippage_pct=0.0001,
+        commission_pct=0.0002,
+    )
+    bt_result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
+    bt_result["import_metadata"] = result["metadata"]
+    bt_result["import_warnings"] = result["warnings"]
+
+    repo.save_backtest_run(bt_result)
+    repo.save_backtest_trades(bt_result["id"], bt_result["trades"])
+
+    pts = [{"timestamp": e["timestamp"], "account_balance": e["account_balance"],
+            "drawdown": e["drawdown"], "drawdown_pct": e["drawdown_pct"],
+            "source": "csv_import", "run_id": bt_result["id"]} for e in bt_result["equity_curve"]]
+    repo.save_equity_points(pts)
+
+    bt_result.pop("trades", None)
+    bt_result.pop("equity_curve", None)
+    return bt_result
 
 
 # ─── MTF Confluence ─────────────────────────────────────
@@ -662,6 +778,44 @@ async def chart_ws(websocket: WebSocket, tf: str = settings.timeframe, api_key: 
         logger.error(f"WebSocket error for timeframe {timeframe}: {e}", exc_info=True)
     finally:
         await manager.disconnect(websocket)
+
+
+# ─── History WebSocket ──────────────────────────────────
+
+_history_ws_clients: list[WebSocket] = []
+
+
+@app.websocket("/ws/history")
+async def history_ws(websocket: WebSocket) -> None:
+    """WebSocket for real-time history/analytics updates."""
+    await websocket.accept()
+    _history_ws_clients.append(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        logger.info("History WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"History WebSocket error: {e}", exc_info=True)
+    finally:
+        if websocket in _history_ws_clients:
+            _history_ws_clients.remove(websocket)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+async def broadcast_history_update(data: dict) -> None:
+    """Broadcast history update to all connected history WS clients."""
+    if not _history_ws_clients:
+        return
+    for ws in _history_ws_clients[:]:
+        try:
+            await ws.send_json(data)
+        except Exception:
+            if ws in _history_ws_clients:
+                _history_ws_clients.remove(ws)
 
 
 def _valid_timeframe(timeframe: str) -> str:
