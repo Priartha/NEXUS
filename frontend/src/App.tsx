@@ -28,6 +28,9 @@ import {
   Radar,
   Timer,
   Settings,
+  Globe,
+  Database,
+  Bell,
 } from 'lucide-react'
 import './App.css'
 import { Chart } from './components/Chart'
@@ -39,6 +42,10 @@ import { AnalyticsPanel } from './components/AnalyticsPanel'
 import { StrategyConfigPanel } from './components/StrategyConfigPanel'
 import { ForwardTestPanel } from './components/ForwardTestPanel'
 import { BtcHeadlinesCorner } from './components/BtcHeadlinesCorner'
+import { MultiExchangePanel } from './components/MultiExchangePanel'
+import { ModelDashboard } from './components/ModelDashboard'
+import { DbStatusPanel } from './components/DbStatusPanel'
+import { AlertConfigPanel } from './components/AlertConfigPanel'
 
 import AlertsPanel from './components/AlertsPanel'
 import BacktestPanel from './components/BacktestPanel'
@@ -52,7 +59,7 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'analytics' | 'config' | 'forward'
+type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config'
 
 const SESSION_COLORS: Record<string, string> = {
   asian: '#8ab4f8',
@@ -317,7 +324,7 @@ function App() {
         {panelOpen && (
         <aside className="side-panel">
           <div className="panel-switch">
-            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'alerts', 'trades', 'backtest', 'forward', 'config', 'analytics'] as const).map((view) => (
+            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'alerts', 'trades', 'backtest', 'forward', 'config', 'analytics', 'multi-exchange', 'model', 'db-status', 'alert-config'] as const).map((view) => (
               <button
                 key={view}
                 className={panelView === view ? 'active' : ''}
@@ -360,6 +367,30 @@ function App() {
                   <>
                     <BarChart2 size={11} />
                     Analytics
+                  </>
+                )}
+                {view === 'multi-exchange' && (
+                  <>
+                    <Globe size={11} />
+                    Exchanges
+                  </>
+                )}
+                {view === 'model' && (
+                  <>
+                    <BrainCircuit size={11} />
+                    Model
+                  </>
+                )}
+                {view === 'db-status' && (
+                  <>
+                    <Database size={11} />
+                    DB
+                  </>
+                )}
+                {view === 'alert-config' && (
+                  <>
+                    <Bell size={11} />
+                    Alerts
                   </>
                 )}
               </button>
@@ -1045,6 +1076,30 @@ function App() {
           {panelView === 'config' && (
             <div className="panel-content strategy-config-panel-content">
               <StrategyConfigPanel />
+            </div>
+          )}
+
+          {panelView === 'multi-exchange' && (
+            <div className="panel-content">
+              <MultiExchangePanel />
+            </div>
+          )}
+
+          {panelView === 'model' && (
+            <div className="panel-content">
+              <ModelDashboard />
+            </div>
+          )}
+
+          {panelView === 'db-status' && (
+            <div className="panel-content">
+              <DbStatusPanel />
+            </div>
+          )}
+
+          {panelView === 'alert-config' && (
+            <div className="panel-content">
+              <AlertConfigPanel />
             </div>
           )}
         </aside>

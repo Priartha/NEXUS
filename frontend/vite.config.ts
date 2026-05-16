@@ -25,6 +25,12 @@ export default defineConfig({
       '/risk': 'http://127.0.0.1:8000',
       '/demo': 'http://127.0.0.1:8000',
       '/history': 'http://127.0.0.1:8000',
+      '/price': 'http://127.0.0.1:8000',
+      '/db': 'http://127.0.0.1:8000',
+      '/model': 'http://127.0.0.1:8000',
+      '/config': 'http://127.0.0.1:8000',
+      '/rate-limits': 'http://127.0.0.1:8000',
+      '/cache': 'http://127.0.0.1:8000',
     },
   },
 })

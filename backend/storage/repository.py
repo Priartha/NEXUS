@@ -317,6 +317,36 @@ def acknowledge_alert(alert_id: str) -> None:
         conn.close()
 
 
+# ─── Alert Configuration ──────────────────────────────────
+
+def get_alert_config() -> dict:
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT config_json FROM alert_config WHERE id=1").fetchone()
+        if row and row["config_json"]:
+            return json.loads(row["config_json"])
+        return {
+            "rules": [],
+            "sound_enabled": True,
+            "notification_enabled": False,
+            "max_alerts_per_hour": 20,
+        }
+    finally:
+        conn.close()
+
+
+def save_alert_config(config: dict) -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO alert_config (id, config_json, updated_at) VALUES (1, ?, ?)",
+            (json.dumps(config), int(time.time() * 1000)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ─── Trade Journal ────────────────────────────────────────
 
 def save_journal_entry(entry: dict) -> None:

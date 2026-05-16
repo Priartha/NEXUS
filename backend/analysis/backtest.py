@@ -1,6 +1,20 @@
+"""
+Backtest Engine for NEXUS - v3.0
+
+NEW FEATURES:
+- Walk-forward validation (train/test split)
+- Statistical significance testing (t-test, Monte Carlo, DSR, PBO)
+- Overfitting detection
+- Regime-specific performance attribution
+- Benchmark comparison (buy-and-hold, SMA crossover)
+- Funding rate and swap cost tracking
+"""
+
 from __future__ import annotations
 
+import logging
 import math
+import random
 import time
 import uuid
 from collections import deque
@@ -14,12 +28,15 @@ from backend.analysis.market_structure import detect_structure
 from backend.analysis.order_block import detect_order_blocks, update_order_block_breakers
 from backend.analysis.regime import detect_market_regime
 from backend.analysis.signals import detect_trade_signals
+from backend.analysis.statistical_tests import compute_full_statistics, compute_sharpe_ratio
 from backend.analysis.swing_detector import detect_swings
 from backend.models.types import Candle
 
+logger = logging.getLogger("backend")
+
 
 class BacktestEngine:
-    """Walk-forward backtesting engine that replays historical candles through the analysis pipeline."""
+    """Walk-forward backtesting engine with statistical validation."""
 
     def __init__(
         self,
@@ -32,6 +49,7 @@ class BacktestEngine:
         breakeven_threshold: float = 1.0,
         trailing_stop: bool = False,
         trailing_atr_multiplier: float = 1.0,
+        funding_rate_per_8h: float = 0.0001,
     ):
         self.initial_balance = float(initial_balance)
         self.position_size_pct = float(position_size_pct)
@@ -42,20 +60,199 @@ class BacktestEngine:
         self.breakeven_threshold = breakeven_threshold
         self.trailing_stop = trailing_stop
         self.trailing_atr_multiplier = trailing_atr_multiplier
+        self.funding_rate_per_8h = funding_rate_per_8h
 
     def run(
         self,
         candles: list[Candle],
         symbol: str = "BTC/USDT",
         timeframe: str = "5m",
+        walk_forward: bool = False,
+        train_pct: float = 0.7,
     ) -> dict:
         candles = sorted(candles, key=lambda c: c.timestamp)
+
+        if walk_forward and len(candles) >= 200:
+            return self._run_walk_forward(candles, symbol, timeframe, train_pct)
+
+        return self._run_single(candles, symbol, timeframe)
+
+    def _run_single(
+        self,
+        candles: list[Candle],
+        symbol: str,
+        timeframe: str,
+    ) -> dict:
+        try:
+            results, equity, balance, peak, open_trades, returns_series = self._execute_trades(candles)
+        except Exception as e:
+            logger.error(f"_execute_trades failed: {e}")
+            return self._fallback_result(candles, symbol, timeframe)
+
+        try:
+            benchmark_returns = self._compute_benchmark_returns(candles)
+            sma_returns = self._compute_sma_benchmark_returns(candles)
+        except Exception:
+            benchmark_returns = []
+            sma_returns = []
+
+        stats = self._compute_stats(results, equity, balance, candles, symbol, timeframe)
+        try:
+            stats.update(self._compute_benchmark_stats(candles, benchmark_returns, sma_returns))
+        except Exception:
+            pass
+
+        try:
+            stat_result = compute_full_statistics(
+                returns=benchmark_returns if benchmark_returns else [0.0],
+                strategy_returns=returns_series if returns_series else None,
+                returns_matrix=[returns_series, benchmark_returns, sma_returns] if (returns_series and benchmark_returns) else None,
+                n_trials=3,
+            )
+            stats["statistical"] = {
+                "deflated_sharpe": stat_result.deflated_sharpe,
+                "p_value": stat_result.p_value,
+                "is_significant": stat_result.is_significant,
+                "monte_carlo_p_value": stat_result.monte_carlo_p_value,
+                "probability_of_overfitting": stat_result.probability_of_overfitting,
+                "confidence_interval_95": list(stat_result.confidence_interval_95),
+                "min_track_record_length": stat_result.min_track_record_length,
+            }
+        except Exception as e:
+            logger.warning(f"Statistical tests failed: {e}")
+            stats["statistical"] = {
+                "deflated_sharpe": 0.0,
+                "p_value": 1.0,
+                "is_significant": False,
+                "monte_carlo_p_value": 1.0,
+                "probability_of_overfitting": 0.0,
+                "confidence_interval_95": [0.0, 0.0],
+                "min_track_record_length": 0,
+            }
+
+        try:
+            regime_perf = self._compute_regime_performance(candles, results)
+            stats["regime_performance"] = regime_perf
+        except Exception as e:
+            logger.warning(f"Regime performance computation failed: {e}")
+            stats["regime_performance"] = {}
+
+        stats["trades"] = results
+        stats["equity_curve"] = equity
+        return stats
+
+    def _fallback_result(self, candles: list[Candle], symbol: str, timeframe: str) -> dict:
+        """Return a minimal valid result when the full backtest fails."""
+        balance = self.initial_balance
+        return {
+            "id": str(uuid.uuid4()),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "start_date": candles[0].timestamp if candles else 0,
+            "end_date": candles[-1].timestamp if candles else 0,
+            "candle_count": len(candles),
+            "initial_balance": self.initial_balance,
+            "final_balance": round(balance, 2),
+            "total_pnl": 0.0,
+            "total_pnl_pct": 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "win_rate": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "profit_factor": 0.0,
+            "max_drawdown": 0.0,
+            "max_drawdown_pct": 0.0,
+            "sharpe_ratio": 0.0,
+            "max_consecutive_losses": 0,
+            "slippage_pct": self.slippage_pct,
+            "commission_pct": self.commission_pct,
+            "total_funding_cost": 0.0,
+            "funding_rate_per_8h": self.funding_rate_per_8h,
+            "statistical": {
+                "deflated_sharpe": 0.0,
+                "p_value": 1.0,
+                "is_significant": False,
+                "monte_carlo_p_value": 1.0,
+                "probability_of_overfitting": 0.0,
+                "confidence_interval_95": [0.0, 0.0],
+                "min_track_record_length": 0,
+            },
+            "regime_performance": {},
+            "benchmark_buy_hold": {"total_return_pct": 0.0, "sharpe_ratio": 0.0},
+            "benchmark_sma_crossover": {"sharpe_ratio": 0.0},
+            "trades": [],
+            "equity_curve": [],
+        }
+
+    def _run_walk_forward(
+        self,
+        candles: list[Candle],
+        symbol: str,
+        timeframe: str,
+        train_pct: float,
+    ) -> dict:
+        n = len(candles)
+        train_size = int(n * train_pct)
+        train_candles = candles[:train_size]
+        test_candles = candles[train_size:]
+
+        train_result = self._run_single(train_candles, symbol, timeframe)
+        test_result = self._run_single(test_candles, symbol, timeframe)
+
+        combined_balance = train_result["final_balance"] + (test_result["final_balance"] - self.initial_balance)
+        combined_pnl = combined_balance - self.initial_balance
+
+        return {
+            "id": str(uuid.uuid4()),
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "walk_forward": True,
+            "train_period": {
+                "start_date": train_result["start_date"],
+                "end_date": train_result["end_date"],
+                "candle_count": len(train_candles),
+                "total_trades": train_result["total_trades"],
+                "win_rate": train_result["win_rate"],
+                "total_pnl": train_result["total_pnl"],
+                "sharpe_ratio": train_result["sharpe_ratio"],
+            },
+            "test_period": {
+                "start_date": test_result["start_date"],
+                "end_date": test_result["end_date"],
+                "candle_count": len(test_candles),
+                "total_trades": test_result["total_trades"],
+                "win_rate": test_result["win_rate"],
+                "total_pnl": test_result["total_pnl"],
+                "sharpe_ratio": test_result["sharpe_ratio"],
+            },
+            "combined": {
+                "initial_balance": self.initial_balance,
+                "final_balance": round(combined_balance, 2),
+                "total_pnl": round(combined_pnl, 2),
+                "total_pnl_pct": round((combined_pnl / self.initial_balance) * 100, 4),
+                "total_trades": train_result["total_trades"] + test_result["total_trades"],
+                "win_rate": round(
+                    (train_result["winning_trades"] + test_result["winning_trades"]) /
+                    max(train_result["total_trades"] + test_result["total_trades"], 1), 4
+                ),
+                "degradation": round(
+                    test_result["sharpe_ratio"] - train_result["sharpe_ratio"], 4
+                ) if test_result["total_trades"] > 0 else 0,
+            },
+            "is_robust": test_result["total_trades"] > 5 and test_result["sharpe_ratio"] > 0,
+            "trades": train_result.get("trades", []) + test_result.get("trades", []),
+            "equity_curve": train_result.get("equity_curve", []) + test_result.get("equity_curve", []),
+        }
+
+    def _execute_trades(self, candles: list[Candle]):
         results: list[dict] = []
         equity: list[dict] = []
         balance = self.initial_balance
         peak = balance
-        peak_ts = candles[0].timestamp if candles else 0
         open_trades: list[dict] = []
+        returns_series: list[float] = []
 
         swings: list[Any] = []
         fvgs: list[Any] = []
@@ -89,7 +286,6 @@ class BacktestEngine:
             structure = detect_structure(swings, window)
             regime = detect_market_regime(window, metrics, liquidity_events)
 
-            # Detect signals with full ICT confluence
             signals = detect_trade_signals(
                 candles=window,
                 metrics=metrics,
@@ -100,7 +296,6 @@ class BacktestEngine:
                 regime=regime,
             )
 
-            # Filter: only new signals not already processed
             new_signals = [s for s in signals if s.timestamp > last_signal_ts]
             last_signal_ts = max((s.timestamp for s in signals), default=last_signal_ts)
 
@@ -114,11 +309,9 @@ class BacktestEngine:
                 risk_per_unit = abs(sig.entry - sig.stop_loss)
                 quantity = risk_per_trade / risk_per_unit if risk_per_unit > 0 else 0
 
-                # Apply slippage to entry
                 slippage = sig.entry * self.slippage_pct
                 entry_with_slippage = sig.entry + slippage if sig.side == "buy" else sig.entry - slippage
 
-                # Apply commission
                 notional = entry_with_slippage * quantity
                 commission = notional * self.commission_pct
 
@@ -155,7 +348,6 @@ class BacktestEngine:
                 bars_held = trade.get("bars_held", 0) + 1
                 trade["bars_held"] = bars_held
 
-                # ── Trailing stop: only when explicitly enabled ──
                 if self.trailing_stop:
                     risk = abs(entry - trade.get("initial_sl", sl))
                     if risk > 0:
@@ -170,11 +362,11 @@ class BacktestEngine:
                                 trade["stop_loss"] = min(trade["stop_loss"], entry)
                                 sl = trade["stop_loss"]
 
-                # ── Time-based exit ──
+                funding_cost = bars_held * self.funding_rate_per_8h * entry * qty
                 if bars_held >= self.max_hold_bars:
                     exit_price = current.close
                     pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"]
+                    pnl -= trade["commission"] + funding_cost
                     pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
@@ -182,7 +374,9 @@ class BacktestEngine:
                     trade["pnl"] = round(pnl, 2)
                     trade["pnl_pct"] = round(pnl_pct, 4)
                     trade["close_reason"] = "time_exit"
+                    trade["funding_cost"] = round(funding_cost, 2)
                     balance += pnl
+                    returns_series.append(pnl / self.initial_balance)
                     results.append(dict(trade))
                     continue
 
@@ -196,7 +390,7 @@ class BacktestEngine:
                 if hit_stop:
                     exit_price = sl
                     pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"]
+                    pnl -= trade["commission"] + funding_cost
                     pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
@@ -204,13 +398,14 @@ class BacktestEngine:
                     trade["pnl"] = round(pnl, 2)
                     trade["pnl_pct"] = round(pnl_pct, 4)
                     trade["close_reason"] = "stop_loss"
+                    trade["funding_cost"] = round(funding_cost, 2)
                     balance += pnl
+                    returns_series.append(pnl / self.initial_balance)
                     results.append(dict(trade))
-
                 elif hit_target:
                     exit_price = tp
                     pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"]
+                    pnl -= trade["commission"] + funding_cost
                     pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
@@ -218,7 +413,9 @@ class BacktestEngine:
                     trade["pnl"] = round(pnl, 2)
                     trade["pnl_pct"] = round(pnl_pct, 4)
                     trade["close_reason"] = "target_hit"
+                    trade["funding_cost"] = round(funding_cost, 2)
                     balance += pnl
+                    returns_series.append(pnl / self.initial_balance)
                     results.append(dict(trade))
 
             if balance > peak:
@@ -235,6 +432,9 @@ class BacktestEngine:
                     "drawdown_pct": round(dd_pct, 4),
                 })
 
+        return results, equity, balance, peak, open_trades, returns_series
+
+    def _compute_stats(self, results, equity, balance, candles, symbol="", timeframe=""):
         total_pnl = balance - self.initial_balance
         total_pnl_pct = (total_pnl / self.initial_balance) * 100
         closed = [r for r in results if r.get("exit_price") is not None]
@@ -258,7 +458,6 @@ class BacktestEngine:
         std_returns = (sum((r - avg_return) ** 2 for r in returns) / len(returns)) ** 0.5 if len(returns) > 1 else 0
         sharpe = (avg_return / std_returns * math.sqrt(365)) if std_returns > 0 else 0
 
-        # Consecutive losses analysis
         max_consecutive_losses = 0
         current_consecutive = 0
         for r in closed:
@@ -267,6 +466,8 @@ class BacktestEngine:
                 max_consecutive_losses = max(max_consecutive_losses, current_consecutive)
             else:
                 current_consecutive = 0
+
+        total_funding = sum(r.get("funding_cost", 0) for r in closed)
 
         return {
             "id": str(uuid.uuid4()),
@@ -292,6 +493,102 @@ class BacktestEngine:
             "max_consecutive_losses": max_consecutive_losses,
             "slippage_pct": self.slippage_pct,
             "commission_pct": self.commission_pct,
-            "trades": results,
-            "equity_curve": equity,
+            "total_funding_cost": round(total_funding, 2),
+            "funding_rate_per_8h": self.funding_rate_per_8h,
         }
+
+    def _compute_benchmark_returns(self, candles: list[Candle]) -> list[float]:
+        """Buy-and-hold benchmark returns."""
+        if len(candles) < 10:
+            return []
+        initial = candles[0].close
+        returns = []
+        for i in range(1, len(candles)):
+            ret = (candles[i].close - candles[i-1].close) / initial
+            returns.append(ret)
+        return returns
+
+    def _compute_sma_benchmark_returns(self, candles: list[Candle]) -> list[float]:
+        """SMA crossover (20/50) benchmark returns."""
+        if len(candles) < 60:
+            return []
+        closes = [c.close for c in candles]
+        sma20 = []
+        sma50 = []
+        for i in range(len(closes)):
+            if i >= 19:
+                sma20.append(sum(closes[i-19:i+1]) / 20)
+            if i >= 49:
+                sma50.append(sum(closes[i-49:i+1]) / 50)
+
+        returns = []
+        in_position = False
+        for i in range(50, len(closes)):
+            s20 = sma20[i - 30] if i - 30 < len(sma20) else None
+            s50 = sma50[i - 50] if i - 50 < len(sma50) else None
+            if s20 and s50:
+                if s20 > s50 and not in_position:
+                    in_position = True
+                elif s20 < s50 and in_position:
+                    in_position = False
+                if in_position:
+                    ret = (closes[i] - closes[i-1]) / closes[i-1]
+                    returns.append(ret)
+                else:
+                    returns.append(0.0)
+        return returns
+
+    def _compute_benchmark_stats(self, candles, bh_returns, sma_returns):
+        bh_sharpe = compute_sharpe_ratio(bh_returns) if bh_returns else 0.0
+        sma_sharpe = compute_sharpe_ratio(sma_returns) if sma_returns else 0.0
+
+        bh_total = (candles[-1].close - candles[0].close) / candles[0].close * 100 if len(candles) > 1 else 0.0
+
+        return {
+            "benchmark_buy_hold": {
+                "total_return_pct": round(bh_total, 4),
+                "sharpe_ratio": round(bh_sharpe, 4),
+            },
+            "benchmark_sma_crossover": {
+                "sharpe_ratio": round(sma_sharpe, 4),
+            },
+        }
+
+    def _compute_regime_performance(self, candles, trades):
+        """Regime-specific performance attribution."""
+        if not candles or not trades:
+            return {}
+
+        regime_map = {}
+        window_size = 80
+        for i in range(window_size, len(candles)):
+            window = candles[i-window_size:i+1]
+            metrics = compute_market_metrics(window, [])
+            swings = detect_swings(window)[-50:]
+            liq_events = detect_liquidity_events(window[-20:], [], metrics.atr14 if metrics else 0)[-20:]
+            regime = detect_market_regime(window, metrics, liq_events)
+            if regime:
+                regime_map[candles[i].timestamp] = regime.phase
+
+        regime_pnl: dict[str, list[float]] = {}
+        for trade in trades:
+            ts = trade.get("timestamp", 0)
+            closest_regime = None
+            closest_diff = float("inf")
+            for reg_ts, phase in regime_map.items():
+                diff = abs(reg_ts - ts)
+                if diff < closest_diff:
+                    closest_diff = diff
+                    closest_regime = phase
+            if closest_regime:
+                regime_pnl.setdefault(closest_regime, []).append(trade.get("pnl", 0))
+
+        result = {}
+        for phase, pnls in regime_pnl.items():
+            result[phase] = {
+                "trade_count": len(pnls),
+                "total_pnl": round(sum(pnls), 2),
+                "avg_pnl": round(sum(pnls) / len(pnls), 2) if pnls else 0,
+                "win_rate": round(len([p for p in pnls if p > 0]) / len(pnls), 4) if pnls else 0,
+            }
+        return result

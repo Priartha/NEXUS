@@ -282,6 +282,12 @@ class AnalysisPipeline:
                     self.ob_accumulations, latest_candle, latest_quote
                 )
 
+        from backend.analysis.mtf_confluence import compute_mtf_confluence
+        mtf = compute_mtf_confluence(store.timeframe, {"placeholder": store}, {store.timeframe: self})
+
+        ob_imb_data = to_wire(self.ob_imbalances[-15:])
+        ob_acc_data = to_wire([a for a in self.ob_accumulations if a.status == "active"][-10:])
+
         detected_signals: list[TradeSignal] = detect_trade_signals(
             candles=closed_candles,
             metrics=self.metrics,
@@ -289,6 +295,10 @@ class AnalysisPipeline:
             order_blocks=self.order_blocks,
             liquidity_events=self.liquidity_events,
             swings=self.swings,
+            regime=self.regime,
+            mtf_confluence=mtf,
+            ob_imbalances=ob_imb_data,
+            ob_accumulations=ob_acc_data,
         )
 
         # ── Signal quality filter: remove stale/low-quality signals ──
@@ -345,6 +355,7 @@ class AnalysisPipeline:
         if self._paper_trading and signals and candle:
             events = self._paper_trading.evaluate_signals(
                 detected_signals, candle, symbol=store.symbol, timeframe=store.timeframe,
+                mtf_confluence=mtf,
             )
             for ev in events:
                 self._on_alert(ev)

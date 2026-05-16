@@ -45,6 +45,7 @@ from backend.api.history_routes import router as history_router
 from backend.api.demo_routes import router as demo_router
 from backend.storage.history_recorder import recorder as history_recorder
 from backend.analysis.daily_reports import daily_reporter
+from backend.utils.cache import global_cache, CACHE_TTLS, invalidate_pattern
 
 paper_trading = PaperTradingEngine()
 risk_manager = RiskManager()
@@ -169,7 +170,34 @@ def require_api_key(request: Request, x_api_key: str | None = Header(default=Non
 async def lifespan(app: FastAPI):
     global app_loop
     app_loop = asyncio.get_running_loop()
+
+    # Configuration validation
+    from backend.utils.config_validator import validator
+    config_issues = validator.validate_all()
+    validator.print_report(config_issues)
+    if validator.has_errors(config_issues):
+        logger.error("CRITICAL configuration errors detected. Shutting down.")
+        raise RuntimeError("Configuration validation failed")
+
+    # Database integrity setup
+    from backend.utils.db_integrity import db_integrity
+    db_integrity.enable_wal_mode()
+    integrity = db_integrity.check_integrity()
+    if integrity["status"] != "ok":
+        logger.warning(f"Database integrity issues: {integrity['issues']}")
+        backup = db_integrity.create_backup()
+        if backup:
+            logger.info(f"Pre-start backup created: {backup}")
     init_db()
+
+    # Initialize multi-exchange price aggregator
+    from backend.ingestion.multi_exchange import aggregator as multi_exchange_aggregator
+    multi_exchange_aggregator.symbol = settings.symbol
+    logger.info(f"Multi-exchange aggregator initialized for {settings.symbol}")
+
+    # Model performance tracker
+    from backend.analysis.model_tracker import model_tracker
+    logger.info("Model performance tracker initialized")
 
     # Seed historical data for backtesting
     if settings.market_data_provider.lower() == "binance":
@@ -191,32 +219,40 @@ async def lifespan(app: FastAPI):
     sentiment_task = asyncio.create_task(refresh_sentiment_loop())
     ai_ict_task = asyncio.create_task(refresh_ai_ict_loop())
     options_task = asyncio.create_task(refresh_options_loop())
-    
+
     # Start history recorder (uses primary timeframe pipeline)
     primary_tf = supported_timeframes[0]
     primary_pipeline = pipelines[primary_tf]
     await history_recorder.start(primary_pipeline)
     logger.info(f"History recorder started for timeframe {primary_tf}")
-    
+
     # Start daily report generator
     await daily_reporter.start()
     logger.info("Daily report generator started")
-    
+
+    # Start model performance monitoring loop
+    model_monitor_task = asyncio.create_task(model_performance_monitor_loop())
+
+    # Periodic database backup loop
+    db_backup_task = asyncio.create_task(database_backup_loop(db_integrity))
+
     try:
         yield
     finally:
         logger.info("Shutting down background tasks")
         await history_recorder.stop()
         await daily_reporter.stop()
-        for task in (stream_task, sentiment_task, ai_ict_task, options_task):
-            task.cancel()
-        for task in (stream_task, sentiment_task, ai_ict_task, options_task):
+        model_monitor_task.cancel()
+        db_backup_task.cancel()
+        for task in (stream_task, sentiment_task, ai_ict_task, options_task, model_monitor_task, db_backup_task):
             try:
                 await task
             except asyncio.CancelledError:
                 logger.info(f"Task {task.get_name()} cancelled successfully")
             except Exception as e:
                 logger.error(f"Task {task.get_name()} failed during shutdown: {e}", exc_info=True)
+        db_integrity.create_backup()
+        logger.info("Final database backup created on shutdown")
 
 
 app = FastAPI(title="NEXUS", version="1.0.0", lifespan=lifespan)
@@ -369,13 +405,24 @@ async def run_backtest(body: BacktestRequest) -> dict:
         breakeven_threshold=body.breakeven_threshold,
         trailing_stop=body.trailing_stop,
     )
-    result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
-    repo.save_backtest_run(result)
-    repo.save_backtest_trades(result["id"], result["trades"])
-    pts = [{"timestamp": e["timestamp"], "account_balance": e["account_balance"],
-            "drawdown": e["drawdown"], "drawdown_pct": e["drawdown_pct"],
-            "source": "backtest", "run_id": result["id"]} for e in result["equity_curve"]]
-    repo.save_equity_points(pts)
+    try:
+        result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
+    except Exception as e:
+        import traceback
+        logger.error(f"Backtest engine failed: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Backtest engine error: {str(e)}")
+
+    try:
+        repo.save_backtest_run(result)
+        repo.save_backtest_trades(result["id"], result["trades"])
+        pts = [{"timestamp": e["timestamp"], "account_balance": e["account_balance"],
+                "drawdown": e["drawdown"], "drawdown_pct": e["drawdown_pct"],
+                "source": "backtest", "run_id": result["id"]} for e in result["equity_curve"]]
+        repo.save_equity_points(pts)
+    except Exception as e:
+        import traceback
+        logger.error(f"Failed to save backtest results: {e}\n{traceback.format_exc()}")
+
     result.pop("trades", None)
     result.pop("equity_curve", None)
     return result
@@ -534,6 +581,23 @@ async def get_alerts(unread_only: bool = False, limit: int = 50) -> list[dict]:
 async def acknowledge_alert(alert_id: str) -> dict:
     repo.acknowledge_alert(alert_id)
     return {"ok": True}
+
+
+@app.get("/alerts/config")
+async def get_alert_config() -> dict:
+    cached_result = await global_cache.get("alert_config")
+    if cached_result is not None:
+        return cached_result
+    data = repo.get_alert_config()
+    await global_cache.set("alert_config", data, ttl=CACHE_TTLS.get("alert_config"))
+    return data
+
+
+@app.post("/alerts/config")
+async def save_alert_config(config: dict) -> dict:
+    repo.save_alert_config(config)
+    await global_cache.delete("alert_config")
+    return {"ok": True, "message": "Alert configuration saved"}
 
 
 # ─── Trade Journal ────────────────────────────────────────
@@ -977,6 +1041,386 @@ async def refresh_options_loop() -> None:
             )
 
         await asyncio.sleep(settings.options_refresh_seconds)
+
+
+async def model_performance_monitor_loop() -> None:
+    """Monitor AI model performance and log degradation alerts."""
+    from backend.analysis.model_tracker import model_tracker
+    await asyncio.sleep(60)
+    while True:
+        try:
+            alerts = model_tracker.get_alerts()
+            for alert in alerts:
+                logger.warning(f"Model performance alert: {alert['message']}")
+                await manager.broadcast({"update_type": "model_alert", **alert})
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Model monitor loop failed: {e}")
+        await asyncio.sleep(300)
+
+
+async def database_backup_loop(db_integrity) -> None:
+    """Periodic database backup every 6 hours."""
+    await asyncio.sleep(3600)
+    while True:
+        try:
+            backup = db_integrity.create_backup()
+            if backup:
+                logger.info(f"Periodic database backup: {backup}")
+            integrity = db_integrity.check_integrity()
+            if integrity["status"] != "ok":
+                logger.warning(f"Database integrity check: {integrity['issues']}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Database backup loop failed: {e}")
+        await asyncio.sleep(21600)
+
+
+# ─── Multi-Exchange Price ───────────────────────────────
+
+@app.get("/price/multi-exchange")
+async def multi_exchange_price(force: bool = False) -> dict:
+    """Get aggregated price from multiple exchanges."""
+    if force:
+        await global_cache.delete("multi_exchange_prices")
+    else:
+        cached_result = await global_cache.get("multi_exchange_prices")
+        if cached_result is not None:
+            return cached_result
+
+    from backend.ingestion.multi_exchange import aggregator
+    try:
+        result = await aggregator.get_aggregated_price(force_refresh=force)
+
+        prices = []
+        for p in result.prices:
+            spread = ((p.ask - p.bid) / p.bid * 100) if (p.bid and p.ask and p.bid > 0) else 0.0
+            prices.append({
+                "exchange": p.exchange,
+                "symbol": p.symbol,
+                "price": p.price,
+                "volume_24h": p.volume_24h or 0,
+                "bid": p.bid or 0,
+                "ask": p.ask or 0,
+                "spread_pct": round(spread, 4),
+                "timestamp": p.timestamp_ms,
+                "status": "ok",
+            })
+
+        all_prices = [p.price for p in result.prices if p.price > 0]
+        avg_price = sum(all_prices) / len(all_prices) if all_prices else 0
+        max_price = max(all_prices) if all_prices else 0
+        min_price = min(all_prices) if all_prices else 0
+        spread_range = ((max_price - min_price) / avg_price * 100) if avg_price > 0 else 0
+
+        best_exchange = ""
+        worst_exchange = ""
+        if all_prices:
+            best_idx = all_prices.index(min_price)
+            worst_idx = all_prices.index(max_price)
+            best_exchange = result.prices[best_idx].exchange if best_idx < len(result.prices) else ""
+            worst_exchange = result.prices[worst_idx].exchange if worst_idx < len(result.prices) else ""
+
+        data = {
+            "prices": prices,
+            "avg_price": round(avg_price, 2),
+            "max_price": round(max_price, 2),
+            "min_price": round(min_price, 2),
+            "spread_range_pct": round(spread_range, 4),
+            "best_exchange": best_exchange,
+            "worst_exchange": worst_exchange,
+            "timestamp": result.timestamp_ms or int(time.time() * 1000),
+        }
+        await global_cache.set("multi_exchange_prices", data, ttl=CACHE_TTLS.get("multi_exchange_prices"))
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Multi-exchange fetch failed: {e}")
+
+
+@app.get("/price/exchanges")
+async def exchange_prices() -> dict:
+    """Get last known prices from all exchanges."""
+    cached_result = await global_cache.get("exchange_prices")
+    if cached_result is not None:
+        return cached_result
+
+    from backend.ingestion.multi_exchange import aggregator
+    prices = aggregator.get_last_prices()
+    data = {
+        exchange: {"price": p.price, "latency_ms": p.latency_ms, "timestamp_ms": p.timestamp_ms}
+        for exchange, p in prices.items()
+    }
+    await global_cache.set("exchange_prices", data, ttl=CACHE_TTLS.get("exchange_info"))
+    return data
+
+
+# ─── Model Performance ─────────────────────────────────
+
+@app.get("/model/performance")
+async def model_performance(days: int = 30) -> dict:
+    """Get AI model performance metrics."""
+    cache_key = f"model_performance:{days}"
+    cached_result = await global_cache.get(cache_key)
+    if cached_result is not None:
+        return cached_result
+
+    from backend.analysis.model_tracker import model_tracker
+    metrics = model_tracker.get_metrics(days=days)
+
+    grade_dist_list = []
+    for grade, count in metrics.grade_distribution.items():
+        grade_dist_list.append({
+            "grade": grade,
+            "count": count,
+            "avg_confidence": 0.0,
+            "win_rate": None,
+            "avg_pnl": None,
+        })
+
+    top_grade = None
+    worst_grade = None
+    if grade_dist_list:
+        sorted_grades = sorted(grade_dist_list, key=lambda g: g["count"], reverse=True)
+        top_grade = sorted_grades[0]["grade"]
+        worst_grade = sorted_grades[-1]["grade"]
+
+    metrics_24h = model_tracker.get_metrics(days=1)
+
+    data = {
+        "total_decisions": metrics.total_predictions,
+        "accuracy": metrics.accuracy if metrics.total_predictions > 0 else None,
+        "avg_confidence": metrics.avg_confidence,
+        "grade_distribution": grade_dist_list,
+        "last_24h_decisions": metrics_24h.total_predictions,
+        "last_24h_accuracy": metrics_24h.accuracy if metrics_24h.total_predictions > 0 else None,
+        "drift_score": None,
+        "degradation_detected": metrics.degradation_alert,
+        "top_performing_grade": top_grade,
+        "worst_performing_grade": worst_grade,
+        "timestamp": int(time.time() * 1000),
+    }
+    await global_cache.set(cache_key, data, ttl=CACHE_TTLS.get("model_performance"))
+    return data
+
+
+@app.get("/model/trend")
+async def model_trend(days: int = 7) -> list[dict]:
+    """Get model performance trend over time."""
+    cache_key = f"model_trend:{days}"
+    cached_result = await global_cache.get(cache_key)
+    if cached_result is not None:
+        return cached_result
+
+    from backend.storage.schema import get_conn
+    conn = get_conn()
+    try:
+        now = int(time.time() * 1000)
+        cutoff = now - days * 86400000
+        rows = conn.execute("""
+            SELECT DATE(timestamp/1000, 'unixepoch') as date,
+                   COUNT(*) as decisions,
+                   SUM(was_correct) as correct,
+                   AVG(predicted_confidence) as avg_conf
+            FROM model_predictions
+            WHERE timestamp >= ? AND actual_direction != ''
+            GROUP BY date
+            ORDER BY date
+        """, (cutoff,)).fetchall()
+
+        data = []
+        for row in rows:
+            data.append({
+                "date": row["date"],
+                "decisions": row["decisions"],
+                "accuracy": row["correct"] / row["decisions"] if row["decisions"] > 0 else None,
+                "avg_confidence": row["avg_conf"] or 0.0,
+            })
+    finally:
+        conn.close()
+
+    await global_cache.set(cache_key, data, ttl=CACHE_TTLS.get("model_performance"))
+    return data
+
+
+# ─── Database Integrity ────────────────────────────────
+
+@app.get("/db/integrity")
+async def db_integrity_check() -> dict:
+    """Run database integrity check."""
+    try:
+        cached_result = await global_cache.get("db_integrity")
+        if cached_result is not None:
+            return cached_result
+
+        from backend.utils.db_integrity import db_integrity
+        from backend.storage.schema import get_conn
+        raw = db_integrity.check_integrity()
+
+        conn = get_conn()
+        try:
+            tables_with_ts = [
+                "signals", "paper_trades", "backtest_runs", "alerts",
+                "candle_archive", "market_snapshots", "metrics_history",
+                "pattern_history", "regime_history", "ai_decisions_history",
+                "liquidity_history", "orderbook_history", "performance_daily",
+                "trade_journal_entries", "equity_curve",
+            ]
+
+            tables_info = []
+            total_records = 0
+            for table_name, count in raw.get("tables", {}).items():
+                total_records += count
+                oldest = None
+                newest = None
+                if table_name in tables_with_ts:
+                    try:
+                        row = conn.execute(
+                            "SELECT MIN(timestamp), MAX(timestamp) FROM [{table}]".format(table=table_name)
+                        ).fetchone()
+                        if row:
+                            oldest = str(row[0]) if row[0] else None
+                            newest = str(row[1]) if row[1] else None
+                    except Exception:
+                        pass
+
+                size_bytes = 0
+                try:
+                    size_row = conn.execute(
+                        "SELECT SUM(pgsize) FROM dbstat WHERE name='{table}'".format(table=table_name)
+                    ).fetchone()
+                    if size_row and size_row[0]:
+                        size_bytes = size_row[0]
+                except Exception:
+                    size_bytes = count * 256
+
+                tables_info.append({
+                    "name": table_name,
+                    "row_count": count,
+                    "size_bytes": size_bytes,
+                    "oldest_record": oldest,
+                    "newest_record": newest,
+                })
+
+            wal_row = conn.execute("PRAGMA journal_mode").fetchone()
+            wal_mode = wal_row[0] == "wal" if wal_row else False
+
+            all_oldest = None
+            all_newest = None
+            for t in tables_info:
+                if t["oldest_record"]:
+                    if all_oldest is None or t["oldest_record"] < all_oldest:
+                        all_oldest = t["oldest_record"]
+                if t["newest_record"]:
+                    if all_newest is None or t["newest_record"] > all_newest:
+                        all_newest = t["newest_record"]
+
+            integrity_checks = [
+                {
+                    "check_name": "Quick Check",
+                    "status": "pass" if raw["status"] == "ok" else "fail",
+                    "message": "Database integrity OK" if raw["status"] == "ok" else f"Issues found: {len(raw.get('issues', []))}",
+                },
+                {
+                    "check_name": "Foreign Keys",
+                    "status": "pass" if not any("Foreign key" in i for i in raw.get("issues", [])) else "warning",
+                    "message": "No violations" if not any("Foreign key" in i for i in raw.get("issues", [])) else "Violations detected",
+                },
+                {
+                    "check_name": "WAL Mode",
+                    "status": "pass" if wal_mode else "warning",
+                    "message": "Enabled" if wal_mode else "Disabled (consider enabling for better performance)",
+                },
+            ]
+        finally:
+            conn.close()
+
+        data = {
+            "database_size_mb": raw.get("db_size_mb", 0),
+            "total_tables": len(raw.get("tables", {})),
+            "total_records": total_records,
+            "wal_mode": wal_mode,
+            "integrity_checks": integrity_checks,
+            "table_info": tables_info,
+            "oldest_record": all_oldest,
+            "newest_record": all_newest,
+            "timestamp": raw.get("timestamp", int(time.time() * 1000)),
+        }
+        await global_cache.set("db_integrity", data, ttl=CACHE_TTLS.get("db_integrity"))
+        return data
+    except Exception as e:
+        import traceback
+        logger.error(f"DB integrity check failed: {e}\n{traceback.format_exc()}")
+        return {
+            "database_size_mb": 0,
+            "total_tables": 0,
+            "total_records": 0,
+            "wal_mode": False,
+            "integrity_checks": [
+                {"check_name": "Error", "status": "fail", "message": str(e)},
+            ],
+            "table_info": [],
+            "oldest_record": None,
+            "newest_record": None,
+            "timestamp": int(time.time() * 1000),
+        }
+
+
+@app.post("/db/backup")
+async def db_create_backup() -> dict:
+    """Create database backup."""
+    try:
+        from backend.utils.db_integrity import db_integrity
+        backup = db_integrity.create_backup()
+        return {"ok": True, "backup_path": str(backup) if backup else None}
+    except Exception as e:
+        import traceback
+        logger.error(f"Backup failed: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
+
+
+# ─── Configuration ─────────────────────────────────────
+
+@app.get("/config/validate")
+async def config_validate() -> dict:
+    """Validate current configuration."""
+    from backend.utils.config_validator import validator
+    issues = validator.validate_all()
+    return {
+        "errors": [i for i in issues if i.severity == "error"],
+        "warnings": [i for i in issues if i.severity == "warning"],
+        "info": [i for i in issues if i.severity == "info"],
+        "has_errors": validator.has_errors(issues),
+    }
+
+
+# ─── Rate Limit Status ─────────────────────────────────
+
+@app.get("/rate-limits")
+async def rate_limit_status() -> dict:
+    """Get current rate limit usage for all endpoints."""
+    from backend.utils.rate_limiter import rate_limiter
+    endpoints = ["binance_rest", "coinbase_rest", "kraken_rest", "okx_rest", "bybit_rest", "gemini_api", "openai_api"]
+    return {ep: rate_limiter.get_usage(ep) for ep in endpoints}
+
+
+# ─── Cache Management ──────────────────────────────────
+
+@app.get("/cache/stats")
+async def cache_stats() -> dict:
+    """Get cache statistics."""
+    return await global_cache.get_stats()
+
+
+@app.post("/cache/clear")
+async def cache_clear(prefix: str | None = None) -> dict:
+    """Clear cache, optionally by prefix pattern."""
+    if prefix:
+        count = await invalidate_pattern(prefix)
+        return {"ok": True, "cleared": count, "prefix": prefix}
+    await global_cache.clear()
+    return {"ok": True, "cleared": "all"}
 
 
 # SPA fallback: serve index.html for any non-API route

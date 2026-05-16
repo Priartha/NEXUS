@@ -148,6 +148,12 @@ def init_db() -> None:
             created_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS alert_config (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS trade_journal_entries (
             id TEXT PRIMARY KEY,
             paper_trade_id TEXT REFERENCES paper_trades(id),
