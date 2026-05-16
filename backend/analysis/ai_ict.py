@@ -166,7 +166,7 @@ def _monte_carlo_paths(
 ) -> dict[str, float]:
     """Monte Carlo simulation for path-dependent risk analysis."""
     import random
-    random.seed(42)
+    random.seed(int(time.time() * 1000) % (2**31))
     final_prices: list[float] = []
     max_drawdowns: list[float] = []
     dt = 1.0 / 252.0
@@ -680,9 +680,9 @@ class AiIctService:
         blockers: list[str] = []
 
         # Strict thresholds for execution
-        if scorecard[direction] < 0.35:
+        if scorecard[direction] < 0.45:
             blockers.append("Combined confluence below execution threshold")
-        if separation < 0.15:
+        if separation < 0.20:
             blockers.append("Bullish and bearish evidence too close (no clear edge)")
         phase_block = _phase_block_reason(payload, direction)
         if phase_block:
@@ -1133,13 +1133,13 @@ def _sentiment_aligns(direction: str, sentiment_label: str) -> bool:
 
 
 def _grade(score: float) -> tuple[str, str]:
-    if score >= 0.88:
+    if score >= 0.90:
         return "A+", "premium"
-    if score >= 0.78:
+    if score >= 0.80:
         return "A", "premium"
-    if score >= 0.68:
+    if score >= 0.70:
         return "B", "qualified"
-    if score >= 0.58:
+    if score >= 0.60:
         return "C", "watchlist"
     return "NO_TRADE", "avoid"
 

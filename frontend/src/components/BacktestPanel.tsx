@@ -35,10 +35,19 @@ export default function BacktestPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ candle_count: candleCount, position_size_pct: positionSize / 100 }),
       })
+      if (!res.ok) {
+        const err = await res.json().catch(() => null)
+        console.error('Backtest failed:', err)
+        return
+      }
       const result: BacktestRun = await res.json()
       setRuns((prev) => [result, ...prev])
       setSelectedRun(result)
-    } catch { /* ignore */ } finally { setRunning(false) }
+      if (result.trades) setTrades(result.trades)
+      if (result.equity_curve) setEquityCurve(result.equity_curve)
+    } catch (e) {
+      console.error('Backtest error:', e)
+    } finally { setRunning(false) }
   }
 
   const loadRunDetail = async (runId: string) => {
@@ -49,6 +58,17 @@ export default function BacktestPanel() {
       setTrades(data.trades || [])
       setEquityCurve(data.equity_curve || [])
       setShowTrades(true)
+    } catch { /* ignore */ }
+  }
+
+  const resetData = async () => {
+    try {
+      await fetch('/backtest/reset', { method: 'POST' })
+      setRuns([])
+      setSelectedRun(null)
+      setTrades([])
+      setEquityCurve([])
+      setShowTrades(false)
     } catch { /* ignore */ }
   }
 
@@ -87,6 +107,9 @@ export default function BacktestPanel() {
         <button className="bt-exec" onClick={runBacktest} disabled={running}>
           {running ? <><span className="bt-spinner" /> Running...</> : <><Play size={11} /> Execute</>}
         </button>
+        <button className="bt-reset-btn" onClick={resetData} title="Reset all backtest data">
+          Reset
+        </button>
       </div>
 
       {selectedRun && (
@@ -95,7 +118,7 @@ export default function BacktestPanel() {
             <div className="bt-verdict" style={{ borderColor: verdict.color }}>
               <verdict.icon size={14} color={verdict.color} />
               <span style={{ color: verdict.color, fontWeight: 700 }}>{verdict.label}</span>
-              <span className="bt-verdict-sub">WR {(selectedRun.win_rate * 100).toFixed(0)}% · PF {selectedRun.profit_factor != null ? selectedRun.profit_factor.toFixed(2) : '∞'} · DD {(selectedRun.max_drawdown_pct * 100).toFixed(1)}%</span>
+              <span className="bt-verdict-sub">WR {(selectedRun.win_rate * 100).toFixed(0)}% · PF {selectedRun.profit_factor != null ? selectedRun.profit_factor.toFixed(2) : '∞'} · DD {selectedRun.max_drawdown_pct.toFixed(1)}%</span>
             </div>
           )}
 
@@ -124,7 +147,7 @@ export default function BacktestPanel() {
             </div>
             <div className="bt-cell">
               <div className="bt-cell-label">Max DD</div>
-              <div className="bt-cell-val red">{(selectedRun.max_drawdown_pct * 100).toFixed(2)}%</div>
+              <div className="bt-cell-val red">{selectedRun.max_drawdown_pct.toFixed(2)}%</div>
               <div className="bt-cell-sub">-${selectedRun.max_drawdown.toFixed(2)}</div>
             </div>
             <div className="bt-cell">
@@ -210,7 +233,7 @@ export default function BacktestPanel() {
         <div className="bt-empty">
           <Zap size={24} className="bt-empty-icon" />
           <p>Configure parameters and execute a backtest to see if the model works on past data.</p>
-          <p className="bt-empty-hint">Good model = 50%+ win rate, profit factor > 1.5, drawdown < 15%</p>
+          <p className="bt-empty-hint">Good model = 50%+ win rate, profit factor {'>'} 1.5, drawdown {'<'} 15%</p>
         </div>
       )}
     </div>

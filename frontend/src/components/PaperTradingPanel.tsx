@@ -34,6 +34,15 @@ export default function PaperTradingPanel() {
     } catch { /* ignore */ }
   }
 
+  const resetData = async () => {
+    try {
+      await fetch('/paper-trades/reset', { method: 'POST' })
+      setTrades([])
+      setClosedTrades([])
+      fetchData()
+    } catch { /* ignore */ }
+  }
+
   const totalPnl = stats?.total_pnl ?? 0
   const winRate = stats?.win_rate ?? 0
   const totalTrades = stats?.total_trades ?? 0
@@ -62,6 +71,9 @@ export default function PaperTradingPanel() {
         </button>
         <button className="pt-refresh-btn" onClick={fetchData} title="Refresh">
           <RefreshCw size={12} />
+        </button>
+        <button className="pt-reset-btn" onClick={resetData} title="Reset all data">
+          Reset
         </button>
       </div>
 

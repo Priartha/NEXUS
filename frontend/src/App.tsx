@@ -15,6 +15,21 @@ import {
   TrendingDown,
   TrendingUp,
   Zap,
+  Layers,
+  BarChart2,
+  Waves,
+  Flame,
+  Compass,
+  Shield,
+  Cpu,
+  GitBranch,
+  ArrowUpRight,
+  ArrowDownRight,
+  Minus,
+  Sparkles,
+  Radar,
+  Timer,
+  Percent,
 } from 'lucide-react'
 import './App.css'
 import { Chart } from './components/Chart'
@@ -77,6 +92,11 @@ function App() {
   const feedMessage = useChartStore((state) => state.feedMessage)
   const stats = useChartStore((state) => state.stats)
   const orderbook = useChartStore((state) => state.orderbook)
+  const fvgs = useChartStore((state) => state.fvgs)
+  const orderBlocks = useChartStore((state) => state.orderBlocks)
+  const liquidity = useChartStore((state) => state.liquidity)
+  const swings = useChartStore((state) => state.swings)
+  const signals = useChartStore((state) => state.signals)
 
   const ctx = btcPatterns ?? DEMO_PATTERNS
   const patterns = ctx.patterns
@@ -123,12 +143,19 @@ function App() {
   )
   const bullishCount = patterns.filter((p) => p.direction === 'bullish').length
   const bearishCount = patterns.filter((p) => p.direction === 'bearish').length
+  const neutralCount = patterns.filter((p) => p.direction === 'neutral').length
   const avgConfidence = patterns.length
     ? patterns.reduce((s, p) => s + p.confidence, 0) / patterns.length
+    : 0
+  const avgScore = patterns.length
+    ? patterns.reduce((s, p) => s + p.score, 0) / patterns.length
     : 0
   const bestPattern = patterns.length
     ? patterns.reduce((a, b) => (a.confidence > b.confidence ? a : b))
     : null
+  const activeFvgs = fvgs.filter((f) => !f.is_filled)
+  const activeOBs = orderBlocks.filter((ob) => ob.status !== 'broken')
+  const activeLiquidity = liquidity.filter((l) => !l.swept)
   const sessionColor = SESSION_COLORS[ctx.session ?? ''] ?? '#888'
   const regimeColor = REGIME_COLORS[regime?.phase ?? ''] ?? '#888'
   const obImbalances = orderbook?.imbalances ?? []
@@ -136,7 +163,24 @@ function App() {
   const obSpreadDynamics = orderbook?.spread_dynamics ?? []
   const obDepthLevels = orderbook?.depth_levels ?? []
 
-  // ─── Fallback SR from recent candles ────────────────
+  const [patternFilter, setPatternFilter] = useState<'all' | 'bullish' | 'bearish' | 'neutral'>('all')
+  const [patternView, setPatternView] = useState<'cards' | 'grid'>('cards')
+
+  const filteredPatterns = useMemo(() => {
+    const sorted = [...patterns].sort((a, b) => b.score - a.score)
+    if (patternFilter === 'all') return sorted
+    return sorted.filter((p) => p.direction === patternFilter)
+  }, [patterns, patternFilter])
+
+  const patternBias = useMemo(() => {
+    if (bullishCount === 0 && bearishCount === 0) return 'neutral'
+    const total = bullishCount + bearishCount
+    const bullRatio = bullishCount / total
+    if (bullRatio > 0.65) return 'bullish'
+    if (bullRatio < 0.35) return 'bearish'
+    return 'neutral'
+  }, [bullishCount, bearishCount])
+
   const fallbackSR = useMemo(() => {
     const recent = candles.slice(-48)
     if (recent.length < 5) return null
@@ -217,14 +261,14 @@ function App() {
           <Metric
             icon={patternSignal === 'bullish' ? <TrendingUp size={16} /> : patternSignal === 'bearish' ? <TrendingDown size={16} /> : <Orbit size={16} />}
             label="Patterns"
-            value={`${patternSignal} (${patterns.length})`}
+            value={`${patterns.length} detected`}
           />
         )}
-        {ctx && (
+        {regime && (
           <Metric
-            icon={<Clock size={16} />}
-            label="Phase"
-            value={ctx.halving_phase.replaceAll('_', ' ')}
+            icon={<Compass size={16} />}
+            label="Regime"
+            value={regime.phase.replaceAll('_', ' ')}
           />
         )}
       </section>
@@ -281,7 +325,7 @@ function App() {
         {panelOpen && (
         <aside className="side-panel">
           <div className="panel-switch">
-            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'alerts'] as const).map((view) => (
+            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'alerts', 'trades', 'backtest'] as const).map((view) => (
               <button
                 key={view}
                 className={panelView === view ? 'active' : ''}
@@ -290,6 +334,7 @@ function App() {
                 {view === 'signals' && 'Signals'}
                 {view === 'patterns' && (
                   <>
+                    <Layers size={11} />
                     Pats
                     {patterns.length > 0 && <span className="badge-count">{patterns.length}</span>}
                   </>
@@ -305,15 +350,6 @@ function App() {
                 {view === 'institutional' && 'Inst.'}
                 {view === 'risk' && 'Risk'}
                 {view === 'momentum' && 'Momentum'}
-              </button>
-            ))}
-            <div className="panel-switch-sep" />
-            {(['trades', 'backtest'] as const).map((view) => (
-              <button
-                key={view}
-                className={`lab-tab ${panelView === view ? 'active' : ''}`}
-                onClick={() => setPanelView(view)}
-              >
                 {view === 'trades' && 'Paper'}
                 {view === 'backtest' && 'BT'}
               </button>
@@ -439,24 +475,113 @@ function App() {
             </div>
           )}
 
-          {/* ─── PATTERNS TAB ───────────────────────── */}
+          {/* ─── PATTERNS TAB - COMPLETELY REDESIGNED ─ */}
           {panelView === 'patterns' && (
             <div className="panel-content">
-              <section>
-                <h2><Zap size={13} /> Pattern Context</h2>
+              {/* Pattern Overview Dashboard */}
+              <section className="pattern-overview">
+                <div className="pattern-overview-header">
+                  <h2><Radar size={14} /> Pattern Intelligence</h2>
+                  <div className="pattern-view-toggles">
+                    <button
+                      className={`pattern-view-btn ${patternView === 'cards' ? 'active' : ''}`}
+                      onClick={() => setPatternView('cards')}
+                      title="Card view"
+                    >
+                      <Layers size={12} />
+                    </button>
+                    <button
+                      className={`pattern-view-btn ${patternView === 'grid' ? 'active' : ''}`}
+                      onClick={() => setPatternView('grid')}
+                      title="Grid view"
+                    >
+                      <BarChart2 size={12} />
+                    </button>
+                  </div>
+                </div>
 
+                {/* Quick Stats Row */}
+                <div className="pattern-quick-stats">
+                  <div className="pq-stat">
+                    <div className="pq-stat-icon"><Layers size={14} /></div>
+                    <div className="pq-stat-info">
+                      <span className="pq-stat-value">{patterns.length}</span>
+                      <span className="pq-stat-label">Patterns</span>
+                    </div>
+                  </div>
+                  <div className="pq-stat">
+                    <div className="pq-stat-icon"><Eye size={14} /></div>
+                    <div className="pq-stat-info">
+                      <span className="pq-stat-value">{behaviors.length}</span>
+                      <span className="pq-stat-label">Behaviors</span>
+                    </div>
+                  </div>
+                  <div className="pq-stat">
+                    <div className="pq-stat-icon"><Zap size={14} /></div>
+                    <div className="pq-stat-info">
+                      <span className="pq-stat-value">{activeFvgs.length}</span>
+                      <span className="pq-stat-label">Active FVGs</span>
+                    </div>
+                  </div>
+                  <div className="pq-stat">
+                    <div className="pq-stat-icon"><Shield size={14} /></div>
+                    <div className="pq-stat-info">
+                      <span className="pq-stat-value">{activeOBs.length}</span>
+                      <span className="pq-stat-label">Order Blocks</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bias Meter */}
+                <div className="pattern-bias-meter">
+                  <div className="bias-label">
+                    <span>Pattern Bias</span>
+                    <span className={`bias-badge ${patternBias}`}>
+                      {patternBias === 'bullish' ? <ArrowUpRight size={12} /> : patternBias === 'bearish' ? <ArrowDownRight size={12} /> : <Minus size={12} />}
+                      {patternBias.toUpperCase()}
+                    </span>
+                  </div>
+                  <div className="bias-bar">
+                    <div className="bias-fill-bullish" style={{ width: `${patterns.length > 0 ? (bullishCount / patterns.length) * 100 : 33}%` }} />
+                    <div className="bias-fill-neutral" style={{ width: `${patterns.length > 0 ? (neutralCount / patterns.length) * 100 : 34}%` }} />
+                    <div className="bias-fill-bearish" style={{ width: `${patterns.length > 0 ? (bearishCount / patterns.length) * 100 : 33}%` }} />
+                  </div>
+                  <div className="bias-legend">
+                    <span className="legend-item"><span className="legend-dot bullish" /> Bullish ({bullishCount})</span>
+                    <span className="legend-item"><span className="legend-dot neutral" /> Neutral ({neutralCount})</span>
+                    <span className="legend-item"><span className="legend-dot bearish" /> Bearish ({bearishCount})</span>
+                  </div>
+                </div>
+
+                {/* Scores Summary */}
+                <div className="pattern-scores-row">
+                  <div className="score-chip bullish">
+                    <span className="score-chip-label">Bull Score</span>
+                    <span className="score-chip-value">{ctx.bullish_pattern_score.toFixed(3)}</span>
+                  </div>
+                  <div className="score-chip bearish">
+                    <span className="score-chip-label">Bear Score</span>
+                    <span className="score-chip-value">{ctx.bearish_pattern_score.toFixed(3)}</span>
+                  </div>
+                  <div className="score-chip">
+                    <span className="score-chip-label">Avg Conf</span>
+                    <span className="score-chip-value">{(avgConfidence * 100).toFixed(0)}%</span>
+                  </div>
+                  <div className="score-chip">
+                    <span className="score-chip-label">Avg Score</span>
+                    <span className="score-chip-value">{(avgScore * 100).toFixed(0)}%</span>
+                  </div>
+                </div>
+
+                {/* Context Grid */}
                 <div className="context-grid">
                   <div className="context-item">
                     <span className="ctx-label">Session</span>
                     <strong className="ctx-value" style={{ color: sessionColor }}>{ctx.session}</strong>
                   </div>
                   <div className="context-item">
-                    <span className="ctx-label">Phase</span>
-                    <strong className="ctx-value" style={{ color: regimeColor }}>{regime?.phase ?? '--'}</strong>
-                  </div>
-                  <div className="context-item">
-                    <span className="ctx-label">Halving</span>
-                    <strong className="ctx-value">{ctx.halving_phase.replaceAll('_', ' ')}</strong>
+                    <span className="ctx-label">Regime</span>
+                    <strong className="ctx-value" style={{ color: regimeColor }}>{regime?.phase.replaceAll('_', ' ') ?? '--'}</strong>
                   </div>
                   <div className="context-item">
                     <span className="ctx-label">Volatility</span>
@@ -466,14 +591,6 @@ function App() {
                     <span className="ctx-label">Signal</span>
                     <strong className={`ctx-value ${patternSignal}`}>{patternSignal}</strong>
                   </div>
-                  <div className="context-item">
-                    <span className="ctx-label">Scores</span>
-                    <strong className="ctx-value">
-                      <span className="bullish">+{ctx.bullish_pattern_score.toFixed(3)}</span>
-                      {' / '}
-                      <span className="bearish">-{ctx.bearish_pattern_score.toFixed(3)}</span>
-                    </strong>
-                  </div>
                 </div>
 
                 {isDemo && (
@@ -481,101 +598,213 @@ function App() {
                     <Zap size={11} /> No live data — showing example patterns. Connect backend for real analysis.
                   </div>
                 )}
+              </section>
 
-                {patterns.length > 0 && (
-                  <div className="pattern-summary">
-                    <div className="summary-item">
-                      <span className="ctx-label">Total</span>
-                      <strong>{patterns.length} patterns</strong>
-                    </div>
-                    <div className="summary-item">
-                      <span className="ctx-label">Bias</span>
-                      <strong><span className="bullish">▲ {bullishCount}</span> / <span className="bearish">▼ {bearishCount}</span></strong>
-                    </div>
-                    <div className="summary-item">
-                      <span className="ctx-label">Avg Conf</span>
-                      <strong>{(avgConfidence * 100).toFixed(0)}%</strong>
-                    </div>
-                    <div className="summary-item">
-                      <span className="ctx-label">Behaviors</span>
-                      <strong>{stats?.btc_behaviors ?? behaviors.length}</strong>
-                    </div>
-                    {bestPattern && (
-                      <div className="summary-item wide">
-                        <span className="ctx-label">Best</span>
-                        <strong>{bestPattern.name.replaceAll('_', ' ')} ({(bestPattern.confidence * 100).toFixed(0)}%)</strong>
+              {/* ICT Pattern Zones */}
+              {(activeFvgs.length > 0 || activeOBs.length > 0 || activeLiquidity.length > 0) && (
+                <section className="pattern-zones-section">
+                  <h2><GitBranch size={13} /> ICT Pattern Zones</h2>
+
+                  {/* FVG Zone */}
+                  {activeFvgs.length > 0 && (
+                    <div className="zone-group">
+                      <div className="zone-group-header">
+                        <span className="zone-group-icon fvg-icon"><Zap size={11} /></span>
+                        <span className="zone-group-title">Fair Value Gaps</span>
+                        <span className="zone-group-count">{activeFvgs.length}</span>
                       </div>
-                    )}
-                  </div>
-                )}
+                      <div className="zone-items">
+                        {activeFvgs.slice(-4).reverse().map((fvg) => (
+                          <div key={fvg.id} className={`zone-item ${fvg.direction}`}>
+                            <div className="zone-item-head">
+                              <span className="zone-item-dir">{fvg.direction === 'bullish' ? '▲ Bull FVG' : '▼ Bear FVG'}</span>
+                              <span className="zone-item-range">${formatPrice(fvg.bottom)} - ${formatPrice(fvg.top)}</span>
+                            </div>
+                            <div className="zone-item-bar">
+                              <div className={`zone-item-fill ${fvg.direction}`} style={{ width: `${Math.min(100, ((fvg.top - fvg.bottom) / (fvg.top || 1)) * 10000)}%` }} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
-                {ctx.fractal_clusters.length > 0 && (
-                  <div className="cluster-section">
-                    <span className="ctx-label">Fractal Clusters</span>
-                    <div className="cluster-pills">
-                      {ctx.fractal_clusters.map((c) => (
-                        <span key={c} className="pill">{c.replace('near_pivot_', '$')}</span>
+                  {/* Order Block Zone */}
+                  {activeOBs.length > 0 && (
+                    <div className="zone-group">
+                      <div className="zone-group-header">
+                        <span className="zone-group-icon ob-icon"><Shield size={11} /></span>
+                        <span className="zone-group-title">Order Blocks</span>
+                        <span className="zone-group-count">{activeOBs.length}</span>
+                      </div>
+                      <div className="zone-items">
+                        {activeOBs.slice(-4).reverse().map((ob) => (
+                          <div key={ob.id} className={`zone-item ${ob.direction}`}>
+                            <div className="zone-item-head">
+                              <span className="zone-item-dir">{ob.direction === 'bullish' ? '▲ Bull OB' : '▼ Bear OB'}{ob.is_breaker ? ' [BREAKER]' : ''}</span>
+                              <span className="zone-item-range">${formatPrice(ob.bottom)} - ${formatPrice(ob.top)}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Liquidity Zone */}
+                  {activeLiquidity.length > 0 && (
+                    <div className="zone-group">
+                      <div className="zone-group-header">
+                        <span className="zone-group-icon liq-icon"><Target size={11} /></span>
+                        <span className="zone-group-title">Liquidity Levels</span>
+                        <span className="zone-group-count">{activeLiquidity.length}</span>
+                      </div>
+                      <div className="zone-items">
+                        {activeLiquidity.slice(-4).reverse().map((liq) => (
+                          <div key={liq.id} className={`zone-item ${liq.kind === 'equal_high' ? 'bearish' : 'bullish'}`}>
+                            <div className="zone-item-head">
+                              <span className="zone-item-dir">{liq.kind === 'equal_high' ? '▼ EQH' : '▲ EQL'}</span>
+                              <span className="zone-item-range">${formatPrice(liq.price)} ({liq.touch_count} touches)</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {/* Fractal Clusters */}
+              {ctx.fractal_clusters.length > 0 && (
+                <section>
+                  <h2><Waves size={13} /> Fractal Clusters</h2>
+                  <div className="cluster-pills">
+                    {ctx.fractal_clusters.map((c) => (
+                      <span key={c} className="pill fractal-pill">{c.replace('near_pivot_', '$')}</span>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {/* Movement Patterns */}
+              {filteredPatterns.length > 0 && (
+                <section>
+                  <div className="section-header-with-filter">
+                    <h2><Flame size={13} /> Movement Patterns</h2>
+                    <div className="pattern-filter-btns">
+                      {(['all', 'bullish', 'bearish', 'neutral'] as const).map((f) => (
+                        <button
+                          key={f}
+                          className={`filter-btn ${patternFilter === f ? 'active' : ''} ${f}`}
+                          onClick={() => setPatternFilter(f)}
+                        >
+                          {f === 'all' ? 'All' : f === 'bullish' ? '▲ Bull' : f === 'bearish' ? '▼ Bear' : '— Neutral'}
+                        </button>
                       ))}
                     </div>
                   </div>
-                )}
 
-                {topPatterns.length > 0 && (
-                  <div className="list-section">
-                    <h3><TrendingUp size={11} /> Movement Patterns ({patterns.length})</h3>
-                    <div className="card-list">
-                      {topPatterns.map((p) => (
-                        <div key={p.id} className={`card ${p.direction}`}>
-                          <div className="card-head">
-                            <span className={`dir-icon ${p.direction}`}>
-                              {p.direction === 'bullish' ? '▲' : '▼'}
-                            </span>
-                            <span className="card-title">{p.name.replaceAll('_', ' ')}</span>
-                            <span className="card-score">{(p.score * 100).toFixed(0)}%</span>
+                  {patternView === 'cards' ? (
+                    <div className="card-list pattern-card-list">
+                      {filteredPatterns.map((p) => (
+                        <div key={p.id} className={`pattern-card ${p.direction} ${p.completed ? 'completed' : ''}`}>
+                          <div className="pattern-card-header">
+                            <div className="pattern-card-icon">
+                              {p.direction === 'bullish' ? <TrendingUp size={14} /> : p.direction === 'bearish' ? <TrendingDown size={14} /> : <Orbit size={14} />}
+                            </div>
+                            <div className="pattern-card-info">
+                              <span className="pattern-card-name">{p.name.replaceAll('_', ' ')}</span>
+                              <span className="pattern-card-meta">
+                                <span className={`pattern-card-dir ${p.direction}`}>{p.direction}</span>
+                                {p.completed && <span className="pattern-card-completed">completed</span>}
+                              </span>
+                            </div>
+                            <div className="pattern-card-scores">
+                              <div className="pattern-score-badge">
+                                <span className="psb-label">Score</span>
+                                <span className="psb-value">{(p.score * 100).toFixed(0)}%</span>
+                              </div>
+                            </div>
                           </div>
-                          <div className="progress-track">
-                            <div className={`progress-fill ${p.direction}`} style={{ width: `${p.confidence * 100}%` }} />
+                          <div className="pattern-card-progress">
+                            <div className="pattern-progress-track">
+                              <div className={`pattern-progress-fill ${p.direction}`} style={{ width: `${p.confidence * 100}%` }} />
+                            </div>
+                            <span className="pattern-conf-label">{(p.confidence * 100).toFixed(0)}% confidence</span>
                           </div>
-                          <p className="card-desc">{p.description}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {topBehaviors.length > 0 && (
-                  <div className="list-section">
-                    <h3><Eye size={11} /> Investor Behavior ({behaviors.length})</h3>
-                    <div className="card-list">
-                      {topBehaviors.map((b) => (
-                        <div key={b.id} className={`card behavior ${b.side}`}>
-                          <div className="card-head">
-                            <span className={`dir-icon ${b.side}`}>
-                              {b.side === 'bullish' ? '▲' : '▼'}
-                            </span>
-                            <span className={`card-title ${b.side}`}>{b.behavior_type.replaceAll('_', ' ')}</span>
-                            <span className="card-conf">{(b.confidence * 100).toFixed(0)}%</span>
-                          </div>
-                          <div className="progress-track">
-                            <div className={`progress-fill ${b.side}`} style={{ width: `${b.confidence * 100}%` }} />
-                          </div>
-                          <p className="card-desc">{b.description}</p>
-                          {b.price_level != null && (
-                            <div className="behavior-price">
-                              <span>Level: ${formatPrice(b.price_level)}</span>
-                              {b.volume_ratio != null && <span>Vol: {b.volume_ratio.toFixed(1)}×</span>}
+                          <p className="pattern-card-desc">{p.description}</p>
+                          {p.candle_count > 0 && (
+                            <div className="pattern-card-footer">
+                              <span><Timer size={10} /> {p.candle_count} candles</span>
                             </div>
                           )}
                         </div>
                       ))}
                     </div>
-                  </div>
-                )}
+                  ) : (
+                    <div className="pattern-grid-view">
+                      {filteredPatterns.map((p) => (
+                        <div key={p.id} className={`pattern-grid-card ${p.direction}`}>
+                          <div className="pgc-icon">
+                            {p.direction === 'bullish' ? <TrendingUp size={16} /> : p.direction === 'bearish' ? <TrendingDown size={16} /> : <Orbit size={16} />}
+                          </div>
+                          <div className="pgc-name">{p.name.replaceAll('_', ' ')}</div>
+                          <div className="pgc-score">{(p.score * 100).toFixed(0)}%</div>
+                          <div className="pgc-conf">{(p.confidence * 100).toFixed(0)}%</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
 
-                {patterns.length === 0 && behaviors.length === 0 && (
+              {/* Investor Behaviors */}
+              {topBehaviors.length > 0 && (
+                <section>
+                  <h2><Cpu size={13} /> Investor Behavior</h2>
+                  <div className="card-list">
+                    {topBehaviors.map((b) => (
+                      <div key={b.id} className={`behavior-card ${b.side} ${b.is_active ? 'active' : ''}`}>
+                        <div className="behavior-card-header">
+                          <div className="behavior-card-icon">
+                            {b.side === 'bullish' ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+                          </div>
+                          <div className="behavior-card-info">
+                            <span className="behavior-card-type">{b.behavior_type.replaceAll('_', ' ')}</span>
+                            <span className="behavior-card-meta">
+                              <span className={`behavior-side-badge ${b.side}`}>{b.side}</span>
+                              {b.is_active && <span className="behavior-active-badge">active</span>}
+                            </span>
+                          </div>
+                          <div className="behavior-card-confidence">
+                            <div className="behavior-conf-ring" style={{ '--conf': b.confidence } as React.CSSProperties}>
+                              <span>{(b.confidence * 100).toFixed(0)}%</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="behavior-card-progress">
+                          <div className="behavior-progress-track">
+                            <div className={`behavior-progress-fill ${b.side}`} style={{ width: `${b.confidence * 100}%` }} />
+                          </div>
+                          <span className="behavior-intensity-label">Intensity: {(b.intensity * 100).toFixed(0)}%</span>
+                        </div>
+                        <p className="behavior-card-desc">{b.description}</p>
+                        {b.price_level != null && (
+                          <div className="behavior-card-footer">
+                            <span><Target size={10} /> ${formatPrice(b.price_level)}</span>
+                            {b.volume_ratio != null && <span><BarChart2 size={10} /> {b.volume_ratio.toFixed(1)}× vol</span>}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {patterns.length === 0 && behaviors.length === 0 && (
+                <section>
                   <p className="empty-state">No active patterns detected. Waiting for sufficient candle data.</p>
-                )}
-              </section>
+                </section>
+              )}
             </div>
           )}
 
@@ -647,13 +876,11 @@ function App() {
           )}
 
           {/* ─── TRADES (Paper Trading) TAB ──────────── */}
-          {panelView === 'trades' && (
-            <div className="panel-content">
-              <section>
-                <PaperTradingPanel />
-              </section>
-            </div>
-          )}
+          <div className={`panel-content ${panelView === 'trades' ? '' : 'panel-hidden'}`}>
+            <section>
+              <PaperTradingPanel />
+            </section>
+          </div>
 
           {/* ─── ALERTS TAB ─────────────────────────── */}
           {panelView === 'alerts' && (
@@ -665,13 +892,11 @@ function App() {
           )}
 
           {/* ─── BACKTEST TAB ────────────────────────── */}
-          {panelView === 'backtest' && (
-            <div className="panel-content">
-              <section>
-                <BacktestPanel />
-              </section>
-            </div>
-          )}
+          <div className={`panel-content ${panelView === 'backtest' ? '' : 'panel-hidden'}`}>
+            <section>
+              <BacktestPanel />
+            </section>
+          </div>
 
           {/* ─── DEPTH TAB ──────────────────────────── */}
           {panelView === 'institutional' && (

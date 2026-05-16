@@ -361,3 +361,31 @@ def get_journal_entries(trade_id: str | None = None, limit: int = 100) -> list[d
         return results
     finally:
         conn.close()
+
+
+# ─── Reset / Clear ──────────────────────────────────────
+
+def reset_paper_trades() -> int:
+    conn = get_conn()
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM paper_trades")
+        count = cur.fetchone()[0]
+        conn.execute("DELETE FROM paper_trades")
+        conn.commit()
+        return count
+    finally:
+        conn.close()
+
+
+def reset_backtests() -> int:
+    conn = get_conn()
+    try:
+        cur = conn.execute("SELECT COUNT(*) FROM backtest_runs")
+        count = cur.fetchone()[0]
+        conn.execute("DELETE FROM backtest_trades")
+        conn.execute("DELETE FROM backtest_runs")
+        conn.execute("DELETE FROM equity_curve WHERE source = 'backtest'")
+        conn.commit()
+        return count
+    finally:
+        conn.close()

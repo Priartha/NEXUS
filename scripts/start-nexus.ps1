@@ -122,7 +122,7 @@ if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
 
 Stop-PidFile "backend"
 Stop-PidFile "frontend"
-Stop-ProjectListener 8080 "uvicorn"
+Stop-ProjectListener 8000 "uvicorn"
 Stop-ProjectListener 5173 "vite"
 Stop-ProjectProcesses
 
@@ -134,9 +134,9 @@ $backendErr = Join-Path $logDir "backend.err.log"
 $frontendOut = Join-Path $logDir "frontend.out.log"
 $frontendErr = Join-Path $logDir "frontend.err.log"
 
-Write-Step "Starting backend on port 8080"
+Write-Step "Starting backend on port 8000"
 $backendProc = Start-Process -FilePath $python `
-  -ArgumentList @("-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8080") `
+  -ArgumentList @("-m", "uvicorn", "backend.main:app", "--host", "127.0.0.1", "--port", "8000") `
   -WorkingDirectory $root `
   -RedirectStandardOutput $backendOut `
   -RedirectStandardError $backendErr `
@@ -145,8 +145,8 @@ $backendProc = Start-Process -FilePath $python `
 Set-Content -Path (Join-Path $runtimeDir "backend.pid") -Value $backendProc.Id
 Write-Step "Backend PID: $($backendProc.Id)"
 
-Wait-ForHttp "http://127.0.0.1:8080/health" "Backend"
-Write-Step "Backend live at http://127.0.0.1:8080"
+Wait-ForHttp "http://127.0.0.1:8000/health" "Backend"
+Write-Step "Backend live at http://127.0.0.1:8000"
 
 $viteJs = Join-Path $frontendDir "node_modules\vite\bin\vite.js"
 if (-not (Test-Path $viteJs)) {
@@ -171,7 +171,7 @@ Write-Step "Frontend live at http://127.0.0.1:5173"
 Write-Host ""
 Write-Host "NEXUS is LIVE!" -ForegroundColor Green
 Write-Host "  App:     http://127.0.0.1:5173" -ForegroundColor Green
-Write-Host "  Backend: http://127.0.0.1:8080" -ForegroundColor Green
+Write-Host "  Backend: http://127.0.0.1:8000" -ForegroundColor Green
 Write-Host "  Logs:    $logDir" -ForegroundColor Green
 
 & cmd.exe /d /s /c 'start "" "http://127.0.0.1:5173"'

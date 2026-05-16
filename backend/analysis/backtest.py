@@ -28,12 +28,16 @@ class BacktestEngine:
         max_concurrent: int = 1,
         slippage_pct: float = 0.0002,  # 0.02% slippage per trade
         commission_pct: float = 0.0004,  # 0.04% commission (round trip)
+        max_hold_bars: int = 25,  # Max bars to hold a trade
+        breakeven_threshold: float = 1.0,  # Move SL to breakeven after 1R profit
     ):
         self.initial_balance = float(initial_balance)
         self.position_size_pct = float(position_size_pct)
         self.max_concurrent = max_concurrent
         self.slippage_pct = float(slippage_pct)
         self.commission_pct = float(commission_pct)
+        self.max_hold_bars = max_hold_bars
+        self.breakeven_threshold = breakeven_threshold
 
     def run(
         self,
@@ -81,10 +85,14 @@ class BacktestEngine:
             structure = detect_structure(swings, window)
             regime = detect_market_regime(window, metrics, liquidity_events)
 
-            # Detect signals only for the current candle (not re-scanning all)
+            # Detect signals with full ICT confluence
             signals = detect_trade_signals(
                 candles=window,
                 metrics=metrics,
+                fvgs=fvgs,
+                order_blocks=order_blocks,
+                liquidity_events=liquidity_events,
+                swings=swings,
             )
 
             # Filter: only new signals not already processed
@@ -94,7 +102,7 @@ class BacktestEngine:
             for sig in new_signals:
                 if len([t for t in open_trades if t["status"] == "open"]) >= self.max_concurrent:
                     continue
-                if sig.confidence < 0.45:
+                if sig.confidence < 0.50:
                     continue
 
                 risk_per_trade = balance * self.position_size_pct
@@ -118,6 +126,7 @@ class BacktestEngine:
                     "entry_price": round(entry_with_slippage, 2),
                     "raw_entry": sig.entry,
                     "stop_loss": sig.stop_loss,
+                    "initial_sl": sig.stop_loss,
                     "take_profit": tp,
                     "quantity": quantity,
                     "status": "open",
@@ -126,6 +135,7 @@ class BacktestEngine:
                     "risk_reward": sig.risk_reward,
                     "slippage": round(slippage, 2),
                     "commission": round(commission, 2),
+                    "bars_held": 0,
                 }
                 open_trades.append(trade)
 
@@ -137,6 +147,38 @@ class BacktestEngine:
                 sl = trade["stop_loss"]
                 tp = trade["take_profit"]
                 qty = trade["quantity"]
+                bars_held = trade.get("bars_held", 0) + 1
+                trade["bars_held"] = bars_held
+
+                # ── Trailing stop: move to breakeven after 1R profit ──
+                risk = abs(entry - trade.get("initial_sl", sl))
+                if risk > 0:
+                    if side == "buy":
+                        profit_r = (current.high - entry) / risk
+                        if profit_r >= self.breakeven_threshold:
+                            trade["stop_loss"] = max(trade["stop_loss"], entry)
+                            sl = trade["stop_loss"]
+                    else:
+                        profit_r = (entry - current.low) / risk
+                        if profit_r >= self.breakeven_threshold:
+                            trade["stop_loss"] = min(trade["stop_loss"], entry)
+                            sl = trade["stop_loss"]
+
+                # ── Time-based exit ──
+                if bars_held >= self.max_hold_bars:
+                    exit_price = current.close
+                    pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
+                    pnl -= trade["commission"]
+                    pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
+                    trade["status"] = "closed"
+                    trade["exit_price"] = exit_price
+                    trade["exit_timestamp"] = current.timestamp
+                    trade["pnl"] = round(pnl, 2)
+                    trade["pnl_pct"] = round(pnl_pct, 4)
+                    trade["close_reason"] = "time_exit"
+                    balance += pnl
+                    results.append(dict(trade))
+                    continue
 
                 if side == "buy":
                     hit_stop = current.low <= sl
@@ -148,7 +190,7 @@ class BacktestEngine:
                 if hit_stop:
                     exit_price = sl
                     pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"]  # Deduct commission
+                    pnl -= trade["commission"]
                     pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
@@ -162,7 +204,7 @@ class BacktestEngine:
                 elif hit_target:
                     exit_price = tp
                     pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"]  # Deduct commission
+                    pnl -= trade["commission"]
                     pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
@@ -197,7 +239,13 @@ class BacktestEngine:
         max_dd_val = max((e["drawdown"] for e in equity), default=0)
         avg_win = sum(r["pnl"] for r in wins) / len(wins) if wins else 0
         avg_loss = abs(sum(r["pnl"] for r in losses) / len(losses)) if losses else 0
-        profit_factor = sum(r["pnl"] for r in wins) / abs(sum(r["pnl"] for r in losses)) if losses and sum(r["pnl"] for r in losses) != 0 else None if wins else 0
+        profit_factor = 0.0
+        if wins and losses:
+            gross_profit = sum(r["pnl"] for r in wins)
+            gross_loss = abs(sum(r["pnl"] for r in losses))
+            profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        elif wins:
+            profit_factor = float("inf")
 
         returns = [e["account_balance"] / self.initial_balance - 1 for e in equity]
         avg_return = sum(returns) / len(returns) if returns else 0
@@ -231,7 +279,7 @@ class BacktestEngine:
             "win_rate": round(len(wins) / len(closed), 4) if closed else 0,
             "avg_win": round(avg_win, 2),
             "avg_loss": round(avg_loss, 2),
-            "profit_factor": round(profit_factor, 4) if profit_factor is not None and isinstance(profit_factor, float) else profit_factor,
+            "profit_factor": round(profit_factor, 4) if profit_factor != float("inf") else 999.99,
             "max_drawdown": round(max_dd_val, 2),
             "max_drawdown_pct": round(max_dd, 4),
             "sharpe_ratio": round(sharpe, 4),

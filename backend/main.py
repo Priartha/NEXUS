@@ -37,8 +37,12 @@ from backend.storage.schema import init_db
 from backend.storage import repository as repo
 from backend.analysis.backtest import BacktestEngine
 from backend.analysis.paper_trading import PaperTradingEngine
+from backend.analysis.risk_manager import RiskManager
+from backend.analysis.symbol_scanner import MultiSymbolScanner
 
 paper_trading = PaperTradingEngine()
+risk_manager = RiskManager()
+symbol_scanner = MultiSymbolScanner()
 
 # Logging configuration
 logs_dir = Path("logs")
@@ -158,6 +162,20 @@ async def lifespan(app: FastAPI):
     global app_loop
     app_loop = asyncio.get_running_loop()
     init_db()
+
+    # Seed historical data for backtesting
+    if settings.market_data_provider.lower() == "binance":
+        from backend.ingestion.binance import fetch_historical_candles
+        for tf, store in stores.items():
+            try:
+                logger.info(f"Seeding historical data for {tf}")
+                candles = await fetch_historical_candles(settings.market_data_rest_base_url, settings.symbol, tf, limit=1000)
+                now_ms = candles[-1].timestamp if candles else None
+                store.seed(candles, now_ms=now_ms)
+                logger.info(f"Seeded {len(candles)} candles for {tf}")
+            except Exception as e:
+                logger.warning(f"Failed to seed {tf}: {e}")
+
     if settings.market_data_provider.lower() == "binance":
         stream_task = asyncio.create_task(start_binance_stream(manager, stores, pipelines, settings))
     else:
@@ -202,15 +220,15 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     request_id = str(uuid.uuid4())
-    logger.error(f"[{request_id}] Unhandled exception: {exc}", exc_info=exc)
+    logger.error(f"[{request_id}] Unhandled exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content=ErrorResponse(
-            error_code="INTERNAL_SERVER_ERROR",
-            message=str(exc) if settings.log_level == "DEBUG" else "Internal server error",
-            timestamp=int(time.time() * 1000),
-            request_id=request_id,
-        ).dict()
+        content={
+            "error_code": "INTERNAL_SERVER_ERROR",
+            "message": str(exc),
+            "timestamp": int(time.time() * 1000),
+            "request_id": request_id,
+        }
     )
 
 
@@ -283,8 +301,7 @@ async def health() -> dict:
 
 # ─── Backtesting ──────────────────────────────────────────
 
-@dataclass
-class BacktestRequest:
+class BacktestRequest(BaseModel):
     symbol: str = "BTCUSDT"
     timeframe: str = "5m"
     candle_count: int = 500
@@ -294,14 +311,20 @@ class BacktestRequest:
 
 @app.post("/backtest/run")
 async def run_backtest(body: BacktestRequest) -> dict:
-    _valid_timeframe(body.timeframe)
+    store = stores.get(body.timeframe)
+    if not store:
+        raise HTTPException(status_code=400, detail=f"Invalid timeframe: {body.timeframe}")
+    
+    candles = store.get_closed_candles()
+    if len(candles) < 80:
+        raise HTTPException(status_code=400, detail=f"Not enough candles: {len(candles)} (need at least 80)")
+    
+    candles = candles[-body.candle_count:]
+    
     engine = BacktestEngine(
         initial_balance=body.initial_balance,
         position_size_pct=body.position_size_pct,
     )
-    store = stores[body.timeframe]
-    candles = store.get_closed_candles()[-body.candle_count:]
-    utcnow = int(time.time() * 1000)
     result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
     repo.save_backtest_run(result)
     repo.save_backtest_trades(result["id"], result["trades"])
@@ -347,6 +370,18 @@ async def toggle_paper_trading() -> dict:
     return {"ok": True, "message": "Paper trading toggle requested. Configure in settings."}
 
 
+@app.post("/paper-trades/reset")
+async def reset_paper_trades() -> dict:
+    count = repo.reset_paper_trades()
+    return {"ok": True, "message": f"Cleared {count} paper trades"}
+
+
+@app.post("/backtest/reset")
+async def reset_backtest_data() -> dict:
+    count = repo.reset_backtests()
+    return {"ok": True, "message": f"Cleared {count} backtest runs"}
+
+
 # ─── MTF Confluence ─────────────────────────────────────
 
 # ─── Signals Journal ──────────────────────────────────────
@@ -374,6 +409,33 @@ async def acknowledge_alert(alert_id: str) -> dict:
 @app.get("/journal")
 async def get_journal(trade_id: str | None = None) -> list[dict]:
     return repo.get_journal_entries(trade_id=trade_id)
+
+
+@app.get("/scanner")
+async def scan_symbols(symbols: str | None = None) -> list[dict]:
+    """Scan multiple symbols for trading opportunities."""
+    sym_list = [s.strip() for s in symbols.split(",")] if symbols else None
+    results = await symbol_scanner.scan(sym_list)
+    return [
+        {
+            "symbol": r.symbol,
+            "price": r.price,
+            "change_24h": r.change_24h,
+            "volume_24h": r.volume_24h,
+            "trend_score": round(r.trend_score, 3),
+            "volatility_score": round(r.volatility_score, 3),
+            "momentum_score": round(r.momentum_score, 3),
+            "overall_score": round(r.overall_score, 3),
+            "recommendation": r.recommendation,
+        }
+        for r in results
+    ]
+
+
+@app.get("/risk")
+async def get_risk_status() -> dict:
+    """Get current risk management status."""
+    return risk_manager.get_risk_summary()
 
 
 @app.get("/snapshot")

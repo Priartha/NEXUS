@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useChartStore } from '../store/chartStore'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? ''
-const LOCAL_WS_URL = 'ws://127.0.0.1:8080/ws/chart'
+const LOCAL_WS_URL = 'ws://127.0.0.1:8000/ws/chart'
 const WS_URL = import.meta.env.VITE_WS_URL
   ?? (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost' ? LOCAL_WS_URL : '/ws/chart')
 
