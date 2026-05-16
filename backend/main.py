@@ -14,7 +14,8 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from dataclasses import dataclass
 from pydantic import BaseModel, field_validator
 from slowapi import Limiter
@@ -231,6 +232,19 @@ app.add_middleware(
     max_age=3600,
 )
 
+# Production: serve frontend static files
+import sys as _sys
+if getattr(_sys, "frozen", False):
+    _base = Path(_sys.executable).parent / "_internal"
+else:
+    _base = Path(__file__).resolve().parent.parent
+FRONTEND_DIST = _base / "frontend" / "dist"
+if FRONTEND_DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
+    logger.info(f"Serving frontend from {FRONTEND_DIST}")
+else:
+    logger.info(f"Frontend dist not found at {FRONTEND_DIST} - running in API-only mode")
+
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     logger.warning(f"Rate limit exceeded for {request.client.host} on {request.url}")
@@ -255,7 +269,9 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 @app.get("/")
-async def root() -> dict:
+async def root():
+    if FRONTEND_DIST.is_dir():
+        return FileResponse(str(FRONTEND_DIST / "index.html"))
     return {
         "name": "NEXUS",
         "docs": "/docs",
@@ -961,3 +977,14 @@ async def refresh_options_loop() -> None:
             )
 
         await asyncio.sleep(settings.options_refresh_seconds)
+
+
+# SPA fallback: serve index.html for any non-API route
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    if FRONTEND_DIST.is_dir():
+        file_path = FRONTEND_DIST / full_path
+        if file_path.is_file():
+            return FileResponse(str(file_path))
+        return FileResponse(str(FRONTEND_DIST / "index.html"))
+    raise HTTPException(status_code=404, detail="Frontend not available")

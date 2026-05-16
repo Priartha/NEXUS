@@ -670,7 +670,7 @@ class AiIctService:
             elif direction != "neutral" and higher_tf not in {"neutral", direction}:
                 subtract(direction, 0.08, f"MTF conflict: higher TF {higher_tf}")
             # Apply confluence factor to final score
-            if confluence_factor != 1.0:
+            if confluence_factor != 1.0 and direction != "neutral":
                 scorecard[direction] *= confluence_factor
 
         # ── Final scoring ──
