@@ -1,6 +1,6 @@
 # NEXUS Trading System
 
-Professional-grade cryptocurrency trading workstation implementing ICT (Inner Circle Trader) concepts with AI-assisted decision making, real-time market analysis, and comprehensive backtesting.
+Professional-grade specificly BTCUSDT trading workstation implementing ICT (Inner Circle Trader) concepts with AI-assisted decision making, real-time market analysis, and comprehensive backtesting.
 
 ## Quick Start
 
