@@ -411,6 +411,145 @@ class OrderbookSnapshot:
 
 
 @dataclass
+class ScalpOrderFlow:
+    """Order flow metrics for scalping."""
+    timestamp: int
+    delta: float = 0.0
+    cvd: float = 0.0
+    cvd_slope: float = 0.0
+    volume_delta_ratio: float = 0.0
+    absorption_ratio: float = 0.0
+    aggressive_buy_volume: float = 0.0
+    aggressive_sell_volume: float = 0.0
+    footprint_imbalance: float = 0.0
+
+
+@dataclass
+class ScalpFunding:
+    """Funding rate tracking for scalping."""
+    timestamp: int
+    current_rate: float = 0.0
+    projected_8h: float = 0.0
+    next_reset_ms: int = 0
+    is_extreme: bool = False
+    contrarian_bias: str = "neutral"
+
+
+@dataclass
+class ScalpOpenInterest:
+    """Open interest tracking for scalping."""
+    timestamp: int
+    current_oi: float = 0.0
+    oi_change_pct: float = 0.0
+    oi_delta: float = 0.0
+    oi_trend: str = "neutral"
+    momentum_confirmation: bool = False
+
+
+@dataclass
+class ScalpLiquidationLevel:
+    """Liquidation heatmap level."""
+    price: float
+    size: float
+    side: str
+    distance_pct: float
+    cluster_strength: float
+
+
+@dataclass
+class ScalpVWAP:
+    """VWAP bands for scalping."""
+    timestamp: int
+    vwap: float = 0.0
+    upper_band_1sd: float = 0.0
+    lower_band_1sd: float = 0.0
+    upper_band_2sd: float = 0.0
+    lower_band_2sd: float = 0.0
+    price_deviation_pct: float = 0.0
+    is_compressed: bool = False
+
+
+@dataclass
+class ScalpVolumeProfile:
+    """Volume profile levels."""
+    timestamp: int
+    poc: float = 0.0
+    vah: float = 0.0
+    val: float = 0.0
+    value_area_width_pct: float = 0.0
+
+
+@dataclass
+class ScalpOptionsGreeks:
+    """Options Greeks for scalping."""
+    timestamp: int
+    delta: float = 0.0
+    gamma: float = 0.0
+    theta: float = 0.0
+    vega: float = 0.0
+    iv_rank: float = 0.0
+    iv_percentile: float = 0.0
+    iv_regime: str = "neutral"
+    theta_decay_per_hour: float = 0.0
+
+
+@dataclass
+class ScalpLiquiditySweep:
+    """Liquidity sweep zone for scalping."""
+    timestamp: int
+    level: float
+    side: str
+    sweep_type: str
+    reclaimed: bool
+    strength: float
+    entry_trigger: bool = False
+
+
+@dataclass
+class ScalpSignal:
+    """Scalping-specific trade signal."""
+    id: str
+    timestamp: int
+    signal_type: str
+    entry_zone_low: float
+    entry_zone_high: float
+    sl_level: float
+    target_1: float
+    target_2: float
+    leverage: int = 0
+    strike: float = 0.0
+    expiry: str = ""
+    reason: str = ""
+    risk_reward: float = 0.0
+    confidence: str = "MEDIUM"
+    time_limit_ms: int = 0
+    max_hold_minutes: int = 15
+    status: str = "active"
+    entry_triggered: bool = False
+    partial_exit_pct: float = 0.0
+
+
+@dataclass
+class ScalpContext:
+    """Complete scalping context snapshot."""
+    timestamp: int
+    order_flow: Optional[ScalpOrderFlow] = None
+    funding: Optional[ScalpFunding] = None
+    open_interest: Optional[ScalpOpenInterest] = None
+    liquidation_levels: list[ScalpLiquidationLevel] = field(default_factory=list)
+    vwap: Optional[ScalpVWAP] = None
+    volume_profile: Optional[ScalpVolumeProfile] = None
+    options_greeks: Optional[ScalpOptionsGreeks] = None
+    liquidity_sweeps: list[ScalpLiquiditySweep] = field(default_factory=list)
+    signals: list[ScalpSignal] = field(default_factory=list)
+    trade_blocked_reasons: list[str] = field(default_factory=list)
+    rsi_3: float = 50.0
+    spot_volume_ok: bool = True
+    options_spread_ok: bool = True
+    macro_event_block: bool = False
+
+
+@dataclass
 class ChartUpdate:
     candle: Candle
     swings: list[Swing]

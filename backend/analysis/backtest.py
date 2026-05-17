@@ -27,7 +27,7 @@ from backend.analysis.liquidity_engineering import detect_liquidity_events
 from backend.analysis.market_structure import detect_structure
 from backend.analysis.order_block import detect_order_blocks, update_order_block_breakers
 from backend.analysis.regime import detect_market_regime
-from backend.analysis.signals import detect_trade_signals
+from backend.analysis.unified_scalp import UnifiedScalpEngine
 from backend.analysis.statistical_tests import compute_full_statistics, compute_sharpe_ratio
 from backend.analysis.swing_detector import detect_swings
 from backend.models.types import Candle
@@ -254,13 +254,14 @@ class BacktestEngine:
         open_trades: list[dict] = []
         returns_series: list[float] = []
 
-        swings: list[Any] = []
-        fvgs: list[Any] = []
-        order_blocks: list[Any] = []
-        liquidity: list[Any] = []
-        liquidity_events: list[Any] = []
-        metrics = None
+        swing_engine: list[Any] = []
+        fvg_engine: list[Any] = []
+        ob_engine: list[Any] = []
+        liq_engine: list[Any] = []
+        liq_evt_engine: list[Any] = []
+        metrics_engine = None
 
+        scalp = UnifiedScalpEngine()
         lookback = 80
         min_candles = max(lookback, 50)
         last_signal_ts = 0
@@ -270,31 +271,53 @@ class BacktestEngine:
             recent = window[-lookback:]
             current = candles[i]
 
-            swings = detect_swings(window)[-250:]
-            fvgs = detect_fvgs(recent)
-            order_blocks = detect_order_blocks(recent, swings)
-            liquidity = detect_equal_levels(swings)
+            swing_engine = detect_swings(window)[-250:]
+            fvg_engine = detect_fvgs(recent)
+            ob_engine = detect_order_blocks(recent, swing_engine)
+            liq_engine = detect_equal_levels(swing_engine)
 
             for c in recent:
-                fvgs = update_fvg_fills(fvgs, c)
-                order_blocks = update_order_block_breakers(order_blocks, c)
-                liquidity = check_liquidity_sweeps(liquidity, c)
+                fvg_engine = update_fvg_fills(fvg_engine, c)
+                ob_engine = update_order_block_breakers(ob_engine, c)
+                liq_engine = check_liquidity_sweeps(liq_engine, c)
 
-            metrics = compute_market_metrics(window, swings)
-            atr = metrics.atr14 if metrics else 0.0
-            liquidity_events = detect_liquidity_events(recent, liquidity, atr)[-80:]
-            structure = detect_structure(swings, window)
-            regime = detect_market_regime(window, metrics, liquidity_events)
+            metrics_engine = compute_market_metrics(window, swing_engine)
+            atr = metrics_engine.atr14 if metrics_engine else 0.0
+            liq_evt_engine = detect_liquidity_events(recent, liq_engine, atr)[-80:]
+            structure = detect_structure(swing_engine, window)
+            regime = detect_market_regime(window, metrics_engine, liq_evt_engine)
 
-            signals = detect_trade_signals(
+            # UNIFIED SCALPING ENGINE — primary signal source
+            scalp_ctx = scalp.compute(
                 candles=window,
-                metrics=metrics,
-                fvgs=fvgs,
-                order_blocks=order_blocks,
-                liquidity_events=liquidity_events,
-                swings=swings,
+                metrics=metrics_engine,
+                fvgs=fvg_engine,
+                order_blocks=ob_engine,
+                swings=swing_engine,
                 regime=regime,
+                liquidity_events=liq_evt_engine,
             )
+
+            signals = scalp_ctx.signals
+
+            # Convert ScalpSignal to backtest-compatible format
+            compatible_signals = []
+            for ss in signals:
+                conf_map = {"HIGH": 0.80, "MEDIUM": 0.65, "LOW": 0.40}
+                side = "buy" if "LONG" in ss.signal_type or ("CALL" in ss.signal_type and "SELL" not in ss.signal_type) else "sell"
+                entry = (ss.entry_zone_low + ss.entry_zone_high) / 2
+                compatible_signals.append(type("CompatSignal", (), {
+                    "id": ss.id,
+                    "timestamp": ss.timestamp,
+                    "side": side,
+                    "entry": entry,
+                    "stop_loss": ss.sl_level,
+                    "exit_price": ss.target_1,
+                    "confidence": conf_map.get(ss.confidence, 0.65),
+                    "reason": ss.reason,
+                    "risk_reward": ss.risk_reward,
+                })())
+            signals = compatible_signals
 
             new_signals = [s for s in signals if s.timestamp > last_signal_ts]
             last_signal_ts = max((s.timestamp for s in signals), default=last_signal_ts)

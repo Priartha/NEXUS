@@ -490,6 +490,58 @@ class AiIctService:
                     f"{side.upper()} signal {signal_confidence:.0%} conf, {rr:.1f}R",
                 )
 
+        # ── Psychology & Readability: validation layer only ──
+        # Signals already have psychology/readability baked into confidence.
+        # AI uses these as conflict detectors, not additive scoring.
+        psychology = _dict(payload.get("psychology"))
+        readability = _dict(payload.get("readability"))
+
+        if psychology and readability:
+            fg_label = str(psychology.get("fear_greed_label") or "neutral")
+            emotional = str(psychology.get("emotional_state") or "balanced")
+            trap_risk = _as_float(psychology.get("trap_risk"), 0.5)
+            grade = str(readability.get("grade") or "C")
+            tradeability = str(readability.get("tradeability") or "fair")
+
+            # Block signals that contradict extreme psychology
+            if fg_label == "extreme_fear" and buy_signal:
+                # Extreme fear + buy signal = potential capitulation bottom, let it through
+                pass
+            elif fg_label == "extreme_greed" and sell_signal:
+                # Extreme greed + sell signal = potential FOMO top, let it through
+                pass
+            elif fg_label == "extreme_fear" and sell_signal:
+                subtract("bearish", 0.10, "Psychology conflict: selling into extreme fear/capitulation")
+            elif fg_label == "extreme_greed" and buy_signal:
+                subtract("bullish", 0.10, "Psychology conflict: buying into extreme greed/FOMO")
+
+            # Emotional extremes that contradict signals
+            if emotional == "panic" and sell_signal:
+                subtract("bearish", 0.06, "Psychology conflict: selling during panic")
+            elif emotional == "euphoric" and buy_signal:
+                subtract("bullish", 0.06, "Psychology conflict: buying during euphoria")
+
+            # High trap risk blocks breakout signals
+            if trap_risk > 0.75:
+                subtract("bullish", 0.05, f"Psychology: high trap risk ({trap_risk:.0%})")
+                subtract("bearish", 0.05, f"Psychology: high trap risk ({trap_risk:.0%})")
+
+            # Poor readability = reduce confidence in all signals
+            if grade in ("D", "F"):
+                subtract("bullish", 0.06, f"Readability: poor clarity (grade {grade})")
+                subtract("bearish", 0.06, f"Readability: poor clarity (grade {grade})")
+            elif grade == "C":
+                subtract("bullish", 0.02, f"Readability: moderate clarity (grade {grade})")
+                subtract("bearish", 0.02, f"Readability: moderate clarity (grade {grade})")
+
+            # Avoid tradeability = strong block
+            if tradeability == "avoid":
+                subtract("bullish", 0.08, "Readability: market conditions suggest avoiding trades")
+                subtract("bearish", 0.08, "Readability: market conditions suggest avoiding trades")
+            elif tradeability == "poor":
+                subtract("bullish", 0.04, "Readability: poor tradeability")
+                subtract("bearish", 0.04, "Readability: poor tradeability")
+
         projection_direction = str(projection.get("direction") or "neutral")
         if projection_direction in {"bullish", "bearish"}:
             projection_confidence = float(projection.get("probability") or 0.5)
@@ -804,6 +856,8 @@ class AiIctService:
 
 
 def _compact_context(payload: dict[str, Any], sentiment: SentimentSnapshot, fallback: AiIctDecision) -> dict[str, Any]:
+    psychology = payload.get("psychology")
+    readability = payload.get("readability")
     return {
         "symbol": payload.get("symbol"),
         "timeframe": payload.get("timeframe"),
@@ -814,6 +868,25 @@ def _compact_context(payload: dict[str, Any], sentiment: SentimentSnapshot, fall
         "options_context": payload.get("options_context"),
         "latest_signals": payload.get("signals", [])[-8:],
         "btc_patterns": payload.get("btc_patterns"),
+        "psychology": {
+            "fear_greed_label": psychology.get("fear_greed_label") if psychology else None,
+            "fear_greed_score": psychology.get("fear_greed_score") if psychology else None,
+            "emotional_state": psychology.get("emotional_state") if psychology else None,
+            "retail_participation": psychology.get("retail_participation") if psychology else None,
+            "smart_money_activity": psychology.get("smart_money_activity") if psychology else None,
+            "trap_risk": psychology.get("trap_risk") if psychology else None,
+            "conviction_score": psychology.get("conviction_score") if psychology else None,
+            "summary": psychology.get("summary") if psychology else None,
+        } if psychology else None,
+        "readability": {
+            "grade": readability.get("grade") if readability else None,
+            "overall_score": readability.get("overall_score") if readability else None,
+            "tradeability": readability.get("tradeability") if readability else None,
+            "noise_level": readability.get("noise_level") if readability else None,
+            "dominant_pattern": readability.get("dominant_pattern") if readability else None,
+            "structure_reliability": readability.get("structure_reliability") if readability else None,
+            "key_observations": readability.get("key_observations") if readability else None,
+        } if readability else None,
         "sentiment": {
             "label": sentiment.label,
             "score": sentiment.score,

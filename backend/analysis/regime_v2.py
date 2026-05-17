@@ -49,6 +49,11 @@ def detect_market_regime(
     emas_aligned_bullish = ema9 > ema21 > ema50
     emas_aligned_bearish = ema9 < ema21 < ema50
 
+    # Price direction over lookback period
+    price_change_pct = (latest.close - window[0].open) / window[0].open * 100
+    is_price_rising = price_change_pct > 0.5
+    is_price_falling = price_change_pct < -0.5
+
     # ── Efficiency Ratio ──
     net_move = abs(latest.close - window[0].open)
     total_move = sum(abs(closes[i] - closes[i-1]) for i in range(1, len(closes)))
@@ -71,20 +76,41 @@ def detect_market_regime(
     confidence = 0.5
     reasons: list[str] = []
 
-    # 1. TRENDING: requires structure + EMA alignment + efficiency
+    # 1. TRENDING: requires structure + EMA alignment + price direction + efficiency
     is_structured_trend = structure["is_trending"] and structure["direction"] != "neutral"
     is_ema_aligned = emas_aligned_bullish or emas_aligned_bearish
-    is_efficient = efficiency > 0.30
+    is_efficient = efficiency > 0.40  # Stricter threshold
 
-    if is_structured_trend and is_ema_aligned:
+    # Require price direction to match structure (stronger threshold)
+    price_direction_matches = (
+        (structure["direction"] == "bullish" and is_price_rising) or
+        (structure["direction"] == "bearish" and is_price_falling)
+    )
+    
+    # Require minimum EMA spread for trending
+    has_ema_spread = ema_spread_pct > 0.20
+
+    # Require stronger evidence for trending
+    if is_structured_trend and is_ema_aligned and is_efficient and price_direction_matches and has_ema_spread:
         phase = "trending"
         bias = structure["direction"]
-        confidence = min(0.92, 0.50 + efficiency * 0.30 + (0.10 if is_ema_aligned else 0))
+        confidence = min(0.92, 0.55 + efficiency * 0.25 + (0.10 if is_ema_aligned else 0))
         reasons = [
             f"Structure: {structure['pattern']}",
             f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned",
             f"Efficiency: {efficiency:.2f}",
+            f"Price: {price_change_pct:+.2f}%",
             f"EMA spread: {ema_spread_pct:.2f}%",
+        ]
+    elif is_structured_trend and is_ema_aligned and price_direction_matches and has_ema_spread:
+        # Weaker trend - still trending but lower confidence
+        phase = "trending"
+        bias = structure["direction"]
+        confidence = min(0.80, 0.45 + efficiency * 0.20)
+        reasons = [
+            f"Structure: {structure['pattern']}",
+            f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned",
+            f"Price: {price_change_pct:+.2f}%",
         ]
 
     # 2. RANGING: no structure, price oscillating
@@ -135,6 +161,14 @@ def detect_market_regime(
             bias = "bearish"
             confidence = min(0.85, confidence + 0.10)
             reasons.append("Volume expansion + bearish EMA breakout")
+
+    # Safety check: trending phase must have directional bias
+    if phase == "trending" and bias == "neutral":
+        # Fall back to range_bound if we can't determine direction
+        phase = "range_bound"
+        bias = "neutral"
+        confidence = 0.50
+        reasons = ["Trending structure without clear direction"]
 
     return MarketRegime(
         timestamp=latest.timestamp,

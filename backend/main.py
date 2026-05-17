@@ -634,6 +634,130 @@ async def get_risk_status() -> dict:
     return risk_manager.get_risk_summary()
 
 
+# ─── Scalping Engine (Derivatives Only) ───────────────────
+
+@app.get("/scalp")
+async def get_scalp_context(
+    tf: str = Query(default=settings.timeframe),
+) -> dict:
+    """Get scalping engine context with signals, order flow, and risk status."""
+    if tf not in supported_timeframes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {tf}")
+    pipeline = pipelines[tf]
+    store = stores[tf]
+    payload = await asyncio.wait_for(
+        pipeline.snapshot_async(store),
+        timeout=15.0,
+    )
+    _attach_options_context(payload, tf)
+    payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
+    _apply_scalp_accuracy_gates(payload, tf)
+    return {
+        "scalp_context": payload.get("scalp"),
+        "scalp_risk": payload.get("scalp_risk"),
+        "timeframe": tf,
+        "symbol": settings.symbol,
+    }
+
+
+@app.get("/scalp/signals")
+async def get_scalp_signals(
+    tf: str = Query(default=settings.timeframe),
+) -> list[dict]:
+    """Get current scalping signals only."""
+    if tf not in supported_timeframes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {tf}")
+    pipeline = pipelines[tf]
+    store = stores[tf]
+    payload = await asyncio.wait_for(
+        pipeline.snapshot_async(store),
+        timeout=15.0,
+    )
+    _attach_options_context(payload, tf)
+    payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
+    _apply_scalp_accuracy_gates(payload, tf)
+    scalp = payload.get("scalp")
+    if not scalp:
+        return []
+    return scalp.get("signals", [])
+
+
+@app.get("/scalp/risk")
+async def get_scalp_risk() -> dict:
+    """Get scalping risk manager status."""
+    tf = settings.timeframe
+    pipeline = pipelines[tf]
+    return pipeline.scalp_risk.get_risk_summary()
+
+
+@app.get("/scalp/orderflow")
+async def get_scalp_orderflow(
+    tf: str = Query(default=settings.timeframe),
+) -> dict:
+    """Get current order flow metrics."""
+    if tf not in supported_timeframes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {tf}")
+    pipeline = pipelines[tf]
+    store = stores[tf]
+    payload = await asyncio.wait_for(
+        pipeline.snapshot_async(store),
+        timeout=15.0,
+    )
+    _attach_options_context(payload, tf)
+    payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
+    _apply_scalp_accuracy_gates(payload, tf)
+    scalp = payload.get("scalp")
+    if not scalp:
+        return {"error": "No scalping context available"}
+    return {
+        "order_flow": scalp.get("order_flow"),
+        "vwap": scalp.get("vwap"),
+        "volume_profile": scalp.get("volume_profile"),
+        "rsi_3": scalp.get("rsi_3"),
+    }
+
+
+@app.get("/scalp/funding")
+async def get_scalp_funding() -> dict:
+    """Get current funding rate and next reset."""
+    tf = settings.timeframe
+    pipeline = pipelines[tf]
+    store = stores[tf]
+    payload = await asyncio.wait_for(
+        pipeline.snapshot_async(store),
+        timeout=15.0,
+    )
+    _attach_options_context(payload, tf)
+    payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
+    _apply_scalp_accuracy_gates(payload, tf)
+    scalp = payload.get("scalp")
+    if not scalp:
+        return {"error": "No scalping context available"}
+    return scalp.get("funding", {})
+
+
+@app.get("/scalp/blockers")
+async def get_scalp_blockers(
+    tf: str = Query(default=settings.timeframe),
+) -> list[str]:
+    """Get current trade blockers/filters."""
+    if tf not in supported_timeframes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {tf}")
+    pipeline = pipelines[tf]
+    store = stores[tf]
+    payload = await asyncio.wait_for(
+        pipeline.snapshot_async(store),
+        timeout=15.0,
+    )
+    _attach_options_context(payload, tf)
+    payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
+    _apply_scalp_accuracy_gates(payload, tf)
+    scalp = payload.get("scalp")
+    if not scalp:
+        return ["No scalping context available"]
+    return scalp.get("trade_blocked_reasons", [])
+
+
 @app.get("/snapshot")
 async def snapshot(
     request: Request,
@@ -907,13 +1031,118 @@ def _valid_timeframe(timeframe: str) -> str:
 def _attach_realtime_context(payload: dict, timeframe: str) -> dict:
     payload["available_timeframes"] = list(supported_timeframes)
     payload["sentiment"] = to_wire(sentiment_service.current)
-    _attach_options_context(payload)
+    payload["mtf_confluence"] = compute_mtf_confluence(timeframe, stores, pipelines)
+    _attach_options_context(payload, timeframe)
+    _apply_scalp_accuracy_gates(payload, timeframe)
     review = ai_ict_reviews.get(timeframe)
     if review is None or not _review_matches_payload(review, payload):
         review = ai_ict_service.local_review(payload, sentiment_service.current)
         ai_ict_reviews[timeframe] = review
     payload["ai_ict"] = to_wire(review)
     return payload
+
+
+def _apply_scalp_accuracy_gates(payload: dict, timeframe: str) -> None:
+    scalp = payload.get("scalp")
+    if not isinstance(scalp, dict):
+        return
+    signals = [sig for sig in scalp.get("signals", []) or [] if isinstance(sig, dict)]
+    if not signals:
+        return
+
+    signal = signals[0]
+    side = "short" if "SHORT" in str(signal.get("signal_type", "")).upper() or "PUT" in str(signal.get("signal_type", "")).upper() else "long"
+    blockers: list[str] = []
+    if settings.scalp_require_mtf_alignment:
+        blockers.extend(_mtf_accuracy_blockers(side, timeframe))
+    if settings.scalp_require_candle_confirmation:
+        blockers.extend(_candle_confirmation_blockers(side, payload, signal))
+
+    if not blockers:
+        return
+
+    existing = [str(item) for item in scalp.get("trade_blocked_reasons", [])]
+    scalp["trade_blocked_reasons"] = [*existing, *[item for item in blockers if item not in existing]][:8]
+    scalp["signals"] = []
+    if payload.get("signals"):
+        payload["signals"] = [
+            sig for sig in payload.get("signals", [])
+            if not (isinstance(sig, dict) and str(sig.get("model", "")).startswith("unified-scalp"))
+        ]
+    stats = payload.get("stats")
+    if isinstance(stats, dict):
+        stats["scalp_signals"] = 0
+        stats["scalp_blocked"] = len(scalp["trade_blocked_reasons"])
+
+
+def _mtf_accuracy_blockers(side: str, timeframe: str) -> list[str]:
+    hierarchy = ["1m", "5m", "15m", "1h", "4h"]
+    try:
+        idx = hierarchy.index(timeframe)
+    except ValueError:
+        return []
+
+    higher = [tf for tf in hierarchy[idx + 1:] if tf in pipelines]
+    lower = [tf for tf in hierarchy[:idx] if tf in pipelines]
+    blockers: list[str] = []
+
+    higher_scores = [
+        float(pipelines[tf].metrics.trend_score)
+        for tf in higher
+        if pipelines[tf].metrics is not None
+    ]
+    if higher_scores:
+        avg_higher = sum(higher_scores) / len(higher_scores)
+        if side == "long" and avg_higher < -0.08:
+            blockers.append(f"Higher timeframe bearish trend {avg_higher:.2f}")
+        if side == "short" and avg_higher > 0.08:
+            blockers.append(f"Higher timeframe bullish trend {avg_higher:.2f}")
+        if abs(avg_higher) < 0.04:
+            blockers.append("Higher timeframe trend is neutral")
+
+    lower_scores = [
+        float(pipelines[tf].metrics.trend_score)
+        for tf in lower[-1:]
+        if pipelines[tf].metrics is not None
+    ]
+    if lower_scores:
+        trigger_score = lower_scores[-1]
+        if side == "long" and trigger_score < -0.12:
+            blockers.append(f"Lower timeframe trigger bearish {trigger_score:.2f}")
+        if side == "short" and trigger_score > 0.12:
+            blockers.append(f"Lower timeframe trigger bullish {trigger_score:.2f}")
+    return blockers
+
+
+def _candle_confirmation_blockers(side: str, payload: dict, signal: dict) -> list[str]:
+    candle = payload.get("candle")
+    if not isinstance(candle, dict):
+        return []
+    try:
+        open_price = float(candle.get("open") or 0.0)
+        high = float(candle.get("high") or 0.0)
+        low = float(candle.get("low") or 0.0)
+        close = float(candle.get("close") or 0.0)
+        entry_low = float(signal.get("entry_zone_low") or 0.0)
+        entry_high = float(signal.get("entry_zone_high") or 0.0)
+    except (TypeError, ValueError):
+        return []
+    if min(open_price, high, low, close, entry_low, entry_high) <= 0:
+        return []
+
+    blockers: list[str] = []
+    spread = max(high - low, 1e-9)
+    close_position = (close - low) / spread
+    if side == "long" and (close <= open_price or close_position < 0.55):
+        blockers.append("Bullish candle close confirmation missing")
+    if side == "short" and (close >= open_price or close_position > 0.45):
+        blockers.append("Bearish candle close confirmation missing")
+
+    entry_mid = (entry_low + entry_high) / 2.0
+    distance_pct = abs(close - entry_mid) / close if close > 0 else 0.0
+    if distance_pct > settings.scalp_max_entry_distance_pct:
+        blockers.append(f"Price {distance_pct:.2%} away from entry zone")
+    return blockers
 
 
 def _payload_analysis_timestamp(payload: dict) -> int | None:
@@ -972,7 +1201,7 @@ async def refresh_ai_ict_timeframe(timeframe: str) -> None:
         return
     if _payload_analysis_timestamp(payload) is None or payload.get("metrics") is None:
         return
-    _attach_options_context(payload)
+    _attach_options_context(payload, timeframe)
     payload["sentiment"] = to_wire(sentiment_service.current)
 
     # Compute multi-timeframe confluence
@@ -1001,7 +1230,7 @@ async def _broadcast_ai_ict(timeframe: str, review) -> None:
     )
 
 
-def _attach_options_context(payload: dict) -> None:
+def _attach_options_context(payload: dict, timeframe: str | None = None) -> None:
     context = build_options_context(
         payload=payload,
         option_tickers=option_tickers,
@@ -1014,6 +1243,52 @@ def _attach_options_context(payload: dict) -> None:
         source_error=option_tickers_error,
     )
     payload["options_context"] = to_wire(context)
+    if timeframe in pipelines:
+        pipeline = pipelines[timeframe]
+        pipeline.set_options_context(context)
+        if timeframe in stores:
+            payload.update(pipeline.refresh_scalp_context(stores[timeframe]))
+    _sync_options_context_into_scalp(payload)
+
+
+def _sync_options_context_into_scalp(payload: dict) -> None:
+    scalp = payload.get("scalp")
+    options_context = payload.get("options_context")
+    if not isinstance(scalp, dict) or not isinstance(options_context, dict):
+        return
+
+    call = options_context.get("call_candidate")
+    put = options_context.get("put_candidate")
+    candidates = [
+        contract for contract in (call, put)
+        if isinstance(contract, dict) and contract.get("score") is not None
+    ]
+    best = max(candidates, key=lambda contract: float(contract.get("score") or 0.0), default=None)
+    if best is not None:
+        scalp["options_greeks"] = {
+            **(scalp.get("options_greeks") or {}),
+            "delta": round(abs(float(best.get("delta") or 0.0)), 4),
+            "gamma": round(abs(float(best.get("gamma") or 0.0)), 6),
+            "theta": round(float(best.get("theta") or 0.0), 6),
+            "vega": round(float(best.get("vega") or 0.0), 6),
+        }
+
+    option_blockers = [
+        str(item) for item in options_context.get("blockers", [])
+        if item and not str(item).startswith("No liquid BTC ")
+    ]
+    if option_blockers:
+        existing = [str(item) for item in scalp.get("trade_blocked_reasons", [])]
+        scalp["trade_blocked_reasons"] = [*existing, *[item for item in option_blockers if item not in existing]][:6]
+
+    for signal in scalp.get("signals", []) or []:
+        if not isinstance(signal, dict):
+            continue
+        direction_contract = put if "PUT" in str(signal.get("signal_type", "")) else call
+        if not isinstance(direction_contract, dict):
+            continue
+        signal["strike"] = signal.get("strike") or direction_contract.get("strike_price") or 0.0
+        signal["expiry"] = signal.get("expiry") or direction_contract.get("expiry") or ""
 
 
 async def refresh_options_loop() -> None:
@@ -1029,7 +1304,7 @@ async def refresh_options_loop() -> None:
 
         for timeframe in supported_timeframes:
             payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
-            _attach_options_context(payload)
+            _attach_options_context(payload, timeframe)
             await manager.broadcast(
                 {
                     "update_type": "options_context",

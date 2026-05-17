@@ -52,5 +52,37 @@ class Settings:
     api_key: str = os.getenv("ICT_API_KEY", "")
     log_level: str = os.getenv("ICT_LOG_LEVEL", "INFO")
 
+    # Scalping engine configuration
+    scalp_enabled: bool = os.getenv("NEXUS_SCALP_ENABLED", "true").lower() == "true"
+    scalp_max_risk_pct: float = float(os.getenv("NEXUS_SCALP_MAX_RISK_PCT", "0.01"))
+    scalp_max_leverage: int = int(os.getenv("NEXUS_SCALP_MAX_LEVERAGE", "10"))
+    scalp_max_positions: int = int(os.getenv("NEXUS_SCALP_MAX_POSITIONS", "2"))
+    scalp_daily_loss_limit_pct: float = float(os.getenv("NEXUS_SCALP_DAILY_LOSS_PCT", "0.03"))
+    scalp_min_rrr: float = float(os.getenv("NEXUS_SCALP_MIN_RRR", "1.5"))
+    scalp_max_hold_minutes: int = int(os.getenv("NEXUS_SCALP_MAX_HOLD_MINUTES", "15"))
+    scalp_funding_rate_extreme: float = float(os.getenv("NEXUS_SCALP_FUNDING_EXTREME", "0.001"))
+    scalp_ivr_low_threshold: float = float(os.getenv("NEXUS_SCALP_IVR_LOW", "30"))
+    scalp_ivr_high_threshold: float = float(os.getenv("NEXUS_SCALP_IVR_HIGH", "70"))
+    scalp_ivr_no_trade_low: float = float(os.getenv("NEXUS_SCALP_IVR_NO_TRADE_LOW", "30"))
+    scalp_ivr_no_trade_high: float = float(os.getenv("NEXUS_SCALP_IVR_NO_TRADE_HIGH", "50"))
+    scalp_options_min_delta: float = float(os.getenv("NEXUS_SCALP_OPT_MIN_DELTA", "0.30"))
+    scalp_options_max_delta: float = float(os.getenv("NEXUS_SCALP_OPT_MAX_DELTA", "0.50"))
+    scalp_options_max_dte: int = int(os.getenv("NEXUS_SCALP_OPT_MAX_DTE", "3"))
+    scalp_options_premium_exit_pct: float = float(os.getenv("NEXUS_SCALP_OPT_EXIT_PCT", "0.60"))
+    scalp_options_spread_max_pct: float = float(os.getenv("NEXUS_SCALP_OPT_SPREAD_MAX", "0.005"))
+    scalp_min_spot_volume_ratio: float = float(os.getenv("NEXUS_SCALP_MIN_VOL_RATIO", "0.70"))
+    scalp_vwap_band_sd: float = float(os.getenv("NEXUS_SCALP_VWAP_SD", "1.0"))
+    scalp_rsi_exhaustion: float = float(os.getenv("NEXUS_SCALP_RSI_EXHAUSTION", "3"))
+    scalp_partial_exit_pct: float = float(os.getenv("NEXUS_SCALP_PARTIAL_EXIT", "0.70"))
+    scalp_breakeven_premium_pct: float = float(os.getenv("NEXUS_SCALP_BE_PREMIUM_PCT", "0.20"))
+    scalp_min_confluence_score: float = float(os.getenv("NEXUS_SCALP_MIN_CONFLUENCE", "0.68"))
+    scalp_min_directional_edge: float = float(os.getenv("NEXUS_SCALP_MIN_DIRECTIONAL_EDGE", "0.12"))
+    scalp_min_trend_strength: float = float(os.getenv("NEXUS_SCALP_MIN_TREND_STRENGTH", "0.0015"))
+    scalp_min_volume_impulse: float = float(os.getenv("NEXUS_SCALP_MIN_VOLUME_IMPULSE", "0.90"))
+    scalp_require_options_alignment: bool = os.getenv("NEXUS_SCALP_REQUIRE_OPTIONS_ALIGNMENT", "true").lower() == "true"
+    scalp_require_mtf_alignment: bool = os.getenv("NEXUS_SCALP_REQUIRE_MTF_ALIGNMENT", "true").lower() == "true"
+    scalp_require_candle_confirmation: bool = os.getenv("NEXUS_SCALP_REQUIRE_CANDLE_CONFIRMATION", "true").lower() == "true"
+    scalp_max_entry_distance_pct: float = float(os.getenv("NEXUS_SCALP_MAX_ENTRY_DISTANCE_PCT", "0.0015"))
+
 
 settings = Settings()

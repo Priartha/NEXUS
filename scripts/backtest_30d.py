@@ -1,203 +1,249 @@
-"""
-30-Day Comprehensive Backtest
-Fetches 30+ days of 5m data via pagination and runs optimized backtest.
-"""
-from __future__ import annotations
+"""Full 30-day backtest of v3 signal engine."""
 
-import asyncio
-import json
 import sys
 import time
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from backend.analysis.backtest import BacktestEngine
-from backend.models.types import Candle
 import httpx
+import asyncio
+from datetime import datetime, timedelta
 
+sys.path.insert(0, "D:\\Trading Setup\\NEXUS")
 
-async def fetch_30d_candles(symbol="BTCUSDT", interval="5m", target_days=30):
-    """Fetch 30+ days of candles via pagination."""
+from backend.models.types import Candle, MarketMetrics
+from backend.analysis.regime_v2 import detect_market_regime as detect_regime
+from backend.analysis.signals import detect_trade_signals as detect_v3
+
+async def fetch_candles_30d(symbol="BTCUSDT", interval="5m"):
+    """Fetch 30 days of 5m candles (8640 candles)."""
+    url = "https://api.binance.com/api/v3/klines"
+    end_time = int(datetime.now().timestamp() * 1000)
+    start_time = int((datetime.now() - timedelta(days=30)).timestamp() * 1000)
+    
     all_candles = []
-    end_time = None
-    batch_size = 1000
-    target_candles = target_days * 24 * 12 if interval == "5m" else target_days * 24 * 4
-
-    print(f"  Target: ~{target_candles} candles ({target_days} days of {interval})")
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        batch = 0
-        while len(all_candles) < target_candles:
-            batch += 1
-            url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={batch_size}"
-            if end_time:
-                url += f"&endTime={end_time}"
-
-            try:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as e:
-                print(f"  Batch {batch} failed: {e}")
-                break
-
-            if not data:
-                break
-
-            for k in data:
-                all_candles.append(Candle(
-                    timestamp=k[0],
-                    open=float(k[1]),
-                    high=float(k[2]),
-                    low=float(k[3]),
-                    close=float(k[4]),
-                    volume=float(k[5]),
-                ))
-
-            if len(data) < batch_size:
-                break
-
-            end_time = data[0][0] - 1
-            days_covered = (all_candles[-1].timestamp - all_candles[0].timestamp) / (1000 * 86400)
-            print(f"  Batch {batch}: {len(all_candles)} candles ({days_covered:.1f} days)")
-            await asyncio.sleep(0.3)
-
+    current_start = start_time
+    
+    while current_start < end_time:
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": 1000,
+            "startTime": current_start
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        
+        if not data:
+            break
+            
+        candles = [Candle(timestamp=int(k[0]), open=float(k[1]), high=float(k[2]),
+                          low=float(k[3]), close=float(k[4]), volume=float(k[5]), is_closed=True) for k in data]
+        all_candles.extend(candles)
+        
+        # Move start time forward
+        current_start = candles[-1].timestamp + 1
+        
+        print(f"  Fetched {len(all_candles)} candles so far...")
+    
     return all_candles
 
-
-def run_optimized_backtest(candles, symbol="BTCUSDT", timeframe="5m"):
-    """Run backtest with optimized parameters."""
-    configs = [
-        {"name": "optimized", "max_hold": 25, "trailing": False, "be": 1.0, "risk": 0.02},
-        {"name": "conservative", "max_hold": 25, "trailing": False, "be": 1.0, "risk": 0.01},
-        {"name": "aggressive", "max_hold": 25, "trailing": False, "be": 1.0, "risk": 0.025},
-        {"name": "long_hold", "max_hold": 50, "trailing": False, "be": 1.0, "risk": 0.02},
-        {"name": "short_hold", "max_hold": 18, "trailing": False, "be": 1.0, "risk": 0.02},
-    ]
-
-    results = []
-    for cfg in configs:
-        engine = BacktestEngine(
-            initial_balance=10000,
-            position_size_pct=cfg["risk"],
-            max_hold_bars=cfg["max_hold"],
-            breakeven_threshold=cfg["be"],
-            trailing_stop=cfg["trailing"],
+def compute_simple_metrics(candles):
+    """Compute minimal MarketMetrics for regime detection."""
+    if len(candles) < 15:
+        return None
+    
+    closes = [c.close for c in candles]
+    highs = [c.high for c in candles]
+    lows = [c.low for c in candles]
+    
+    atrs = []
+    for i in range(1, len(candles)):
+        tr = max(
+            candles[i].high - candles[i].low,
+            abs(candles[i].high - candles[i-1].close),
+            abs(candles[i].low - candles[i-1].close)
         )
-        result = engine.run(candles, symbol=symbol, timeframe=timeframe)
-        results.append({**cfg, "result": result})
+        atrs.append(tr)
+    atr14 = sum(atrs[-14:]) / 14 if len(atrs) >= 14 else sum(atrs) / len(atrs)
+    
+    gains = []
+    losses = []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i-1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    avg_gain = sum(gains[-14:]) / 14
+    avg_loss = sum(losses[-14:]) / 14
+    rs = avg_gain / avg_loss if avg_loss > 0 else 100
+    rsi = 100 - 100 / (1 + rs)
+    
+    ema20 = closes[0]
+    multiplier = 2 / 21
+    for c in closes[1:]:
+        ema20 = (c - ema20) * multiplier + ema20
+    
+    ema50 = closes[0]
+    multiplier = 2 / 51
+    for c in closes[1:]:
+        ema50 = (c - ema50) * multiplier + ema50
+    
+    total_vp = sum((c.high + c.low + c.close) / 3 * c.volume for c in candles)
+    total_vol = sum(c.volume for c in candles)
+    vwap = total_vp / total_vol if total_vol > 0 else closes[-1]
+    
+    return MarketMetrics(
+        timestamp=candles[-1].timestamp,
+        atr14=atr14,
+        ema20=ema20,
+        ema50=ema50,
+        rsi14=rsi,
+        vwap=vwap,
+        vwap_distance_pct=(closes[-1] - vwap) / vwap * 100 if vwap > 0 else 0,
+        volume_zscore=0.0,
+        realized_volatility=atr14 / closes[-1] * 100,
+        parkinson_volatility=atr14 / closes[-1] * 100,
+        garman_klass_volatility=atr14 / closes[-1] * 100,
+        displacement_ratio=0.5,
+        premium_discount=(closes[-1] - vwap) / vwap if vwap > 0 else 0,
+        equilibrium=vwap,
+        range_high=max(highs[-50:]),
+        range_low=min(lows[-50:]),
+        trend_score=0.0,
+        volatility_score=atr14 / closes[-1] * 100,
+        institutional_bias="neutral",
+        bias_score=0.0,
+        expected_move=atr14 * 1.5,
+        expected_move_pct=atr14 / closes[-1] * 100 * 1.5,
+    )
 
-    return results
-
-
-def print_results(results, candles):
-    """Print formatted results."""
-    days = (candles[-1].timestamp - candles[0].timestamp) / (1000 * 86400)
-
-    print(f"\n{'='*100}")
-    print(f"  30-DAY BACKTEST RESULTS ({days:.1f} days, {len(candles)} candles)")
-    print(f"{'='*100}")
-    print(f"  {'Name':<15} {'Trades':<7} {'WR%':<6} {'PF':<6} {'DD%':<7} {'Sharpe':<7} {'PnL%':<8} {'AvgW':<8} {'AvgL':<8} {'RR':<6}")
-    print(f"  {'-'*85}")
-
-    for r in results:
-        res = r["result"]
-        rr = res["avg_win"] / res["avg_loss"] if res["avg_loss"] > 0 else 0
-        print(
-            f"  {r['name']:<15} "
-            f"{res['total_trades']:<7} "
-            f"{res['win_rate']*100:<6.1f} "
-            f"{res['profit_factor']:<6.2f} "
-            f"{res['max_drawdown_pct']:<7.2f} "
-            f"{res['sharpe_ratio']:<7.2f} "
-            f"{res['total_pnl_pct']:<8.2f} "
-            f"${res['avg_win']:<7.2f} "
-            f"${res['avg_loss']:<7.2f} "
-            f"{rr:<6.2f}"
-        )
-
-    # Best config
-    best = max(results, key=lambda r: r["result"]["profit_factor"] if r["result"]["total_trades"] >= 10 else -1)
-    res = best["result"]
-    print(f"\n  BEST: {best['name']}")
-    print(f"  Trades:{res['total_trades']} WR:{res['win_rate']*100:.1f}% PF:{res['profit_factor']:.2f} DD:{res['max_drawdown_pct']:.2f}% PnL:{res['total_pnl_pct']:.2f}%")
-
-    # Exit reason breakdown
-    trades = res.get("trades", [])
-    if trades:
-        reasons = {}
-        for t in trades:
-            reason = t.get("close_reason", "unknown")
-            reasons[reason] = reasons.get(reason, 0) + 1
-        print(f"\n  Exit Reasons:")
-        for reason, count in sorted(reasons.items(), key=lambda x: -x[1]):
-            print(f"    {reason:20s}: {count} ({count/len(trades)*100:.1f}%)")
-
-    return best
-
+def backtest_30d(candles):
+    """Run full backtest on 30 days of data."""
+    exits = []
+    regime_counts = {"trending": 0, "range_bound": 0, "consolidation": 0, "accumulation": 0, "distribution": 0}
+    
+    print(f"\nStarting backtest on {len(candles)} candles...")
+    start_time = time.time()
+    
+    for i in range(200, len(candles) - 50, 10):  # Step by 10 for speed
+        window = candles[:i+1]
+        metrics = compute_simple_metrics(window)
+        regime = detect_regime(window, metrics, []) if metrics else None
+        
+        if regime:
+            regime_counts[regime.phase] = regime_counts.get(regime.phase, 0) + 1
+        
+        sigs = detect_v3(window, regime=regime, reward_multiple=2.0)
+        
+        if sigs:
+            sig = sigs[0]
+            entry = sig.entry
+            sl = sig.stop_loss
+            tp = sig.exit_price
+            
+            for j in range(i+1, min(i+50, len(candles))):
+                bar = candles[j]
+                if sig.side == "buy":
+                    if bar.low <= sl:
+                        exits.append({"side": "buy", "pnl": -(entry - sl), "reason": "stop", "confidence": sig.confidence})
+                        break
+                    elif bar.high >= tp:
+                        exits.append({"side": "buy", "pnl": tp - entry, "reason": "target", "confidence": sig.confidence})
+                        break
+                else:
+                    if bar.high >= sl:
+                        exits.append({"side": "sell", "pnl": -(sl - entry), "reason": "stop", "confidence": sig.confidence})
+                        break
+                    elif bar.low <= tp:
+                        exits.append({"side": "sell", "pnl": entry - tp, "reason": "target", "confidence": sig.confidence})
+                        break
+            else:
+                final = candles[min(i+49, len(candles)-1)]
+                pnl = final.close - entry if sig.side == "buy" else entry - final.close
+                exits.append({"side": sig.side, "pnl": pnl, "reason": "time", "confidence": sig.confidence})
+        
+        if (i - 200) % 1000 == 0:
+            elapsed = time.time() - start_time
+            progress = (i - 200) / (len(candles) - 250) * 100
+            print(f"  Progress: {progress:.1f}% ({len(exits)} signals so far) [{elapsed:.1f}s]")
+    
+    elapsed = time.time() - start_time
+    print(f"\nBacktest completed in {elapsed:.1f}s")
+    
+    # Calculate stats
+    wins = [e for e in exits if e["pnl"] > 0]
+    losses = [e for e in exits if e["pnl"] <= 0]
+    
+    total_signals = len(exits)
+    win_count = len(wins)
+    win_rate = win_count / total_signals if total_signals > 0 else 0
+    total_pnl = sum(e["pnl"] for e in exits)
+    avg_win = sum(e["pnl"] for e in wins) / win_count if win_count > 0 else 0
+    avg_loss = sum(e["pnl"] for e in losses) / len(losses) if losses else 0
+    
+    gross_profit = sum(e["pnl"] for e in wins)
+    gross_loss = abs(sum(e["pnl"] for e in losses))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 999.99
+    
+    # By side
+    buy_signals = [e for e in exits if e["side"] == "buy"]
+    sell_signals = [e for e in exits if e["side"] == "sell"]
+    buy_wr = sum(1 for e in buy_signals if e["pnl"] > 0) / len(buy_signals) if buy_signals else 0
+    sell_wr = sum(1 for e in sell_signals if e["pnl"] > 0) / len(sell_signals) if sell_signals else 0
+    
+    # By exit reason
+    stop_exits = [e for e in exits if e["reason"] == "stop"]
+    target_exits = [e for e in exits if e["reason"] == "target"]
+    time_exits = [e for e in exits if e["reason"] == "time"]
+    
+    # By confidence bucket
+    high_conf = [e for e in exits if e["confidence"] >= 0.70]
+    med_conf = [e for e in exits if 0.55 <= e["confidence"] < 0.70]
+    low_conf = [e for e in exits if e["confidence"] < 0.55]
+    
+    print("\n" + "=" * 70)
+    print("NEXUS v3 - 30 DAY BACKTEST RESULTS")
+    print("=" * 70)
+    print(f"\nPeriod: 30 days ({len(candles)} candles)")
+    print(f"Buy & Hold: {(candles[-1].close - candles[0].close) / candles[0].close * 100:+.2f}%")
+    
+    print(f"\n{'Metric':<30} {'Value':>15}")
+    print("-" * 45)
+    print(f"{'Total Signals':<30} {total_signals:>15}")
+    print(f"{'Win Rate':<30} {win_rate * 100:>14.1f}%")
+    print(f"{'Profit Factor':<30} {profit_factor:>15.2f}")
+    print(f"{'Total PnL':<30} ${total_pnl:>14.2f}")
+    print(f"{'Avg Win':<30} ${avg_win:>14.2f}")
+    print(f"{'Avg Loss':<30} ${avg_loss:>14.2f}")
+    print(f"{'Gross Profit':<30} ${gross_profit:>14.2f}")
+    print(f"{'Gross Loss':<30} ${gross_loss:>14.2f}")
+    
+    print(f"\n{'By Side:':<30}")
+    print(f"  {'Buy Signals':<28} {len(buy_signals):>5} (WR: {buy_wr * 100:.1f}%)")
+    print(f"  {'Sell Signals':<28} {len(sell_signals):>5} (WR: {sell_wr * 100:.1f}%)")
+    
+    print(f"\n{'By Exit Reason:':<30}")
+    print(f"  {'Stop Loss':<28} {len(stop_exits):>5} ({len(stop_exits)/total_signals*100:.1f}%)")
+    print(f"  {'Target Hit':<28} {len(target_exits):>5} ({len(target_exits)/total_signals*100:.1f}%)")
+    print(f"  {'Time Exit':<28} {len(time_exits):>5} ({len(time_exits)/total_signals*100:.1f}%)")
+    
+    print(f"\n{'By Confidence:':<30}")
+    print(f"  {'High (>=0.70)':<28} {len(high_conf):>5} (WR: {sum(1 for e in high_conf if e['pnl'] > 0) / len(high_conf) * 100 if high_conf else 0:.1f}%)")
+    print(f"  {'Medium (0.55-0.70)':<28} {len(med_conf):>5} (WR: {sum(1 for e in med_conf if e['pnl'] > 0) / len(med_conf) * 100 if med_conf else 0:.1f}%)")
+    print(f"  {'Low (<0.55)':<28} {len(low_conf):>5} (WR: {sum(1 for e in low_conf if e['pnl'] > 0) / len(low_conf) * 100 if low_conf else 0:.1f}%)")
+    
+    print(f"\n{'Regime Distribution:':<30}")
+    for phase, count in regime_counts.items():
+        print(f"  {phase:<28} {count:>5}")
+    
+    print("\n" + "=" * 70)
 
 async def main():
-    print("="*100)
-    print("  NEXUS 30-DAY COMPREHENSIVE BACKTEST")
-    print("="*100)
-
-    # Fetch data
-    print("\n[1/3] Fetching 30 days of 5m data...")
-    candles = await fetch_30d_candles(symbol="BTCUSDT", interval="5m", target_days=30)
-    print(f"\n  Fetched {len(candles)} candles")
-
-    if len(candles) < 100:
-        print("  Not enough data!")
-        return
-
-    days = (candles[-1].timestamp - candles[0].timestamp) / (1000 * 86400)
-    print(f"  Period: {days:.1f} days")
-    start = time.strftime("%Y-%m-%d", time.gmtime(candles[0].timestamp / 1000))
-    end = time.strftime("%Y-%m-%d", time.gmtime(candles[-1].timestamp / 1000))
-    print(f"  {start} to {end}")
-
-    # Run backtest
-    print(f"\n[2/3] Running optimized backtests...")
-    results = run_optimized_backtest(candles, symbol="BTCUSDT", timeframe="5m")
-
-    # Print results
-    print(f"\n[3/3] Results:")
-    best = print_results(results, candles)
-
-    # Save
-    output = {
-        "period_days": days,
-        "candle_count": len(candles),
-        "start_date": start,
-        "end_date": end,
-        "configs": [
-            {
-                "name": r["name"],
-                "max_hold": r["max_hold"],
-                "trailing": r["trailing"],
-                "risk": r["risk"],
-                "results": {
-                    "total_trades": r["result"]["total_trades"],
-                    "win_rate": r["result"]["win_rate"],
-                    "profit_factor": r["result"]["profit_factor"],
-                    "max_drawdown_pct": r["result"]["max_drawdown_pct"],
-                    "sharpe_ratio": r["result"]["sharpe_ratio"],
-                    "total_pnl_pct": r["result"]["total_pnl_pct"],
-                    "avg_win": r["result"]["avg_win"],
-                    "avg_loss": r["result"]["avg_loss"],
-                }
-            }
-            for r in results
-        ],
-        "best": best["name"],
-        "timestamp": time.time(),
-    }
-
-    with open(Path(__file__).parent.parent / "backtest_30d_results.json", "w") as f:
-        json.dump(output, f, indent=2, default=str)
-    print(f"\nSaved to backtest_30d_results.json")
-
+    print("Fetching 30 days of BTCUSDT 5m candles...")
+    candles = await fetch_candles_30d()
+    print(f"Loaded {len(candles)} candles")
+    print(f"Price: ${candles[0].close:.2f} -> ${candles[-1].close:.2f}")
+    
+    backtest_30d(candles)
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -51,9 +51,38 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
 
   const candles = useChartStore((state) => state.candles)
   const aiIct = useChartStore((state) => state.aiIct)
+  const scalpContext = useChartStore((state) => state.scalpContext)
   const btcPatterns = useChartStore((state) => state.btcPatterns) ?? DEMO_PATTERNS
+  const latestCandle = candles.at(-1)
 
-  const featuredSignals = useMemo<TradeSignal[]>(() => {
+  const featuredSignals = useMemo<(TradeSignal & { entry_zone_low?: number; entry_zone_high?: number; target_2?: number })[]>(() => {
+    const scalpSignal = scalpContext?.signals?.[0]
+    if (scalpSignal) {
+      const side = scalpSignal.signal_type.includes('SHORT') || scalpSignal.signal_type.includes('PUT') ? 'sell' : 'buy'
+      const entry = (scalpSignal.entry_zone_low + scalpSignal.entry_zone_high) / 2
+      const timestamp = latestCandle ? Number(latestCandle.time) * 1000 : scalpSignal.timestamp
+      return [{
+        id: scalpSignal.id,
+        timestamp,
+        side,
+        entry,
+        entry_zone_low: scalpSignal.entry_zone_low,
+        entry_zone_high: scalpSignal.entry_zone_high,
+        stop_loss: scalpSignal.sl_level,
+        exit_price: scalpSignal.target_1,
+        target_2: scalpSignal.target_2,
+        risk_reward: scalpSignal.risk_reward,
+        confidence: scalpSignal.confidence === 'HIGH' ? 0.8 : 0.65,
+        reason: scalpSignal.reason,
+        status: 'open',
+        institutional_score: scalpSignal.risk_reward,
+        liquidity_score: scalpSignal.risk_reward,
+        bias_score: scalpSignal.risk_reward,
+        expected_move: Math.abs(scalpSignal.target_1 - entry),
+        model: 'UNIFIED-SCALP-V2',
+      }]
+    }
+
     if (!aiIct || aiIct.direction === 'neutral' || aiIct.grade === 'NO_TRADE' || aiIct.entry == null || aiIct.stop_loss == null) {
       return []
     }
@@ -71,9 +100,7 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
       bias_score: aiIct.setup_score, expected_move: Math.abs(exitPrice - aiIct.entry),
       model: aiIct.model ?? aiIct.provider,
     }]
-  }, [aiIct, targetRiskReward])
-
-  const latestCandle = candles.at(-1)
+  }, [aiIct, targetRiskReward, scalpContext, latestCandle])
 
   const focusRecent = useCallback(() => {
     if (!chartRef.current || candles.length === 0) return

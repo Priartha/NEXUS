@@ -2,13 +2,19 @@ import type { IChartApi, ISeriesApi } from 'lightweight-charts'
 import type { TradeSignal } from '../types/market'
 import { toChartTime } from '../types/market'
 
+type ChartTradeSignal = TradeSignal & {
+  entry_zone_low?: number
+  entry_zone_high?: number
+  target_2?: number
+}
+
 interface SignalOverlayProps {
   chart: IChartApi | null
   series: ISeriesApi<'Candlestick'> | null
   width: number
   height: number
   version: number
-  signals: TradeSignal[]
+  signals: ChartTradeSignal[]
 }
 
 interface SignalLine {
@@ -42,15 +48,23 @@ export function SignalOverlay({ chart, series, width, height, version, signals }
     return Math.max(0, Math.min(height, coordinate))
   }
 
-  function addLine(signal: TradeSignal, kind: 'entry' | 'exit' | 'sl', price: number) {
+  function formatPrice(price: number) {
+    return `$${price.toLocaleString(undefined, { maximumFractionDigits: 1 })}`
+  }
+
+  function addLine(signal: ChartTradeSignal, kind: 'entry' | 'tp1' | 'tp2' | 'sl', price: number) {
     const x = xFor(signal.timestamp)
     const y = yFor(price)
     if (x === null || y === null) return
 
     const labelPrefix = kind === 'entry'
-      ? 'ENTRY'
-      : kind === 'exit'
-        ? `TP 1:${signal.risk_reward?.toFixed(0) ?? 3}`
+      ? signal.entry_zone_low && signal.entry_zone_high
+        ? `ENTRY ${formatPrice(signal.entry_zone_low)}-${formatPrice(signal.entry_zone_high)}`
+        : `ENTRY ${formatPrice(price)}`
+      : kind === 'tp1'
+        ? `TP1 ${formatPrice(price)}`
+        : kind === 'tp2'
+          ? `TP2 ${formatPrice(price)}`
         : 'SL'
     lines.push({
       id: `${signal.id}-${kind}`,
@@ -64,7 +78,10 @@ export function SignalOverlay({ chart, series, width, height, version, signals }
 
   signals.forEach((signal) => {
     addLine(signal, 'entry', signal.entry)
-    addLine(signal, 'exit', signal.exit_price)
+    addLine(signal, 'tp1', signal.exit_price)
+    if (signal.target_2) {
+      addLine(signal, 'tp2', signal.target_2)
+    }
     addLine(signal, 'sl', signal.trailing_stop ?? signal.stop_loss)
   })
 

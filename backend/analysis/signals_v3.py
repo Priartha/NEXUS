@@ -723,44 +723,43 @@ def detect_trade_signals(
     fvgs = fvgs or []
     swings = swings or []
     
-    # COOLDOWN CHECK: Require price has moved in last 10 bars
-    recent_high = max(c.high for c in ordered[-12:-2])
-    recent_low = min(c.low for c in ordered[-12:-2])
+    # COOLDOWN CHECK: Require price has moved in last 12 bars
+    # This prevents signals on every bar but allows reasonable frequency
+    recent_high = max(c.high for c in ordered[-14:-2])
+    recent_low = min(c.low for c in ordered[-14:-2])
     recent_range = recent_high - recent_low
     
-    # Require range to be at least 0.8x ATR (some movement)
-    if recent_range < atr14 * 0.8:
+    # Require range to be at least 1.0x ATR (some movement)
+    if recent_range < atr14 * 1.0:
         return []
 
     signals: list[TradeSignal] = []
     
     # Determine regime phase
     phase = regime.phase if regime else "unknown"
-    bias = regime.bias if regime else "neutral"
+    is_trending = phase == "trending"
+    is_ranging = phase in ("range_bound", "consolidation")
     
-    # BULLISH FILTER: Allow buy signals when:
-    # 1. Regime is trending (any bias) - strongest signals
-    # 2. Price is above EMA50 and EMA9 > EMA20 (bullish structure)
-    # This catches trending regimes + bullish pullbacks
-    price_above_ema50 = closed_candle.close > ema50
-    ema9_above_ema20 = ema9 > ema20
+    # Try trend signals if trending or unclear
+    if is_trending or not regime:
+        for direction in ["buy", "sell"]:
+            sig = _trend_signals(
+                ordered, direction, closes, ema9, ema20, ema50, ema100,
+                atr14, rsi_val, swings, fvgs, regime, psychology, readability,
+                metrics, reward_multiple
+            )
+            if sig:
+                signals.append(sig)
     
-    is_bullish = (
-        phase == "trending" or
-        (price_above_ema50 and ema9_above_ema20)
-    )
-    
-    if not is_bullish:
-        return []
-    
-    # Only buy signals (sell signals have 0% WR in backtest)
-    sig = _trend_signals(
-        ordered, "buy", closes, ema9, ema20, ema50, ema100,
-        atr14, rsi_val, swings, fvgs, regime, psychology, readability,
-        metrics, reward_multiple
-    )
-    if sig:
-        signals.append(sig)
+    # Try range signals if ranging
+    if is_ranging:
+        for direction in ["buy", "sell"]:
+            sig = _range_signals(
+                ordered, direction, closes, ema20, atr14, rsi_val,
+                regime, psychology, readability, metrics
+            )
+            if sig:
+                signals.append(sig)
     
     if not signals:
         return []

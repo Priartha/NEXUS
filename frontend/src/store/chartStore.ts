@@ -18,6 +18,10 @@ import {
   type OptionsContext,
   type PaperTradeStats,
   type PriceProjection,
+  type PsychologySnapshot,
+  type ReadabilitySnapshot,
+  type ScalpContext,
+  type ScalpRiskSummary,
   type SentimentSnapshot,
   type StructureLabel,
   type Swing,
@@ -44,8 +48,12 @@ interface ChartStore {
   aiIct: AiIctDecision | null
   orderbook: OrderbookData | null
   btcPatterns: BtcPatternContext | null
+  psychology: PsychologySnapshot | null
+  readability: ReadabilitySnapshot | null
   stats: MarketStats | null
   paperTrading: PaperTradeStats | null
+  scalpContext: ScalpContext | null
+  scalpRisk: ScalpRiskSummary | null
   availableTimeframes: string[]
   selectedTimeframe: string
   symbol: string
@@ -94,8 +102,12 @@ export const useChartStore = create<ChartStore>((set) => ({
   aiIct: null,
   orderbook: null,
   btcPatterns: null,
+  psychology: null,
+  readability: null,
   stats: null,
   paperTrading: null,
+  scalpContext: null,
+  scalpRisk: null,
   availableTimeframes: ['1m', '5m', '15m', '1h'],
   selectedTimeframe: '5m',
   symbol: 'BTCUSD',
@@ -126,6 +138,8 @@ export const useChartStore = create<ChartStore>((set) => ({
       optionsContext: null,
       orderbook: null,
       stats: null,
+      psychology: null,
+      readability: null,
       feedStatus: state.selectedTimeframe === timeframe ? state.feedStatus : 'switching',
     })),
 
@@ -208,9 +222,13 @@ export const useChartStore = create<ChartStore>((set) => ({
       if (message.sentiment !== undefined) next.sentiment = message.sentiment
       if (message.ai_ict !== undefined) next.aiIct = message.ai_ict
       if (message.btc_patterns !== undefined) next.btcPatterns = message.btc_patterns
+      if (message.psychology !== undefined) next.psychology = message.psychology
+      if (message.readability !== undefined) next.readability = message.readability
       if (message.orderbook !== undefined) next.orderbook = message.orderbook
       if (message.stats) next.stats = message.stats
       if (message.paper_trading) next.paperTrading = message.paper_trading
+      if (message.scalp !== undefined) next.scalpContext = message.scalp
+      if (message.scalp_risk !== undefined) next.scalpRisk = message.scalp_risk
 
       return next
     }),

@@ -396,6 +396,66 @@ export interface BtcPatternContext {
   pattern_signal: 'bullish' | 'bearish' | 'neutral'
 }
 
+export interface PsychologySignal {
+  id: string
+  timestamp: number
+  type: string
+  side: 'bullish' | 'bearish' | 'neutral'
+  intensity: number
+  confidence: number
+  description: string
+  price_level: number
+  reason: string
+}
+
+export interface PsychologySnapshot {
+  timestamp: number
+  fear_greed_score: number
+  fear_greed_label: 'extreme_fear' | 'fear' | 'neutral' | 'greed' | 'extreme_greed'
+  retail_participation: number
+  smart_money_activity: number
+  emotional_state: 'panic' | 'cautious' | 'balanced' | 'euphoric' | 'exhausted'
+  trap_risk: number
+  conviction_score: number
+  psychological_levels: number[]
+  active_signals: PsychologySignal[]
+  summary: string
+}
+
+export interface TrendQuality {
+  timestamp: number
+  smoothness: number
+  consistency: number
+  pullback_quality: number
+  acceleration: number
+  is_choppy: boolean
+  reliability: number
+}
+
+export interface RangeQuality {
+  timestamp: number
+  boundary_clarity: number
+  bounce_consistency: number
+  internal_structure: number
+  is_breaking_out: boolean
+  breakout_quality: number
+  reliability: number
+}
+
+export interface ReadabilitySnapshot {
+  timestamp: number
+  overall_score: number
+  grade: 'A+' | 'A' | 'B+' | 'B' | 'C+' | 'C' | 'D' | 'F'
+  candle_clarity: number
+  trend_quality: TrendQuality | null
+  range_quality: RangeQuality | null
+  noise_level: number
+  structure_reliability: number
+  tradeability: 'excellent' | 'good' | 'fair' | 'poor' | 'avoid'
+  dominant_pattern: 'trending' | 'ranging' | 'chopping' | 'breaking_out' | 'unknown'
+  key_observations: string[]
+}
+
 export interface MarketStats {
   closed_candles: number
   active_fvgs: number
@@ -465,11 +525,15 @@ export interface MarketMessage {
   metrics?: MarketMetrics | null
   projection?: PriceProjection | null
   regime?: MarketRegime | null
+  psychology?: PsychologySnapshot | null
+  readability?: ReadabilitySnapshot | null
   options_context?: OptionsContext | null
   btc_patterns?: BtcPatternContext | null
   sentiment?: SentimentSnapshot | null
   ai_ict?: AiIctDecision | null
   orderbook?: OrderbookData | null
+  scalp?: ScalpContext | null
+  scalp_risk?: ScalpRiskSummary | null
   stats?: MarketStats
   status?: string
   message?: string
@@ -682,4 +746,146 @@ export function formatTimestamp(timestampMs?: number | null): string {
     month: 'short',
     day: '2-digit',
   }).format(new Date(timestampMs))
+}
+
+export interface ScalpOrderFlow {
+  timestamp: number
+  delta: number
+  cvd: number
+  cvd_slope: number
+  volume_delta_ratio: number
+  absorption_ratio: number
+  aggressive_buy_volume: number
+  aggressive_sell_volume: number
+  footprint_imbalance: number
+}
+
+export interface ScalpFunding {
+  timestamp: number
+  current_rate: number
+  projected_8h: number
+  next_reset_ms: number
+  is_extreme: boolean
+  contrarian_bias: string
+}
+
+export interface ScalpOpenInterest {
+  timestamp: number
+  current_oi: number
+  oi_change_pct: number
+  oi_delta: number
+  oi_trend: string
+  momentum_confirmation: boolean
+}
+
+export interface ScalpLiquidationLevel {
+  price: number
+  size: number
+  side: string
+  distance_pct: number
+  cluster_strength: number
+}
+
+export interface ScalpVWAP {
+  timestamp: number
+  vwap: number
+  upper_band_1sd: number
+  lower_band_1sd: number
+  upper_band_2sd: number
+  lower_band_2sd: number
+  price_deviation_pct: number
+  is_compressed: boolean
+}
+
+export interface ScalpVolumeProfile {
+  timestamp: number
+  poc: number
+  vah: number
+  val: number
+  value_area_width_pct: number
+}
+
+export interface ScalpOptionsGreeks {
+  timestamp: number
+  delta: number
+  gamma: number
+  theta: number
+  vega: number
+  iv_rank: number
+  iv_percentile: number
+  iv_regime: string
+  theta_decay_per_hour: number
+}
+
+export interface ScalpLiquiditySweep {
+  timestamp: number
+  level: number
+  side: string
+  sweep_type: string
+  reclaimed: boolean
+  strength: number
+  entry_trigger: boolean
+}
+
+export interface ScalpSignal {
+  id: string
+  timestamp: number
+  signal_type: string
+  entry_zone_low: number
+  entry_zone_high: number
+  sl_level: number
+  target_1: number
+  target_2: number
+  leverage: number
+  strike: number
+  expiry: string
+  reason: string
+  risk_reward: number
+  confidence: string
+  time_limit_ms: number
+  max_hold_minutes: number
+  status: string
+  entry_triggered: boolean
+  partial_exit_pct: number
+}
+
+export interface ScalpContext {
+  timestamp: number
+  order_flow: ScalpOrderFlow | null
+  funding: ScalpFunding | null
+  open_interest: ScalpOpenInterest | null
+  liquidation_levels: ScalpLiquidationLevel[]
+  vwap: ScalpVWAP | null
+  volume_profile: ScalpVolumeProfile | null
+  options_greeks: ScalpOptionsGreeks | null
+  liquidity_sweeps: ScalpLiquiditySweep[]
+  signals: ScalpSignal[]
+  trade_blocked_reasons: string[]
+  rsi_3: number
+  spot_volume_ok: boolean
+  options_spread_ok: boolean
+  macro_event_block: boolean
+}
+
+export interface ScalpRiskSummary {
+  current_balance: number
+  initial_balance: number
+  daily_pnl: number
+  daily_trades: number
+  daily_wins: number
+  daily_losses: number
+  daily_win_rate: number
+  daily_loss_pct: number
+  max_daily_loss_pct: number
+  daily_loss_hit: boolean
+  consecutive_losses: number
+  max_consecutive_losses: number
+  open_futures: number
+  open_options: number
+  total_open: number
+  max_positions: number
+  max_risk_per_trade_pct: number
+  max_leverage: number
+  min_rrr: number
+  max_hold_minutes: number
 }

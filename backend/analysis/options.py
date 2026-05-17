@@ -56,7 +56,7 @@ def build_options_context(
     blockers: list[str] = []
     if momentum_score < min_momentum_score:
         blockers.append(
-            f"Momentum {momentum_score:.0%} is below options threshold {min_momentum_score:.0%}"
+            f"Options momentum {momentum_score:.0%} is below options threshold {min_momentum_score:.0%}"
         )
     if not call_candidate:
         blockers.append("No liquid BTC call contract passed Greek and spread filters")

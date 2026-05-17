@@ -2,7 +2,9 @@ import { useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   AlertTriangle,
+  Brain,
   BrainCircuit,
+  Crosshair,
   Eye,
   Gauge,
   Orbit,
@@ -43,6 +45,8 @@ import { MultiExchangePanel } from './components/MultiExchangePanel'
 import { ModelDashboard } from './components/ModelDashboard'
 import { DbStatusPanel } from './components/DbStatusPanel'
 import { AlertConfigPanel } from './components/AlertConfigPanel'
+import { PsychologyPanel } from './components/PsychologyPanel'
+import { ScalpingPanel } from './components/ScalpingPanel'
 
 import AlertsPanel from './components/AlertsPanel'
 import BacktestPanel from './components/BacktestPanel'
@@ -56,7 +60,8 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config'
+type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp'
+const PRIMARY_PANEL_VIEWS: readonly PanelView[] = ['signals', 'scalp', 'options', 'risk', 'trades', 'backtest', 'alerts']
 
 const SESSION_COLORS: Record<string, string> = {
   asian: '#8ab4f8',
@@ -85,6 +90,8 @@ function App() {
   const projection = useChartStore((state) => state.projection)
   const sentiment = useChartStore((state) => state.sentiment)
   const aiIct = useChartStore((state) => state.aiIct)
+  const psychology = useChartStore((state) => state.psychology)
+  const readability = useChartStore((state) => state.readability)
   const optionsContext = useChartStore((state) => state.optionsContext)
   const btcPatterns = useChartStore((state) => state.btcPatterns)
   const availableTimeframes = useChartStore((state) => state.availableTimeframes)
@@ -98,6 +105,8 @@ function App() {
   const fvgs = useChartStore((state) => state.fvgs)
   const orderBlocks = useChartStore((state) => state.orderBlocks)
   const liquidity = useChartStore((state) => state.liquidity)
+  const scalpContext = useChartStore((state) => state.scalpContext)
+  const scalpRisk = useChartStore((state) => state.scalpRisk)
 
   const ctx = btcPatterns ?? DEMO_PATTERNS
   const patterns = ctx?.patterns ?? []
@@ -112,23 +121,76 @@ function App() {
   const change = displayPrice && refPrice ? displayPrice - refPrice : 0
   const changePct = refPrice && Number.isFinite(refPrice) && refPrice !== 0 ? (change / refPrice) * 100 : 0
   const connected = connectionStatus === 'open'
-  const finalAction = aiIct?.grade === 'NO_TRADE' || aiIct?.direction === 'neutral'
-    ? 'WAIT'
-    : aiIct?.direction === 'bullish'
-      ? 'BUY'
-      : aiIct?.direction === 'bearish'
-        ? 'SELL'
-        : '--'
-  const signalSummary = aiIct?.summary ?? 'NEXUS is aligning market structure, liquidity, and option flow into one definitive signal.'
-  const finalSideClass = finalAction === 'BUY' ? 'bullish' : finalAction === 'SELL' ? 'bearish' : 'neutral'
-  const confidenceText = aiIct ? `${(aiIct.confidence * 100).toFixed(0)}%` : '--'
-  const optionContract = aiIct?.option_contract ?? null
-  const momentumText = aiIct?.momentum_score != null
-    ? `${(aiIct.momentum_score * 100).toFixed(0)}%`
+
+  // ─── PRIMARY SIGNAL: Unified Scalping Engine ───────────────────
+  const primaryScalpSignal = scalpContext?.signals?.[0] ?? null
+  const scalpBlockers = scalpContext?.trade_blocked_reasons ?? []
+
+  const scalpAction = primaryScalpSignal
+    ? primaryScalpSignal.signal_type.includes('LONG') && primaryScalpSignal.signal_type.includes('CALL')
+      ? 'LONG + CALL'
+      : primaryScalpSignal.signal_type.includes('SHORT') && primaryScalpSignal.signal_type.includes('PUT')
+        ? 'SHORT + PUT'
+        : primaryScalpSignal.signal_type.includes('LONG')
+          ? 'LONG'
+          : primaryScalpSignal.signal_type.includes('SHORT')
+            ? 'SHORT'
+            : primaryScalpSignal.signal_type.includes('CALL') && !primaryScalpSignal.signal_type.includes('SELL')
+          ? 'BUY CALL'
+          : primaryScalpSignal.signal_type.includes('PUT') && !primaryScalpSignal.signal_type.includes('SELL')
+            ? 'BUY PUT'
+            : primaryScalpSignal.signal_type.includes('SELL')
+              ? 'SELL SPREAD'
+              : 'WAIT'
+    : scalpBlockers.length > 0
+      ? 'BLOCKED'
+      : 'WAIT'
+
+  const scalpGrade = primaryScalpSignal
+    ? primaryScalpSignal.confidence === 'HIGH' ? 'A+' : 'B'
+    : scalpBlockers.length > 0 ? 'C' : '--'
+
+  const scalpReadiness = primaryScalpSignal
+    ? primaryScalpSignal.confidence === 'HIGH' ? 'SNIPER' : 'QUALIFIED'
+    : scalpBlockers.length > 0 ? 'FILTERED' : '--'
+
+  const scalpConfidence = primaryScalpSignal
+    ? primaryScalpSignal.confidence === 'HIGH' ? '80%' : '65%'
     : '--'
-  const optionExecutionStatus = optionContract?.qualified
-    ? 'qualified'
-    : 'watchlist'
+
+  const finalAction = scalpAction
+  const signalSummary = primaryScalpSignal
+    ? primaryScalpSignal.reason
+    : scalpBlockers.length > 0
+      ? `Trading blocked: ${scalpBlockers.join('; ')}`
+      : aiIct?.summary ?? 'NEXUS scalping engine analyzing order flow, VWAP, funding, OI, and liquidity for sniper entry.'
+
+  const finalSideClass = finalAction === 'LONG' || finalAction === 'BUY CALL' || finalAction === 'LONG + CALL'
+    ? 'bullish'
+    : finalAction === 'SHORT' || finalAction === 'BUY PUT' || finalAction === 'SHORT + PUT'
+      ? 'bearish'
+      : 'neutral'
+
+  const confidenceText = scalpConfidence
+  const optionContract = aiIct?.option_contract
+    ?? (primaryScalpSignal?.signal_type.includes('PUT') ? optionsContext?.put_candidate : optionsContext?.call_candidate)
+    ?? null
+  const priceRsiText = scalpContext?.rsi_3 != null
+    ? `RSI(3): ${scalpContext.rsi_3.toFixed(1)}`
+    : aiIct?.momentum_score != null
+      ? `${(aiIct.momentum_score * 100).toFixed(0)}%`
+      : '--'
+  const optionsMomentumText = optionsContext
+    ? `Options: ${(optionsContext.momentum_score * 100).toFixed(0)}% / ${(optionsContext.minimum_momentum_score * 100).toFixed(0)}%`
+    : 'Options: --'
+  const optionExecutionStatus = primaryScalpSignal
+    ? `${primaryScalpSignal.signal_type} | RR 1:${primaryScalpSignal.risk_reward.toFixed(2)}`
+    : optionContract?.qualified
+      ? 'qualified'
+      : 'watchlist'
+  const scalpRiskStatus = scalpRisk
+    ? `Risk ${scalpRisk.total_open}/${scalpRisk.max_positions} | loss ${scalpRisk.daily_loss_pct.toFixed(2)}%/${scalpRisk.max_daily_loss_pct.toFixed(2)}%`
+    : 'Risk --'
   const selectedRiskReward: number | 'best' = 'best'
   const [panelView, setPanelView] = useState<PanelView>('signals')
   const latestLiquidityEvent = liquidityEvents.at(-1)
@@ -244,7 +306,8 @@ function App() {
       <section className="status-strip">
         <Metric icon={<Activity size={16} />} label="Feed" value={(feedStatus ?? 'unknown').replaceAll('_', ' ')} />
         <Metric icon={<Target size={16} />} label="Signal" value={finalAction} />
-        <Metric icon={<Gauge size={16} />} label="Momentum" value={momentumText} />
+        <Metric icon={<Gauge size={16} />} label="Price RSI" value={priceRsiText} />
+        <Metric icon={<BrainCircuit size={16} />} label="Options Flow" value={optionsMomentumText} />
         <Metric icon={<BrainCircuit size={16} />} label="Option" value={optionContract?.symbol ?? 'WAIT'} />
         {ctx && (
           <Metric
@@ -260,6 +323,20 @@ function App() {
             value={regime.phase.replaceAll('_', ' ')}
           />
         )}
+        {psychology && (
+          <Metric
+            icon={<Brain size={16} />}
+            label="Psychology"
+            value={psychology.fear_greed_label.replaceAll('_', ' ')}
+          />
+        )}
+        {readability && (
+          <Metric
+            icon={<Gauge size={16} />}
+            label="Readability"
+            value={readability.grade}
+          />
+        )}
       </section>
 
       {/* ─── HERO SIGNAL ───────────────────────────── */}
@@ -267,30 +344,40 @@ function App() {
         <div className={`hero-card ${finalSideClass}`}>
           <div className="hero-title">
             <div className="hero-signal-group">
-              <span className="hero-label">PRIMARY SIGNAL</span>
+              <span className="hero-label">SCALP SIGNAL</span>
               <strong className="hero-action">{finalAction}</strong>
             </div>
             <div className="hero-grade">
-              <span className="hero-grade-value">{aiIct?.grade ?? '--'}</span>
-              <span className="hero-grade-label">{aiIct?.readiness ?? '--'}</span>
+              <span className="hero-grade-value">{scalpGrade}</span>
+              <span className="hero-grade-label">{scalpReadiness}</span>
             </div>
           </div>
-          {aiIct && (
-            <div className="confidence-gauge">
-              <div className="cg-track">
-                <div className={`cg-fill ${finalSideClass}`} style={{ width: `${(aiIct.confidence * 100).toFixed(0)}%` }} />
-              </div>
-              <div className="cg-labels">
-                <span>Confidence</span>
-                <span>{confidenceText}</span>
-              </div>
+          <div className="confidence-gauge">
+            <div className="cg-track">
+              <div className={`cg-fill ${finalSideClass}`} style={{ width: primaryScalpSignal ? (primaryScalpSignal.confidence === 'HIGH' ? '80' : '65') + '%' : '0%' }} />
             </div>
-          )}
+            <div className="cg-labels">
+              <span>Confidence</span>
+              <span>{confidenceText}</span>
+            </div>
+          </div>
           <p className="hero-summary">{signalSummary}</p>
           <div className="hero-meta">
-            <span>Model: {aiIct?.model ?? aiIct?.provider ?? 'NEXUS'}</span>
+            <span>Model: UNIFIED-SCALP-V2</span>
             <span>{optionExecutionStatus}</span>
-            {aiIct?.momentum_score != null && <span>Momentum: {momentumText}</span>}
+            <span>{scalpRiskStatus}</span>
+            {primaryScalpSignal && (
+              <>
+                <span>Entry: ${primaryScalpSignal.entry_zone_low.toLocaleString()}–${primaryScalpSignal.entry_zone_high.toLocaleString()}</span>
+                <span>SL: ${primaryScalpSignal.sl_level.toLocaleString()}</span>
+                <span>T1: ${primaryScalpSignal.target_1.toLocaleString()}</span>
+                <span>T2: ${primaryScalpSignal.target_2.toLocaleString()}</span>
+                {primaryScalpSignal.leverage > 0 && <span>Lev: {primaryScalpSignal.leverage}x</span>}
+                <span>Max: {primaryScalpSignal.max_hold_minutes}m</span>
+              </>
+            )}
+            <span>{priceRsiText}</span>
+            <span>{optionsMomentumText}</span>
           </div>
         </div>
       </section>
@@ -306,7 +393,7 @@ function App() {
         <aside className="side-panel">
           <div className="panel-nav">
             <div className="panel-switch">
-            {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'alerts', 'trades', 'backtest', 'forward', 'config', 'analytics', 'multi-exchange', 'model', 'db-status', 'alert-config'] as const).map((view) => (
+            {PRIMARY_PANEL_VIEWS.map((view) => (
               <button
                 key={view}
                 className={panelView === view ? 'active' : ''}
@@ -360,6 +447,18 @@ function App() {
                   <>
                     <Zap size={11} />
                     Momentum
+                  </>
+                )}
+                {view === 'scalp' && (
+                  <>
+                    <Crosshair size={11} />
+                    Scalp
+                  </>
+                )}
+                {view === 'psychology' && (
+                  <>
+                    <Brain size={11} />
+                    Psych
                   </>
                 )}
                 {view === 'trades' && (
@@ -994,6 +1093,18 @@ function App() {
           {panelView === 'momentum' && (
             <div className="panel-content">
               <MomentumPanel />
+            </div>
+          )}
+
+          {panelView === 'scalp' && (
+            <div className="panel-content">
+              <ScalpingPanel />
+            </div>
+          )}
+
+          {panelView === 'psychology' && (
+            <div className="panel-content">
+              <PsychologyPanel />
             </div>
           )}
 

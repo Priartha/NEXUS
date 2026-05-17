@@ -10,10 +10,15 @@ from backend.analysis.fvg_detector import detect_fvgs, update_fvg_fills
 from backend.analysis.institutional import build_price_projection, compute_market_metrics
 from backend.analysis.liquidity import check_liquidity_sweeps, detect_equal_levels
 from backend.analysis.liquidity_engineering import detect_liquidity_events
+from backend.analysis.market_psychology import detect_market_psychology, PsychologySnapshot
 from backend.analysis.order_block import detect_order_blocks, update_order_block_breakers
 from backend.analysis.orderbook import OrderbookAnalyzer
 from backend.analysis.paper_trading import PaperTradingEngine
+from backend.analysis.price_action_readability import assess_price_action_readability, ReadabilitySnapshot
 from backend.analysis.regime import detect_market_regime
+from backend.analysis.unified_scalp import UnifiedScalpEngine
+from backend.analysis.scalp_risk import ScalpRiskManager
+from backend.config import settings
 from backend.storage import repository as repo
 from backend.analysis.signals import detect_trade_signals
 from backend.analysis.swing_detector import detect_swings
@@ -31,6 +36,7 @@ from backend.models.types import (
     OrderbookAccumulation,
     OrderbookDepthLevel,
     OrderbookImbalance,
+    OptionsContext,
     PriceProjection,
     SpreadDynamics,
     Swing,
@@ -67,6 +73,10 @@ class AnalysisPipeline:
         # BTC movement & investor behavior patterns
         self.btc_patterns: BtcPatternContext | None = None
 
+        # Market psychology & price action readability
+        self.psychology: PsychologySnapshot | None = None
+        self.readability: ReadabilitySnapshot | None = None
+
         # Paper trading & alerts
         self._paper_trading = paper_trading
         self._on_alert = on_alert or (lambda _: None)
@@ -77,10 +87,38 @@ class AnalysisPipeline:
         # Thread safety for async execution
         self._lock = asyncio.Lock()
 
+        # Unified scalping engine — PRIMARY signal source
+        self.scalp_engine = UnifiedScalpEngine()
+        self.scalp_risk = ScalpRiskManager()
+        self.scalp_context = None
+        self.options_context: OptionsContext | dict | None = None
+
     def add_quote(self, quote: MarketQuote) -> None:
         """Add a market quote for orderbook analysis."""
         self.quote_history.append(quote)
         self.orderbook_analyzer.add_quote(quote)
+        self.scalp_engine.ingest_quote(quote)
+
+    def set_options_context(self, options_context: OptionsContext | dict | None) -> None:
+        self.options_context = options_context
+
+    def refresh_scalp_context(self, store: CandleStore) -> dict:
+        closed_candles = store.get_closed_candles()
+        if closed_candles and len(closed_candles) >= 20:
+            self.scalp_context = self.scalp_engine.compute(
+                candles=closed_candles,
+                metrics=self.metrics,
+                fvgs=self.fvgs,
+                order_blocks=self.order_blocks,
+                swings=self.swings,
+                regime=self.regime,
+                liquidity_events=self.liquidity_events,
+                options_context=self.options_context,
+            )
+        return {
+            "scalp": to_wire(self.scalp_context) if self.scalp_context else None,
+            "scalp_risk": self.scalp_risk.get_risk_summary(),
+        }
 
     def run(self, store: CandleStore, force_full: bool = False) -> dict:
         candles = store.get_closed_candles()
@@ -139,6 +177,21 @@ class AnalysisPipeline:
         self.regime = detect_market_regime(candles, self.metrics, self.liquidity_events)
         self.projection = build_price_projection(candles, self.metrics, self.liquidity_events)
 
+        # Market psychology detection
+        self.psychology = detect_market_psychology(
+            candles=candles,
+            liquidity_events=self.liquidity_events,
+            regime=self.regime,
+        )
+
+        # Price action readability assessment
+        self.readability = assess_price_action_readability(
+            candles=candles,
+            swings=self.swings,
+            liquidity=self.liquidity,
+            regime=self.regime,
+        )
+
         # BTC movement & investor behavior pattern analysis
         self.btc_patterns = detect_btc_patterns(
             candles=window,
@@ -189,6 +242,19 @@ class AnalysisPipeline:
 
         self.regime = detect_market_regime(candles, self.metrics, self.liquidity_events)
         self.projection = build_price_projection(candles, self.metrics, self.liquidity_events)
+
+        # Incremental market psychology & readability
+        self.psychology = detect_market_psychology(
+            candles=candles,
+            liquidity_events=self.liquidity_events,
+            regime=self.regime,
+        )
+        self.readability = assess_price_action_readability(
+            candles=candles,
+            swings=self.swings,
+            liquidity=self.liquidity,
+            regime=self.regime,
+        )
 
         # Incremental BTC pattern analysis
         self.btc_patterns = detect_btc_patterns(
@@ -288,7 +354,55 @@ class AnalysisPipeline:
         ob_imb_data = to_wire(self.ob_imbalances[-15:])
         ob_acc_data = to_wire([a for a in self.ob_accumulations if a.status == "active"][-10:])
 
-        detected_signals: list[TradeSignal] = detect_trade_signals(
+        # ── UNIFIED SCALPING ENGINE — PRIMARY signal source ──
+        # Fuses ALL data: order flow + VWAP + funding + OI + liquidation
+        # + volume profile + options + ICT patterns + regime + RSI + killzone
+        if closed_candles and len(closed_candles) >= 20:
+            self.scalp_context = self.scalp_engine.compute(
+                candles=closed_candles,
+                metrics=self.metrics,
+                fvgs=self.fvgs,
+                order_blocks=self.order_blocks,
+                swings=self.swings,
+                regime=self.regime,
+                liquidity_events=self.liquidity_events,
+                options_context=self.options_context,
+            )
+
+        # Convert scalping signals to TradeSignal for system compatibility
+        scalp_signals_as_trade: list[TradeSignal] = []
+        if self.scalp_context and self.scalp_context.signals:
+            for ss in self.scalp_context.signals:
+                conf_map = {"HIGH": 0.80, "MEDIUM": 0.65, "LOW": 0.40}
+                side = "buy" if "LONG" in ss.signal_type else "sell"
+                t_sig = TradeSignal(
+                    id=ss.id,
+                    timestamp=ss.timestamp,
+                    side=side,
+                    entry=round((ss.entry_zone_low + ss.entry_zone_high) / 2, 2),
+                    stop_loss=ss.sl_level,
+                    exit_price=ss.target_1,
+                    risk_reward=ss.risk_reward,
+                    confidence=conf_map.get(ss.confidence, 0.65),
+                    reason=ss.reason,
+                    status=ss.status,
+                    institutional_score=round(ss.risk_reward / 5.0, 3),
+                    liquidity_score=0.5,
+                    bias_score=0.5,
+                    expected_move=abs(ss.target_2 - ss.entry_zone_low),
+                    win_probability=round(min(ss.risk_reward / (ss.risk_reward + 1), 0.85), 3),
+                    kelly_fraction=round(max(0, (conf_map.get(ss.confidence, 0.65) * ss.risk_reward - (1 - conf_map.get(ss.confidence, 0.65))) / ss.risk_reward) * 0.5, 4),
+                    suggested_risk_fraction=settings.scalp_max_risk_pct if hasattr(settings, 'scalp_max_risk_pct') else 0.01,
+                    cvar95_loss=round(abs(ss.entry_zone_low - ss.sl_level) * 1.5, 2),
+                    risk_of_ruin=0.02,
+                    trailing_stop=None,
+                    trailing_mode="atr_chandelier",
+                    model="unified-scalp-v2",
+                )
+                scalp_signals_as_trade.append(t_sig)
+
+        # Legacy signals as secondary (deprioritized)
+        legacy_signals: list[TradeSignal] = detect_trade_signals(
             candles=closed_candles,
             metrics=self.metrics,
             fvgs=self.fvgs,
@@ -299,18 +413,17 @@ class AnalysisPipeline:
             mtf_confluence=mtf,
             ob_imbalances=ob_imb_data,
             ob_accumulations=ob_acc_data,
-        )
+            psychology=self.psychology,
+            readability=self.readability,
+        ) if closed_candles else []
 
-        # ── Signal quality filter: remove stale/low-quality signals ──
-        if closed_candles:
-            latest_ts = closed_candles[-1].timestamp
-            max_age_ms = 30 * 60 * 1000  # 30 minutes max age
-            detected_signals = [
-                s for s in detected_signals
-                if (latest_ts - s.timestamp) < max_age_ms and s.confidence >= 0.50
-            ]
-
-        signals = _select_primary_signal(detected_signals)
+        # PRIMARY signal = scalping signal (always takes priority)
+        if scalp_signals_as_trade:
+            signals = scalp_signals_as_trade[:1]
+        elif legacy_signals:
+            signals = _select_primary_signal(legacy_signals)
+        else:
+            signals = []
 
         payload = {
             "update_type": update_type,
@@ -322,6 +435,8 @@ class AnalysisPipeline:
             "metrics": to_wire(self.metrics),
             "projection": to_wire(self.projection),
             "regime": to_wire(self.regime),
+            "psychology": to_wire(self.psychology),
+            "readability": to_wire(self.readability),
             "btc_patterns": to_wire(self.btc_patterns),
             "orderbook": {
                 "imbalances": to_wire(self.ob_imbalances[-15:]),
@@ -329,14 +444,21 @@ class AnalysisPipeline:
                 "depth_levels": to_wire(self.ob_depth_levels[-20:]),
                 "accumulations": to_wire([a for a in self.ob_accumulations if a.status == "active"][-10:]),
             },
+            "scalp": to_wire(self.scalp_context) if self.scalp_context else None,
+            "scalp_risk": self.scalp_risk.get_risk_summary(),
             "stats": {
                 "closed_candles": len(closed_candles),
                 "signals": len(signals),
+                "scalp_signals": len(self.scalp_context.signals) if self.scalp_context else 0,
+                "scalp_blocked": len(self.scalp_context.trade_blocked_reasons) if self.scalp_context else 0,
                 "ob_imbalances": len(self.ob_imbalances),
                 "ob_spread_anomalies": len([d for d in self.ob_spread_dynamics if d.status != "normal"]),
                 "ob_accumulations": len([a for a in self.ob_accumulations if a.status == "active"]),
                 "btc_patterns": len(self.btc_patterns.patterns) if self.btc_patterns else 0,
                 "btc_behaviors": len(self.btc_patterns.investor_behaviors) if self.btc_patterns else 0,
+                "fear_greed": self.psychology.fear_greed_label if self.psychology else "unknown",
+                "readability_grade": self.readability.grade if self.readability else "unknown",
+                "tradeability": self.readability.tradeability if self.readability else "unknown",
             },
         }
         if include_candles:
@@ -354,7 +476,7 @@ class AnalysisPipeline:
         # Paper trading & alerts
         if self._paper_trading and signals and candle:
             events = self._paper_trading.evaluate_signals(
-                detected_signals, candle, symbol=store.symbol, timeframe=store.timeframe,
+                signals, candle, symbol=store.symbol, timeframe=store.timeframe,
                 mtf_confluence=mtf,
             )
             for ev in events:
