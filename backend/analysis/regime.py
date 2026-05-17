@@ -66,20 +66,21 @@ def detect_market_regime(
     buy_side_sweep = any(e.side == "buy_side" and e.reclaimed for e in recent_events)
 
     # ── Regime Classification ──
-    phase = "trending"
+    phase = "range_bound"
     bias = "neutral"
     confidence = 0.5
     reasons: list[str] = []
 
-    # 1. TRENDING: requires structure + EMA alignment + efficiency
+    # 1. TRENDING: requires ALL of structure + EMA alignment + efficiency + momentum
     is_structured_trend = structure["is_trending"] and structure["direction"] != "neutral"
     is_ema_aligned = emas_aligned_bullish or emas_aligned_bearish
-    is_efficient = efficiency > 0.30
+    is_efficient = efficiency > 0.35
+    has_momentum = ema_spread_pct > 0.20
 
-    if is_structured_trend and is_ema_aligned:
+    if is_structured_trend and is_ema_aligned and is_efficient:
         phase = "trending"
         bias = structure["direction"]
-        confidence = min(0.92, 0.50 + efficiency * 0.30 + (0.10 if is_ema_aligned else 0))
+        confidence = min(0.92, 0.55 + efficiency * 0.25 + (0.10 if is_ema_aligned else 0))
         reasons = [
             f"Structure: {structure['pattern']}",
             f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned",
@@ -87,19 +88,8 @@ def detect_market_regime(
             f"EMA spread: {ema_spread_pct:.2f}%",
         ]
 
-    # 2. RANGING: no structure, price oscillating
-    elif not is_structured_trend and atr_compression < 0.30:
-        phase = "range_bound"
-        bias = "neutral"
-        confidence = 0.60
-        reasons = [
-            f"No clear structure ({structure['pattern']})",
-            f"ATR compressed: {atr_compression:.2f}",
-            f"Width: {width_pct:.2f}%",
-        ]
-
-    # 3. CONSOLIDATION: tight range, low volatility
-    elif width_pct < 1.5 and atr_compression < 0.20:
+    # 2. CONSOLIDATION: tight range, low volatility (check before range_bound)
+    elif width_pct < 1.2 and atr_compression < 0.25:
         phase = "consolidation"
         bias = "neutral"
         confidence = 0.55
@@ -109,28 +99,53 @@ def detect_market_regime(
             f"Volume: {volume_state}",
         ]
 
-    # 4. ACCUMULATION: sell-side sweep + reclaim + price above mid
-    if sell_side_sweep and latest.close >= range_mid and phase in {"range_bound", "consolidation"}:
-        phase = "accumulation"
-        bias = "bullish"
-        confidence = min(0.85, confidence + 0.15)
-        reasons.append("Sell-side sweep reclaimed above mid")
+    # 3. RANGING: no structure, price oscillating, wider than consolidation
+    elif not is_structured_trend and atr_compression < 0.35:
+        phase = "range_bound"
+        bias = "neutral"
+        confidence = 0.60
+        reasons = [
+            f"No clear structure ({structure['pattern']})",
+            f"ATR compressed: {atr_compression:.2f}",
+            f"Width: {width_pct:.2f}%",
+        ]
 
-    # 5. DISTRIBUTION: buy-side sweep + rejection + price below mid
-    if buy_side_sweep and latest.close <= range_mid and phase in {"range_bound", "consolidation"}:
-        phase = "distribution"
-        bias = "bearish"
-        confidence = min(0.85, confidence + 0.15)
-        reasons.append("Buy-side sweep rejected below mid")
+    # 4. ACCUMULATION: sell-side sweep reclaimed + price building above mid + volume
+    if sell_side_sweep and latest.close >= range_mid and width_pct < 4.0:
+        price_in_upper_half = latest.close > range_mid
+        volume_confirming = volume_state in ("expanding", "normal")
+        if price_in_upper_half and volume_confirming:
+            phase = "accumulation"
+            bias = "bullish"
+            confidence = min(0.85, 0.50 + (0.15 if sell_side_sweep else 0) + (0.10 if volume_confirming else 0))
+            reasons = [
+                "Sell-side sweep reclaimed above mid",
+                f"Volume: {volume_state}",
+                f"Price in upper half: {price_in_upper_half}",
+            ]
 
-    # 6. TRENDING breakout from consolidation
+    # 5. DISTRIBUTION: buy-side sweep rejected + price falling below mid + volume
+    if buy_side_sweep and latest.close <= range_mid and width_pct < 4.0:
+        price_in_lower_half = latest.close < range_mid
+        volume_confirming = volume_state in ("expanding", "normal")
+        if price_in_lower_half and volume_confirming:
+            phase = "distribution"
+            bias = "bearish"
+            confidence = min(0.85, 0.50 + (0.15 if buy_side_sweep else 0) + (0.10 if volume_confirming else 0))
+            reasons = [
+                "Buy-side sweep rejected below mid",
+                f"Volume: {volume_state}",
+                f"Price in lower half: {price_in_lower_half}",
+            ]
+
+    # 6. TRENDING breakout from consolidation/range
     if phase in {"consolidation", "range_bound"} and volume_state == "expanding" and ema_spread_pct > 0.30:
-        if price_above_ema9 and price_above_ema21:
+        if price_above_ema9 and price_above_ema21 and price_above_ema50:
             phase = "trending"
             bias = "bullish"
             confidence = min(0.85, confidence + 0.10)
             reasons.append("Volume expansion + bullish EMA breakout")
-        elif not price_above_ema9 and not price_above_ema21:
+        elif not price_above_ema9 and not price_above_ema21 and not price_above_ema50:
             phase = "trending"
             bias = "bearish"
             confidence = min(0.85, confidence + 0.10)
@@ -202,13 +217,13 @@ def _analyze_structure(swings: list[dict]) -> dict:
     bullish_ratio = bullish_score / total
     bearish_ratio = bearish_score / total
 
-    if bullish_ratio >= 0.70:
+    if bullish_ratio >= 0.75:
         return {"is_trending": True, "direction": "bullish", "pattern": "HH/HL"}
-    elif bearish_ratio >= 0.70:
+    elif bearish_ratio >= 0.75:
         return {"is_trending": True, "direction": "bearish", "pattern": "LH/LL"}
-    elif bullish_ratio >= 0.55:
+    elif bullish_ratio >= 0.60:
         return {"is_trending": True, "direction": "bullish", "pattern": "weak_HH/HL"}
-    elif bearish_ratio >= 0.55:
+    elif bearish_ratio >= 0.60:
         return {"is_trending": True, "direction": "bearish", "pattern": "weak_LH/LL"}
     else:
         return {"is_trending": False, "direction": "neutral", "pattern": "mixed"}

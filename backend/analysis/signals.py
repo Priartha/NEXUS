@@ -174,16 +174,16 @@ def _detect_pullback(
         if last.close < ema50:
             return False, "below_ema50"
 
-        # Must be near EMA20 (within 0.5%)
-        if current_distance > 0.005:
+        # Must be near EMA20 (within 0.3%)
+        if current_distance > 0.003:
             return False, "not_near_ema20"
         
         # Price should have been further from EMA20 recently (actual pullback)
-        if avg_distance_10 < current_distance * 1.5:
+        if avg_distance_10 < current_distance * 2.0:
             return False, "no_recent_pullback"
 
         # RSI should be cooling off but not extreme
-        if rsi < 35 or rsi > 65:
+        if rsi < 30 or rsi > 70:
             return False, f"rsi {rsi:.1f} out of range"
 
         # Require pullback completion: last candle should show reversal or stabilization
@@ -201,13 +201,13 @@ def _detect_pullback(
         if last.close > ema50:
             return False, "above_ema50"
 
-        if current_distance > 0.005:
+        if current_distance > 0.003:
             return False, "not_near_ema20"
         
-        if avg_distance_10 < current_distance * 1.5:
+        if avg_distance_10 < current_distance * 2.0:
             return False, "no_recent_pullback"
 
-        if rsi < 35 or rsi > 65:
+        if rsi < 30 or rsi > 70:
             return False, f"rsi {rsi:.1f} out of range"
 
         body = last.open - last.close
@@ -409,9 +409,9 @@ def _make_signal(
 
 
 def _estimate_win_prob(confidence: float, rr: float) -> float:
-    base = confidence * 0.6
-    rr_adj = min(rr / 4.0, 0.3)
-    return _clamp(base + rr_adj + 0.15, 0.30, 0.85)
+    base = confidence * 0.45
+    rr_adj = min(rr / 5.0, 0.15)
+    return _clamp(base + rr_adj + 0.10, 0.25, 0.65)
 
 
 def _trend_signals(
@@ -438,14 +438,14 @@ def _trend_signals(
     # Higher timeframe alignment
     price_vs_ema100 = (closed_candle.close - ema100) / ema100 * 100 if ema100 > 0 else 0
     
-    # STRONGER HTF FILTER: Only trade in direction of 100 EMA
-    if direction == "buy" and price_vs_ema100 < 0:
-        return None  # Don't buy when price is below EMA100
-    if direction == "sell" and price_vs_ema100 > 0:
-        return None  # Don't sell when price is above EMA100
+    # HTF FILTER: Prefer trading in direction of 100 EMA but allow exceptions
+    if direction == "buy" and price_vs_ema100 < -0.5:
+        return None  # Don't buy when price is far below EMA100
+    if direction == "sell" and price_vs_ema100 > 0.5:
+        return None  # Don't sell when price is far above EMA100
     
     # Require minimum distance from EMA100 for conviction
-    if abs(price_vs_ema100) < 0.2:
+    if abs(price_vs_ema100) < 0.15:
         return None  # Too close to EMA100, trend unclear
     
     if direction == "buy":
@@ -728,8 +728,8 @@ def detect_trade_signals(
     recent_low = min(c.low for c in ordered[-12:-2])
     recent_range = recent_high - recent_low
     
-    # Require range to be at least 0.8x ATR (some movement)
-    if recent_range < atr14 * 0.8:
+    # Require range to be at least 0.5x ATR (some movement)
+    if recent_range < atr14 * 0.5:
         return []
 
     signals: list[TradeSignal] = []

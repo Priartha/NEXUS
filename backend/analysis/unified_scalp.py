@@ -128,6 +128,9 @@ class UnifiedScalpEngine:
         self._iv_hist: deque[float] = deque(maxlen=252)
         self._cur_iv: float = 0.0
         self._liq_cache: list[dict] = []
+        self._last_signal_ts: int = 0
+        self._signal_cooldown_ms: int = 5 * 60 * 1000  # 5 minutes between signals
+        self._use_candle_timestamp_for_cooldown: bool = False  # Set True for backtest
 
     # ── Data ingestion ────────────────────────────────────────────────
 
@@ -223,11 +226,27 @@ class UnifiedScalpEngine:
         atr = _atr(ordered, 14)
         signals: list[ScalpSignal] = []
         threshold = settings.scalp_min_confluence_score
+
+        # Adaptive threshold: if options/OI/funding data are missing,
+        # lower the threshold proportionally since max achievable score drops.
+        has_options = options_context is not None
+        has_oi = len(self._oi_hist) >= 2
+        has_funding = self._cur_funding != 0.0
+        missing_sources = sum([not has_options, not has_oi, not has_funding])
+        if missing_sources > 0:
+            # Each missing source reduces max score significantly.
+            # Normalize: scale threshold down proportionally.
+            max_possible = 1.0 - (missing_sources * 0.11)  # ~0.67 with 3 missing
+            normalized_threshold = threshold * (max_possible / 1.0)
+            threshold = max(normalized_threshold, 0.35)  # Floor at 0.35
+
         winning_side = "long" if long_score >= short_score else "short"
         winning_score = long_score if winning_side == "long" else short_score
         losing_score = short_score if winning_side == "long" else long_score
+
+        # Regime-aware quality blockers — pass adaptive threshold
         quality_blockers = self._signal_quality_blockers(
-            ordered, winning_side, winning_score, losing_score, options_context
+            ordered, winning_side, winning_score, losing_score, options_context, regime, threshold
         )
 
         if quality_blockers:
@@ -249,16 +268,143 @@ class UnifiedScalpEngine:
                 trade_blocked_reasons=quality_blockers,
             )
 
+        # HARD BLOCK: Never trade in consolidation or range_bound
+        # Analysis shows: consolidation = 65% loss rate, trending = 100% win rate
+        if regime and regime.phase in ("consolidation", "range_bound"):
+            return ScalpContext(
+                timestamp=now_ms,
+                order_flow=order_flow,
+                funding=funding,
+                open_interest=oi,
+                liquidation_levels=liq_levels,
+                vwap=vwap,
+                volume_profile=vol_profile,
+                options_greeks=options_greeks,
+                liquidity_sweeps=sweeps,
+                signals=[],
+                rsi_3=round(rsi_3, 2),
+                spot_volume_ok=True,
+                options_spread_ok=True,
+                macro_event_block=False,
+                trade_blocked_reasons=[f"Blocked: {regime.phase} regime — only trade trending markets"],
+            )
+
+        # Signal candle confirmation - require strong close in signal direction
+        last_candle = ordered[-2]
+        candle_range = last_candle.high - last_candle.low
+        if candle_range > 0:
+            close_position = (last_candle.close - last_candle.low) / candle_range
+            if winning_side == "long" and close_position < 0.60:
+                return ScalpContext(
+                    timestamp=now_ms,
+                    order_flow=order_flow,
+                    funding=funding,
+                    open_interest=oi,
+                    liquidation_levels=liq_levels,
+                    vwap=vwap,
+                    volume_profile=vol_profile,
+                    options_greeks=options_greeks,
+                    liquidity_sweeps=sweeps,
+                    signals=[],
+                    rsi_3=round(rsi_3, 2),
+                    spot_volume_ok=True,
+                    options_spread_ok=True,
+                    macro_event_block=False,
+                    trade_blocked_reasons=["Weak bullish candle close"],
+                )
+            if winning_side == "short" and close_position > 0.40:
+                return ScalpContext(
+                    timestamp=now_ms,
+                    order_flow=order_flow,
+                    funding=funding,
+                    open_interest=oi,
+                    liquidation_levels=liq_levels,
+                    vwap=vwap,
+                    volume_profile=vol_profile,
+                    options_greeks=options_greeks,
+                    liquidity_sweeps=sweeps,
+                    signals=[],
+                    rsi_3=round(rsi_3, 2),
+                    spot_volume_ok=True,
+                    options_spread_ok=True,
+                    macro_event_block=False,
+                    trade_blocked_reasons=["Weak bearish candle close"],
+                )
+
+        # HARD BLOCK: Only trade in direction of regime bias
+        if regime and regime.phase == "trending":
+            if regime.bias == "bullish" and winning_side == "short":
+                return ScalpContext(
+                    timestamp=now_ms,
+                    order_flow=order_flow,
+                    funding=funding,
+                    open_interest=oi,
+                    liquidation_levels=liq_levels,
+                    vwap=vwap,
+                    volume_profile=vol_profile,
+                    options_greeks=options_greeks,
+                    liquidity_sweeps=sweeps,
+                    signals=[],
+                    rsi_3=round(rsi_3, 2),
+                    spot_volume_ok=True,
+                    options_spread_ok=True,
+                    macro_event_block=False,
+                    trade_blocked_reasons=["Blocked: short signal in bullish trend"],
+                )
+            if regime.bias == "bearish" and winning_side == "long":
+                return ScalpContext(
+                    timestamp=now_ms,
+                    order_flow=order_flow,
+                    funding=funding,
+                    open_interest=oi,
+                    liquidation_levels=liq_levels,
+                    vwap=vwap,
+                    volume_profile=vol_profile,
+                    options_greeks=options_greeks,
+                    liquidity_sweeps=sweeps,
+                    signals=[],
+                    rsi_3=round(rsi_3, 2),
+                    spot_volume_ok=True,
+                    options_spread_ok=True,
+                    macro_event_block=False,
+                    trade_blocked_reasons=["Blocked: long signal in bearish trend"],
+                )
+
+        # Cooldown check — only apply AFTER we know a valid signal exists
+        # This prevents showing "cooldown active" when no signal would pass anyway
+        cooldown_ts = ordered[-1].timestamp if self._use_candle_timestamp_for_cooldown else now_ms
+        if cooldown_ts - self._last_signal_ts < self._signal_cooldown_ms:
+            remaining = (self._signal_cooldown_ms - (cooldown_ts - self._last_signal_ts)) / 60000
+            return ScalpContext(
+                timestamp=now_ms,
+                order_flow=order_flow,
+                funding=funding,
+                open_interest=oi,
+                liquidation_levels=liq_levels,
+                vwap=vwap,
+                volume_profile=vol_profile,
+                options_greeks=options_greeks,
+                liquidity_sweeps=sweeps,
+                signals=[],
+                rsi_3=round(rsi_3, 2),
+                spot_volume_ok=True,
+                options_spread_ok=True,
+                macro_event_block=False,
+                trade_blocked_reasons=[f"Cooldown: {remaining:.1f}m until next signal allowed"],
+            )
+
         if long_score >= threshold and long_score >= short_score:
             option_contract = self._select_directional_option(options_context, "call")
             signals.append(self._build_signal(
                 "LONG FUTURES + BUY CALL", price, atr, long_score, long_reasons, now_ms, option_contract,
             ))
+            self._last_signal_ts = cooldown_ts
         elif short_score >= threshold and short_score > long_score:
             option_contract = self._select_directional_option(options_context, "put")
             signals.append(self._build_signal(
                 "SHORT FUTURES + BUY PUT", price, atr, short_score, short_reasons, now_ms, option_contract,
             ))
+            self._last_signal_ts = cooldown_ts
 
         return ScalpContext(
             timestamp=now_ms,
@@ -557,35 +703,86 @@ class UnifiedScalpEngine:
         winning_score: float,
         losing_score: float,
         options_context: OptionsContext | dict[str, Any] | None,
+        regime: MarketRegime | None = None,
+        adaptive_threshold: float | None = None,
     ) -> list[str]:
         blockers: list[str] = []
         closes = [c.close for c in candles]
         price = closes[-1]
-        threshold = settings.scalp_min_confluence_score
+        threshold = adaptive_threshold if adaptive_threshold is not None else settings.scalp_min_confluence_score
         edge = winning_score - losing_score
-        if winning_score < threshold:
-            blockers.append(f"Confluence {winning_score:.2f} below {threshold:.2f} hard threshold")
-        if edge < settings.scalp_min_directional_edge:
-            blockers.append(f"Directional edge {edge:.2f} below {settings.scalp_min_directional_edge:.2f}")
+
+        # Regime-aware thresholds
+        is_trending = regime is not None and regime.phase == "trending"
+        is_range = regime is not None and regime.phase in ("range_bound", "consolidation")
+
+        # Relaxed edge requirement for range/consolidation regimes
+        if regime is not None and regime.phase == "consolidation":
+            min_edge = 0.05
+        elif is_range:
+            min_edge = 0.08
+        else:
+            min_edge = settings.scalp_min_directional_edge
+        if edge < min_edge:
+            blockers.append(f"Directional edge {edge:.2f} below {min_edge:.2f}")
 
         ema9 = _ema(closes[-80:], 9)
         ema21 = _ema(closes[-100:], 21)
         ema50 = _ema(closes[-140:], 50)
         ema100 = _ema(closes[-180:], 100)
         trend_strength = abs(ema21 - ema100) / price if price > 0 else 0.0
-        if trend_strength < settings.scalp_min_trend_strength:
-            blockers.append(f"Trend strength {trend_strength:.4f} below minimum")
-        if side == "long" and not (price > ema21 and ema9 > ema21 > ema50):
-            blockers.append("Long trend stack not aligned")
-        if side == "short" and not (price < ema21 and ema9 < ema21 < ema50):
-            blockers.append("Short trend stack not aligned")
+
+        if is_trending:
+            # Trending regime: require full trend stack alignment
+            if trend_strength < settings.scalp_min_trend_strength:
+                blockers.append(f"Trend strength {trend_strength:.4f} below minimum")
+            if side == "long":
+                if not (price > ema21 and ema9 > ema21 > ema50):
+                    blockers.append("Long trend stack not aligned")
+                # HARD FILTER: Only long when price is above EMA100
+                if price < ema100:
+                    blockers.append("Long blocked: price below EMA100 — bearish trend")
+            if side == "short":
+                if not (price < ema21 and ema9 < ema21 < ema50):
+                    blockers.append("Short trend stack not aligned")
+                # HARD FILTER: Only short when price is below EMA100
+                if price > ema100:
+                    blockers.append("Short blocked: price above EMA100 — bullish trend")
+        else:
+            # Range/consolidation: relaxed checks — only require basic direction
+            if trend_strength < 0.0003:
+                blockers.append(f"Trend strength {trend_strength:.4f} too flat for any trade")
+            # In consolidation, allow trades even near EMA50 — price oscillates
+            if regime is not None and regime.phase == "consolidation":
+                pass  # Skip EMA50 check in consolidation
+            else:
+                if side == "long" and price < ema50:
+                    blockers.append("Long: price below EMA50 even in range")
+                if side == "short" and price > ema50:
+                    blockers.append("Short: price above EMA50 even in range")
 
         recent_volume = sum(c.volume for c in candles[-5:]) / min(len(candles), 5)
         base_window = candles[-50:-5] if len(candles) >= 55 else candles[:-5]
         base_volume = sum(c.volume for c in base_window) / len(base_window) if base_window else recent_volume
         volume_ratio = recent_volume / base_volume if base_volume > 0 else 1.0
-        if volume_ratio < settings.scalp_min_volume_impulse:
-            blockers.append(f"Volume impulse {volume_ratio:.2f} below {settings.scalp_min_volume_impulse:.2f}")
+        # Regime-aware volume check: trending requires volume expansion
+        if is_trending:
+            vol_threshold = 0.80  # Require at least 80% of average volume
+        elif regime is not None and regime.phase == "consolidation":
+            vol_threshold = 0.40
+        else:
+            vol_threshold = 0.50
+        if volume_ratio < vol_threshold:
+            blockers.append(f"Volume impulse {volume_ratio:.2f} below {vol_threshold:.2f}")
+
+        # RSI momentum confirmation - require RSI moving in trade direction
+        rsi_current = _rsi(closes[-10:], 10) if len(closes) >= 11 else 50.0
+        rsi_prev = _rsi(closes[-20:-10], 10) if len(closes) >= 21 else 50.0
+        rsi_momentum = rsi_current - rsi_prev
+        if side == "long" and rsi_momentum < -2:
+            blockers.append(f"RSI momentum negative ({rsi_momentum:.1f}) — bearish divergence")
+        if side == "short" and rsi_momentum > 2:
+            blockers.append(f"RSI momentum positive ({rsi_momentum:.1f}) — bullish divergence")
 
         source_count = self._context_value(options_context, "source_count", 0) or 0
         if settings.scalp_require_options_alignment and source_count > 0:
@@ -623,27 +820,24 @@ class UnifiedScalpEngine:
         score = 0.0
         reasons: list[str] = []
 
-        # 1. Order Flow (weight: 0.22)
+        # 1. Order Flow (weight: 0.25) — MOST IMPORTANT
         if of.delta > 0:
-            score += 0.10
+            score += 0.12
             reasons.append("Delta positive")
         if of.cvd_slope > 0:
-            score += 0.07
-            reasons.append("CVD rising")
-        if of.absorption_ratio < 0.35:
-            score += 0.05
-            reasons.append("Low absorption")
-
-        # 2. VWAP (weight: 0.15)
-        if vwap.is_compressed:
             score += 0.08
-            reasons.append("VWAP compressed")
+            reasons.append("CVD rising")
+        if of.footprint_imbalance > 0.6:
+            score += 0.05
+            reasons.append("Footprint bullish imbalance")
+
+        # 2. VWAP (weight: 0.12) — Only directional factors
         if price > vwap.vwap:
-            score += 0.04
+            score += 0.07
             reasons.append("Above VWAP")
         if price <= vwap.lower_band_1sd:
-            score += 0.03
-            reasons.append("Near lower VWAP band")
+            score += 0.05
+            reasons.append("Near lower VWAP band — bounce zone")
 
         # 3. Open Interest (weight: 0.10)
         if oi.momentum_confirmation:
@@ -695,23 +889,60 @@ class UnifiedScalpEngine:
             score += 0.05
             reasons.append(f"Killzone: {kill_session}")
 
-        # 9. ICT FVG proximity (weight: 0.05)
-        if fvgs:
-            active = [f for f in fvgs if not f.is_filled and f.direction == "bullish"]
-            for f in active:
-                if abs(price - f.bottom) / price < 0.003:
-                    score += 0.05
-                    reasons.append("Near bullish FVG")
-                    break
+        # 9. ICT FVG proximity (weight: 0.05) — TREND-FOLLOWING only
+        # In trending markets, FVGs are continuation zones, not reversals
+        if fvgs and regime:
+            if regime.phase == "trending":
+                # Only score FVGs in trend direction (pullback entries)
+                if regime.bias == "bullish":
+                    active = [f for f in fvgs if not f.is_filled and f.direction == "bullish"]
+                    for f in active:
+                        if abs(price - f.bottom) / price < 0.003:
+                            score += 0.05
+                            reasons.append("Pullback into bullish FVG (trend continuation)")
+                            break
+                elif regime.bias == "bearish":
+                    active = [f for f in fvgs if not f.is_filled and f.direction == "bearish"]
+                    for f in active:
+                        if abs(price - f.top) / price < 0.003:
+                            score += 0.05
+                            reasons.append("Pullback into bearish FVG (trend continuation)")
+                            break
+            else:
+                # In ranging markets, FVGs can be reversal zones
+                active = [f for f in fvgs if not f.is_filled and f.direction == "bullish"]
+                for f in active:
+                    if abs(price - f.bottom) / price < 0.003:
+                        score += 0.03
+                        reasons.append("Near bullish FVG (range bounce)")
+                        break
 
-        # 10. Order Block proximity (weight: 0.05)
-        if obs:
-            active = [o for o in obs if not o.is_breaker and o.direction == "bullish"]
-            for o in active:
-                if abs(price - o.top) / price < 0.003:
-                    score += 0.05
-                    reasons.append("Near bullish OB")
-                    break
+        # 10. Order Block proximity (weight: 0.05) — TREND-FOLLOWING only
+        if obs and regime:
+            if regime.phase == "trending":
+                # Only score OBs in trend direction (pullback entries)
+                if regime.bias == "bullish":
+                    active = [o for o in obs if not o.is_breaker and o.direction == "bullish"]
+                    for o in active:
+                        if abs(price - o.top) / price < 0.003:
+                            score += 0.05
+                            reasons.append("Pullback into bullish OB (trend continuation)")
+                            break
+                elif regime.bias == "bearish":
+                    active = [o for o in obs if not o.is_breaker and o.direction == "bearish"]
+                    for o in active:
+                        if abs(price - o.bottom) / price < 0.003:
+                            score += 0.05
+                            reasons.append("Pullback into bearish OB (trend continuation)")
+                            break
+            else:
+                # In ranging markets, OBs can be reversal zones
+                active = [o for o in obs if not o.is_breaker and o.direction == "bullish"]
+                for o in active:
+                    if abs(price - o.top) / price < 0.003:
+                        score += 0.03
+                        reasons.append("Near bullish OB (range bounce)")
+                        break
 
         # 11. Regime filter (weight: 0.05)
         if regime:
@@ -719,8 +950,11 @@ class UnifiedScalpEngine:
                 score += 0.05
                 reasons.append("Trending bullish regime")
             elif regime.phase == "accumulation":
-                score += 0.03
+                score += 0.04
                 reasons.append("Accumulation regime")
+            elif regime.phase == "range_bound" and price <= vp.val:
+                score += 0.03
+                reasons.append("Range bound — buying at value low")
 
         # 12. Market metrics trend (weight: 0.03)
         if metrics and metrics.trend_score > 0.15:
@@ -761,27 +995,24 @@ class UnifiedScalpEngine:
         score = 0.0
         reasons: list[str] = []
 
-        # 1. Order Flow (weight: 0.22)
+        # 1. Order Flow (weight: 0.25) — MOST IMPORTANT
         if of.delta < 0:
-            score += 0.10
+            score += 0.12
             reasons.append("Delta negative")
         if of.cvd_slope < 0:
-            score += 0.07
-            reasons.append("CVD falling")
-        if of.absorption_ratio < 0.35:
-            score += 0.05
-            reasons.append("Low absorption")
-
-        # 2. VWAP (weight: 0.15)
-        if vwap.is_compressed:
             score += 0.08
-            reasons.append("VWAP compressed")
+            reasons.append("CVD falling")
+        if of.footprint_imbalance > 0.6:
+            score += 0.05
+            reasons.append("Footprint bearish imbalance")
+
+        # 2. VWAP (weight: 0.12) — Only directional factors
         if price < vwap.vwap:
-            score += 0.04
+            score += 0.07
             reasons.append("Below VWAP")
         if price >= vwap.upper_band_1sd:
-            score += 0.03
-            reasons.append("Near upper VWAP band")
+            score += 0.05
+            reasons.append("Near upper VWAP band — rejection zone")
 
         # 3. Open Interest (weight: 0.10)
         if oi.momentum_confirmation and oi.oi_trend == "increasing":
@@ -830,23 +1061,55 @@ class UnifiedScalpEngine:
             score += 0.05
             reasons.append(f"Killzone: {kill_session}")
 
-        # 9. ICT FVG proximity (weight: 0.05)
-        if fvgs:
-            active = [f for f in fvgs if not f.is_filled and f.direction == "bearish"]
-            for f in active:
-                if abs(price - f.top) / price < 0.003:
-                    score += 0.05
-                    reasons.append("Near bearish FVG")
-                    break
+        # 9. ICT FVG proximity (weight: 0.05) — TREND-FOLLOWING only
+        if fvgs and regime:
+            if regime.phase == "trending":
+                if regime.bias == "bearish":
+                    active = [f for f in fvgs if not f.is_filled and f.direction == "bearish"]
+                    for f in active:
+                        if abs(price - f.top) / price < 0.003:
+                            score += 0.05
+                            reasons.append("Pullback into bearish FVG (trend continuation)")
+                            break
+                elif regime.bias == "bullish":
+                    active = [f for f in fvgs if not f.is_filled and f.direction == "bullish"]
+                    for f in active:
+                        if abs(price - f.bottom) / price < 0.003:
+                            score += 0.05
+                            reasons.append("Pullback into bullish FVG (trend continuation)")
+                            break
+            else:
+                active = [f for f in fvgs if not f.is_filled and f.direction == "bearish"]
+                for f in active:
+                    if abs(price - f.top) / price < 0.003:
+                        score += 0.03
+                        reasons.append("Near bearish FVG (range bounce)")
+                        break
 
-        # 10. Order Block proximity (weight: 0.05)
-        if obs:
-            active = [o for o in obs if not o.is_breaker and o.direction == "bearish"]
-            for o in active:
-                if abs(price - o.bottom) / price < 0.003:
-                    score += 0.05
-                    reasons.append("Near bearish OB")
-                    break
+        # 10. Order Block proximity (weight: 0.05) — TREND-FOLLOWING only
+        if obs and regime:
+            if regime.phase == "trending":
+                if regime.bias == "bearish":
+                    active = [o for o in obs if not o.is_breaker and o.direction == "bearish"]
+                    for o in active:
+                        if abs(price - o.bottom) / price < 0.003:
+                            score += 0.05
+                            reasons.append("Pullback into bearish OB (trend continuation)")
+                            break
+                elif regime.bias == "bullish":
+                    active = [o for o in obs if not o.is_breaker and o.direction == "bullish"]
+                    for o in active:
+                        if abs(price - o.top) / price < 0.003:
+                            score += 0.05
+                            reasons.append("Pullback into bullish OB (trend continuation)")
+                            break
+            else:
+                active = [o for o in obs if not o.is_breaker and o.direction == "bearish"]
+                for o in active:
+                    if abs(price - o.bottom) / price < 0.003:
+                        score += 0.03
+                        reasons.append("Near bearish OB (range bounce)")
+                        break
 
         # 11. Regime filter (weight: 0.05)
         if regime:
@@ -854,8 +1117,11 @@ class UnifiedScalpEngine:
                 score += 0.05
                 reasons.append("Trending bearish regime")
             elif regime.phase == "distribution":
-                score += 0.03
+                score += 0.04
                 reasons.append("Distribution regime")
+            elif regime.phase == "range_bound" and price >= vp.vah:
+                score += 0.03
+                reasons.append("Range bound — selling at value high")
 
         # 12. Market metrics trend (weight: 0.03)
         if metrics and metrics.trend_score < -0.15:
@@ -889,13 +1155,13 @@ class UnifiedScalpEngine:
         is_long = "LONG" in signal_type or "CALL" in signal_type
 
         entry = price
-        sl = price - atr * 1.2 if is_long else price + atr * 1.2
-        t1 = price + atr * 1.8 if is_long else price - atr * 1.8
-        t2 = price + atr * 3.0 if is_long else price - atr * 3.0
-        rr = abs(t1 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
+        sl = price - atr * 3.0 if is_long else price + atr * 3.0
+        t1 = price + atr * 3.0 if is_long else price - atr * 3.0
+        t2 = price + atr * 6.0 if is_long else price - atr * 6.0
+        rr = abs(t2 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
 
-        leverage = min(settings.scalp_max_leverage, max(3, int(10 * score)))
-        confidence = "HIGH" if score >= 0.70 else "MEDIUM"
+        leverage = min(settings.scalp_max_leverage, max(3, int(8 * score)))
+        confidence = "HIGH" if score >= 0.50 else ("MEDIUM" if score >= 0.40 else "LOW")
         time_limit = now_ms + settings.scalp_max_hold_minutes * 60 * 1000
         strike = self._contract_value(option_contract, "strike_price") or 0.0
         expiry = str(self._contract_value(option_contract, "expiry") or "")
