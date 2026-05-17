@@ -206,11 +206,14 @@ function App() {
       <header className="topbar">
         <div className="identity">
           <div className="logo-icon">
-            <BarChart3 size={22} />
+            <img src="/logo.svg" alt="NEXUS" className="logo-img" />
           </div>
-          <div>
-            <h1>NEXUS</h1>
-            <p>{symbol} / {timeframe}</p>
+          </div>
+
+          {/* ─── PATTERNS TAB - COMPLETELY REDESIGNED ─ */}
+          {panelView === 'patterns' && (
+            <div className="panel-content">
+            ✦
           </div>
         </div>
 
@@ -323,7 +326,8 @@ function App() {
 
         {panelOpen && (
         <aside className="side-panel">
-          <div className="panel-switch">
+          <div className="panel-nav">
+            <div className="panel-switch">
             {(['signals', 'patterns', 'options', 'depth', 'institutional', 'risk', 'momentum', 'alerts', 'trades', 'backtest', 'forward', 'config', 'analytics', 'multi-exchange', 'model', 'db-status', 'alert-config'] as const).map((view) => (
               <button
                 key={view}
@@ -395,8 +399,10 @@ function App() {
                 )}
               </button>
             ))}
+            </div>
           </div>
 
+          <div className="panel-main">
           {/* ─── SIGNALS TAB ────────────────────────── */}
           {panelView === 'signals' && (
             <div className="panel-content">
