@@ -2,10 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   AlertTriangle,
-  BarChart3,
   BrainCircuit,
-  ChevronLeft,
-  ChevronRight,
   Eye,
   Gauge,
   Orbit,
@@ -93,8 +90,6 @@ function App() {
   const availableTimeframes = useChartStore((state) => state.availableTimeframes)
   const selectedTimeframe = useChartStore((state) => state.selectedTimeframe)
   const setTimeframe = useChartStore((state) => state.setTimeframe)
-  const symbol = useChartStore((state) => state.symbol)
-  const timeframe = useChartStore((state) => state.timeframe)
   const connectionStatus = useChartStore((state) => state.connectionStatus)
   const feedStatus = useChartStore((state) => state.feedStatus)
   const feedMessage = useChartStore((state) => state.feedMessage)
@@ -136,7 +131,6 @@ function App() {
     : 'watchlist'
   const selectedRiskReward: number | 'best' = 'best'
   const [panelView, setPanelView] = useState<PanelView>('signals')
-  const [panelOpen, setPanelOpen] = useState(true)
   const latestLiquidityEvent = liquidityEvents.at(-1)
 
   const topBehaviors = useMemo(
@@ -207,13 +201,6 @@ function App() {
         <div className="identity">
           <div className="logo-icon">
             <img src="/logo.svg" alt="NEXUS" className="logo-img" />
-          </div>
-          </div>
-
-          {/* ─── PATTERNS TAB - COMPLETELY REDESIGNED ─ */}
-          {panelView === 'patterns' && (
-            <div className="panel-content">
-            ✦
           </div>
         </div>
 
@@ -311,20 +298,11 @@ function App() {
       {feedMessage ? <div className="feed-alert">{feedMessage}</div> : null}
 
       {/* ─── WORKSPACE ─────────────────────────────── */}
-      <section className={`workspace ${panelOpen ? '' : 'panel-closed'}`}>
+      <section className="workspace">
         <div className="chart-region">
           <Chart targetRiskReward={selectedRiskReward} />
-          <button
-            type="button"
-            className="panel-toggle"
-            onClick={() => setPanelOpen((v) => !v)}
-            title={panelOpen ? 'Close panel' : 'Open panel'}
-          >
-            {panelOpen ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
-          </button>
         </div>
 
-        {panelOpen && (
         <aside className="side-panel">
           <div className="panel-nav">
             <div className="panel-switch">
@@ -334,7 +312,12 @@ function App() {
                 className={panelView === view ? 'active' : ''}
                 onClick={() => setPanelView(view)}
               >
-                {view === 'signals' && 'Signals'}
+                {view === 'signals' && (
+                  <>
+                    <Target size={11} />
+                    Signals
+                  </>
+                )}
                 {view === 'patterns' && (
                   <>
                     <Layers size={11} />
@@ -344,17 +327,53 @@ function App() {
                 )}
                 {view === 'options' && (
                   <>
+                    <BrainCircuit size={11} />
                     Opts
                     {optionContract && <span className="badge-dot" />}
                   </>
                 )}
-                {view === 'depth' && 'Depth'}
-                {view === 'alerts' && 'Alerts'}
-                {view === 'institutional' && 'Inst.'}
-                {view === 'risk' && 'Risk'}
-                {view === 'momentum' && 'Momentum'}
-                {view === 'trades' && 'Paper'}
-                {view === 'backtest' && 'BT'}
+                {view === 'depth' && (
+                  <>
+                    <Activity size={11} />
+                    Depth
+                  </>
+                )}
+                {view === 'alerts' && (
+                  <>
+                    <AlertTriangle size={11} />
+                    Alerts
+                  </>
+                )}
+                {view === 'institutional' && (
+                  <>
+                    <Cpu size={11} />
+                    Inst.
+                  </>
+                )}
+                {view === 'risk' && (
+                  <>
+                    <Shield size={11} />
+                    Risk
+                  </>
+                )}
+                {view === 'momentum' && (
+                  <>
+                    <Zap size={11} />
+                    Momentum
+                  </>
+                )}
+                {view === 'trades' && (
+                  <>
+                    <TrendingUp size={11} />
+                    Paper
+                  </>
+                )}
+                {view === 'backtest' && (
+                  <>
+                    <Timer size={11} />
+                    BT
+                  </>
+                )}
                 {view === 'forward' && (
                   <>
                     <Activity size={11} />
@@ -1108,8 +1127,8 @@ function App() {
               <AlertConfigPanel />
             </div>
           )}
+          </div>
         </aside>
-        )}
       </section>
 
       {/* ─── BTC LIVE HEADLINES ────────────────────── */}

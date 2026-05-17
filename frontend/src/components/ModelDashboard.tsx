@@ -4,7 +4,6 @@ import {
   RefreshCw,
   TrendingUp,
   TrendingDown,
-  Minus,
   AlertTriangle,
   BarChart3,
   Clock,
@@ -39,13 +38,6 @@ interface ModelTrendPoint {
   decisions: number
   accuracy: number | null
   avg_confidence: number
-}
-
-function formatNumber(n: number | null | undefined): string {
-  if (n == null) return '--'
-  if (Math.abs(n) >= 1000000) return `${(n / 1000000).toFixed(1)}M`
-  if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}K`
-  return n.toFixed(2)
 }
 
 const GRADE_COLORS: Record<string, string> = {

@@ -9,8 +9,6 @@ import {
   CheckCircle,
   XCircle,
   TrendingUp,
-  TrendingDown,
-  Minus,
   Gauge,
   Zap,
   Shield,

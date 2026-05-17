@@ -3,7 +3,6 @@ import {
   RefreshCw,
   ArrowUpRight,
   ArrowDownRight,
-  Minus,
   Globe,
   TrendingUp,
   AlertTriangle,
@@ -37,11 +36,6 @@ interface MultiExchangeData {
 function formatPrice(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return '--'
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
-
-function formatTimestamp(ts: number): string {
-  const d = new Date(ts)
-  return d.toLocaleTimeString()
 }
 
 function timeAgo(ts: number): string {
