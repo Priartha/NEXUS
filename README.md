@@ -1,6 +1,6 @@
 # NEXUS Trading System
 
-Professional-grade specificly BTCUSDT trading workstation implementing ICT (Inner Circle Trader) concepts with AI-assisted decision making, real-time market analysis, and comprehensive backtesting.
+Professional-grade BTC/USDT trading workstation implementing ICT (Inner Circle Trader) concepts with AI-assisted decision making, real-time market analysis, and comprehensive backtesting.
 
 ## Quick Start
 
@@ -137,27 +137,62 @@ ATR14, EMA 9/20/50/99, RSI14, VWAP, Volume Z-Score, Realized/Parkinson/Garman-Kl
 
 **Behavior Patterns (7):** Smart Money Distribution/Accumulation, Retail FOMO, Panic Capitulation, Stop Hunt Reversal, Order Block Wyckoff, Short Squeeze.
 
-### Market Regime Detection
+### Market Regime Detection v2.0
 
-Phases: trending, range_bound, consolidation, accumulation, distribution. Uses ADX proxy, ATR compression, efficiency ratio, volume state, and liquidity sweeps.
+Phases: trending, range_bound, consolidation, accumulation, distribution.
+
+**Improvements:**
+- Price structure analysis (HH/HL vs LH/LL) instead of ADX proxy
+- Efficiency ratio + EMA spread momentum requirements
+- Volume state confirmation for accumulation/distribution
+- Tighter thresholds to prevent false trending classification
+- Default phase: range_bound (was trending — 96.5% false positive)
 
 ### Multi-Timeframe Confluence
 
 Analyzes alignment across 1m, 5m, 15m, 1h, 4h timeframes. Applies confluence multiplier (0.85-1.15) based on higher timeframe bias agreement.
 
-### Confluence Scoring
+### Unified Scalping Engine v2.0
 
-Signals require multiple confirming factors (minimum 0.60 threshold):
+12 data sources fused into a single confluence-weighted signal:
 
-| Factor | Weight |
-|--------|--------|
-| Trend alignment (HTF + local) | +0.20 |
-| FVG proximity | +0.15 |
-| Order Block proximity | +0.15 |
-| Liquidity sweep reclaimed | +0.15 |
-| Structure break (BOS) | +0.10 |
-| Volume confirmation | +0.10 |
-| Killzone timing | +0.10 |
+| Source | Weight | Description |
+|--------|--------|-------------|
+| Order Flow | 0.25 | Delta, CVD slope, footprint imbalance |
+| VWAP | 0.12 | Price deviation, band position |
+| Open Interest | 0.10 | Change %, trend, momentum confirmation |
+| Funding Rate | 0.08 | Contrarian bias, extreme detection |
+| Liquidity Sweeps | 0.15 | Reclaim status, entry triggers |
+| Volume Profile | 0.07 | POC, VAH, VAL positioning |
+| RSI(3) | 0.07 | Exhaustion reads |
+| Killzone | 0.05 | Session timing |
+| ICT FVG | 0.05 | Trend-following only (pullback entries) |
+| Order Block | 0.05 | Trend-following only (pullback entries) |
+| Market Regime | 0.05 | Phase and bias alignment |
+| BTC Options | 0.16 | Momentum and contract quality |
+
+**Key improvements:**
+- FVG/OB scoring is now **trend-following only** (pullback entries in trending markets)
+- VWAP compressed scoring removed (non-predictive)
+- Footprint imbalance added as confirmation factor
+- Adaptive threshold system for missing data sources
+
+### Signal Quality Gates
+
+| Gate | Trending | Range | Consolidation |
+|------|----------|-------|---------------|
+| Trend strength | ≥ 0.001 | ≥ 0.0005 | ≥ 0.0003 |
+| Trend stack | Full EMA alignment | Price vs EMA50 | Skipped |
+| Volume impulse | ≥ 0.80 | ≥ 0.50 | ≥ 0.40 |
+| Directional edge | ≥ 0.08 | ≥ 0.08 | ≥ 0.05 |
+| EMA100 filter | Price must align | Skipped | Skipped |
+| Candle close | Strong (≥ 60%) | Strong (≥ 60%) | Strong (≥ 60%) |
+| RSI momentum | In trade direction | In trade direction | In trade direction |
+
+**Hard blocks:**
+- Never trade in consolidation or range_bound regimes
+- Only trade in direction of regime bias
+- Require strong candle close in signal direction
 
 ### AI Decision Grading
 
@@ -203,10 +238,11 @@ Supports 7 formats with auto-detection. Upload any historical OHLCV data for bac
 |-----------|---------|-------|
 | Initial Balance | $10,000 | Any |
 | Position Size | 2% | 0.5% - 10% |
-| Max Hold Bars | 10 | 4 - 100 |
+| Max Hold Bars | 6 | 4 - 100 |
 | Slippage | 0.01% | Fixed |
 | Commission | 0.02% | Fixed |
-| Trailing Stop | OFF | Toggle |
+| Trailing Stop | ON | Toggle |
+| Breakeven at | 1.0R | 0.5R - 2.0R |
 
 ### Verdict Criteria
 
@@ -333,6 +369,20 @@ SQLite database (`data/nexus.db`) with 17 tables:
 | `GEMINI_API_KEY` | Enable AI ICT decision engine |
 | `OPENAI_API_KEY` | Enable OpenAI sentiment analysis |
 | `NEXUS_API_KEY` | REST/WebSocket authentication |
+
+### Scalping Engine Settings
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `NEXUS_SCALP_MIN_CONFLUENCE` | 0.45 | Minimum confluence score |
+| `NEXUS_SCALP_MIN_DIRECTIONAL_EDGE` | 0.08 | Minimum directional edge |
+| `NEXUS_SCALP_MIN_TREND_STRENGTH` | 0.001 | Minimum trend strength |
+| `NEXUS_SCALP_MIN_VOLUME_IMPULSE` | 0.80 | Minimum volume impulse |
+| `NEXUS_SCALP_MAX_RISK_PCT` | 0.01 | Max risk per trade (1%) |
+| `NEXUS_SCALP_MAX_LEVERAGE` | 10 | Max leverage (10x) |
+| `NEXUS_SCALP_MAX_POSITIONS` | 2 | Max concurrent positions |
+| `NEXUS_SCALP_DAILY_LOSS_PCT` | 0.03 | Max daily loss (3%) |
+| `NEXUS_SCALP_MAX_HOLD_MINUTES` | 15 | Max hold time (15 min) |
 
 ### Default Settings
 
