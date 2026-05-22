@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import socket
 import time
@@ -16,6 +17,44 @@ from backend.engine.candle_aggregator import normalize_timestamp_ms
 from backend.engine.candle_store import CandleStore
 from backend.ingestion.delta_rest import fetch_historical_candles
 from backend.models.types import MarketQuote, to_wire
+
+logger = logging.getLogger("backend")
+
+
+def _prefer_ipv4() -> None:
+    orig = socket.getaddrinfo
+
+    def _ipv4_first(host, port, family=0, type=0, proto=0, flags=0):
+        try:
+            return orig(host, port, socket.AF_INET, type, proto, flags)
+        except Exception:
+            return orig(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = _ipv4_first
+    # Log resolved IPs for diagnostics
+    try:
+        ips = {i[4][0] for i in orig("public-socket.india.delta.exchange", 443, socket.AF_INET)}
+        logger.info("Delta WS resolved to IPv4: %s", sorted(ips))
+    except Exception:
+        pass
+
+
+_prefer_ipv4()
+
+
+def _diagnose_connection(url: str) -> None:
+    """Log DNS and connectivity diagnostics for a WebSocket URL."""
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or "public-socket.india.delta.exchange"
+        for fam, label in [(socket.AF_INET, "IPv4"), (socket.AF_INET6, "IPv6")]:
+            try:
+                ips = [i[4][0] for i in socket.getaddrinfo(host, 443, fam)]
+                logger.info("  %s for %s: %s", label, host, ips)
+            except Exception as e:
+                logger.info("  %s for %s: FAILED (%s)", label, host, e)
+    except Exception as exc:
+        logger.debug("Connection diagnostics failed: %s", exc)
 
 
 @dataclass(frozen=True)
@@ -65,37 +104,15 @@ async def seed_all_historical(
             )
 
 
-def _prefer_ipv4() -> None:
-    """Monkey-patch socket.getaddrinfo to prefer IPv4 over IPv6.
-    
-    Delta Exchange's WebSocket endpoint has unreachable IPv6 routes on some
-    networks. This forces IPv4 resolution to avoid 'timed out during opening
-    handshake' errors.
-    """
-    orig = socket.getaddrinfo
-
-    def _ipv4_first(host, port, family=0, type=0, proto=0, flags=0):
-        try:
-            return orig(host, port, socket.AF_INET, type, proto, flags)
-        except Exception:
-            return orig(host, port, family, type, proto, flags)
-
-    socket.getaddrinfo = _ipv4_first
-
-
 async def start_delta_stream(
     manager: ConnectionManager,
     stores: dict[str, CandleStore],
     pipelines: dict[str, AnalysisPipeline],
     config: Settings,
 ) -> None:
-    import logging
-    logger = logging.getLogger("backend")
-    
-    logger.info(f"Starting Delta stream for {config.symbol}")
+    logger.info("Starting Delta stream for %s", config.symbol)
     await seed_all_historical(stores, pipelines, manager, config)
 
-    _prefer_ipv4()
     backoff = config.ws_reconnect_initial_seconds
     last_quote_key: tuple[float | None, ...] | None = None
     while True:
@@ -247,17 +264,27 @@ async def start_delta_stream(
         except asyncio.CancelledError:
             logger.info("Delta stream cancelled")
             raise
+        except TimeoutError:
+            logger.warning("Delta WebSocket handshake timed out (IPv6 may be unreachable, forcing IPv4)")
+            _diagnose_connection(config.ws_url)
+            await manager.broadcast({
+                "update_type": "status",
+                "status": "stream_disconnected",
+                "message": "WebSocket handshake timed out (IPv6 unreachable, retry with IPv4)",
+                "retry_in_seconds": backoff,
+                "symbol": config.symbol,
+            })
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 1.8, config.ws_reconnect_max_seconds)
         except Exception as exc:
             logger.warning("Delta WebSocket disconnected: %s", exc)
-            await manager.broadcast(
-                            {
-                                "update_type": "status",
-                                "status": "stream_disconnected",
-                                "message": str(exc),
-                                "retry_in_seconds": backoff,
-                                "symbol": config.symbol,
-                            }
-                        )
+            await manager.broadcast({
+                "update_type": "status",
+                "status": "stream_disconnected",
+                "message": str(exc),
+                "retry_in_seconds": backoff,
+                "symbol": config.symbol,
+            })
             await asyncio.sleep(backoff)
             backoff = min(backoff * 1.8, config.ws_reconnect_max_seconds)
 
