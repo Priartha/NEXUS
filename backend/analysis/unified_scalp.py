@@ -355,6 +355,8 @@ class UnifiedScalpEngine:
         )
         ctx.futures_leverage = settings.futures_leverage
         ctx.estimated_funding_cost_8h = round(fr.current_rate * 3 * 100, 4) if fr else 0.0
+        ctx.ai_brain_active = True
+        ctx.ai_intelligence = ai_agent.get_agent_status()
         return ctx
 
     # ── Data source computations ──

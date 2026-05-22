@@ -1018,7 +1018,6 @@ function App() {
             <div className="panel-content">
               <AIBrainPanel 
                 aiIntelligence={scalpContext?.ai_intelligence}
-                livePrice={displayPrice}
               />
             </div>
           )}

@@ -5340,6 +5340,12 @@
   margin-left: auto;
 }
 
+.ai-status-badge.learning {
+  background: var(--accent-yellow-dim);
+  border-color: rgba(245, 158, 67, 0.3);
+  color: var(--accent-yellow);
+}
+
 .ai-brain-subtitle {
   margin-top: 6px;
   font-size: 9px;
