@@ -1,6 +1,6 @@
 # NEXUS Trading System
 
-Professional-grade BTCUSD perpetual futures scalping workstation implementing ICT (Inner Circle Trader) concepts with AI-assisted decision making, real-time market analysis, and comprehensive backtesting.
+Professional-grade BTCUSD perpetual futures scalping system implementing ICT (Inner Circle Trader) concepts with AI-assisted decision making, real-time market analysis, and comprehensive backtesting.
 
 ## Quick Start
 
@@ -36,7 +36,7 @@ Open `http://localhost:5173` in your browser.
 
 ---
 
-## UI Panels (19 Tabs)
+## UI Panels
 
 ### Scalp
 Futures scalping signal panel with real-time confluence score, directional edge, signal quality blockers, and full breakdown of all 12 data sources. Shows entry zone, stop loss (1.5 ATR), T1 (3.0 ATR, 60% partial), T2 (7.5 ATR), leverage, funding cost estimate, and confidence rating.
