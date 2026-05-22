@@ -1,8 +1,8 @@
 """
-NEXUS Unified Scalping Engine v3.0 — Futures Only
+NEXUS Unified Scalping Engine v3.0 - Industry Grade AI Trading Brain
 
 Single-signal scalping engine for BTCUSD perpetual futures on Delta Exchange.
-Combines ALL data sources into one confluence-weighted scalping signal.
+PRIMARY SIGNAL: Self-Aware Trading Agent - no external dependencies, pure price action.
 
 Data sources fused:
   1. Order Flow: Delta, CVD, absorption, footprint imbalance
@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.analysis.wick_rejection import analyze_wick_rejection
+from backend.analysis.self_aware_agent import SelfAwareTradingAgent, agent as ai_agent
 from backend.config import settings
 from backend.models.types import (
     Candle,
@@ -252,8 +253,34 @@ class UnifiedScalpEngine:
             ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
             return ctx
 
+        # ── Self-Aware AI Agent (Primary Brain) ─────────────────────────────
+        # Pure price action analysis - no external dependencies
+        ai_signal = ai_agent.analyze_market(ordered)
+        
+        # Boost or override confluence scores based on AI brain
+        if ai_signal['signal'] in ['LONG', 'SHORT']:
+            ai_confidence = ai_signal.get('confidence', 0.5)
+            
+            # If AI has strong confidence (>0.7), boost that direction
+            if ai_confidence > 0.70:
+                if ai_signal['signal'] == 'LONG':
+                    long_score = max(long_score, ai_confidence)
+                    long_reasons.extend([f"AI Brain: {ai_signal.get('pattern_type', 'pattern')}", 
+                                        f"AI: {ai_signal.get('reason', '')[:50]}"])
+                else:
+                    short_score = max(short_score, ai_confidence)
+                    short_reasons.extend([f"AI Brain: {ai_signal.get('pattern_type', 'pattern')}",
+                                         f"AI: {ai_signal.get('reason', '')[:50]}"])
+            elif ai_confidence > 0.55 and long_score < threshold and short_score < threshold:
+                # AI can generate signal even if confluence is weak
+                if ai_signal['signal'] == 'LONG':
+                    long_score = ai_confidence
+                    long_reasons.append(f"AI Signal: {ai_signal.get('reason', '')[:80]}")
+                else:
+                    short_score = ai_confidence
+                    short_reasons.append(f"AI Signal: {ai_signal.get('reason', '')[:80]}")
+
         # Removed strict consolidation regime blocking - allow all regimes to generate signals
-        # Just note it in the context
 
         if settings.scalp_require_candle_confirmation and regime and regime.phase == "range_bound":
             last_candle = ordered[-1]
@@ -283,10 +310,13 @@ class UnifiedScalpEngine:
             remaining = (self._signal_cooldown_ms - (cooldown_ts - self._last_signal_ts)) / 60000
             return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, [f"Cooldown: {remaining:.1f}m until next signal"])
 
-        if long_score >= threshold and long_score >= short_score:
+        # More lenient threshold - allow AI brain to override
+        effective_threshold = 0.35  # Lower threshold for futures
+
+        if long_score >= effective_threshold and long_score >= short_score:
             signals.append(self._build_signal("LONG BTCUSD", price, atr, long_score, long_reasons, now_ms, funding_rate))
             self._last_signal_ts = cooldown_ts
-        elif short_score >= threshold and short_score > long_score:
+        elif short_score >= effective_threshold and short_score > long_score:
             signals.append(self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate))
             self._last_signal_ts = cooldown_ts
 
@@ -309,6 +339,11 @@ class UnifiedScalpEngine:
         )
         ctx.futures_leverage = settings.futures_leverage
         ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
+        
+        # Store AI brain status in context
+        ctx.ai_brain_active = True
+        ctx.ai_intelligence = ai_agent.get_agent_status()
+        
         return ctx
 
     def _blocked_ctx(self, now_ms, of, fund, fr, oi, liq, vwap, vp, sweeps, rsi_3, reasons, wick=None):
