@@ -542,15 +542,25 @@ class SelfAwareTradingAgent:
             return 'unknown'
         
         closes = np.array([c.close for c in candles])
-        highs = np.array([c.high for c in candles])
-        lows = np.array([c.low for c in candles])
         
         # Calculate trend
         ema_20 = self.feature_extractor._ema(closes, 20)
         ema_50 = self.feature_extractor._ema(closes, 50)
         
-        recent_returns = np.diff(closes[-20:]) / closes[-21:-1]
-        volatility = np.std(recent_returns)
+        # Calculate volatility safely - handle array edge cases
+        try:
+            if len(closes) >= 22:
+                diff_arr = np.diff(closes[-21:])
+                prev_arr = closes[-21:-1]
+                if len(diff_arr) > 0 and len(prev_arr) > 0:
+                    recent_returns = diff_arr / prev_arr
+                    volatility = float(np.std(recent_returns))
+                else:
+                    volatility = 0.01
+            else:
+                volatility = 0.01
+        except Exception:
+            volatility = 0.01
         
         # Trend detection
         if ema_20 > ema_50 * 1.01:
