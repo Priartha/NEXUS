@@ -29,13 +29,17 @@ Open `http://localhost:5173` in your browser.
 | State | Zustand 5 | Lightweight client-side state management |
 | Charts | Lightweight Charts 5.2 | Candlestick rendering with overlays |
 | Backend | FastAPI + Python 3.14 | REST API + WebSocket streaming |
-| Data | Binance WebSocket + SQLite | Live market data + persistent storage |
+| Market Data | Delta Exchange (primary) + Binance (fallback) | BTCUSD perpetual futures + spot |
+| Storage | SQLite | Candle archive, metrics, trades, performance |
 | AI | Gemini API (optional) | LLM-assisted trade decision review |
-| Options | Delta Exchange API | BTC options chain analysis |
+| Futures | Delta Exchange API | Funding rate, open interest, liquidations |
 
 ---
 
-## UI Panels (13 Tabs)
+## UI Panels (19 Tabs)
+
+### Scalp
+Futures scalping signal panel with real-time confluence score, directional edge, signal quality blockers, and full breakdown of all 12 data sources. Shows entry zone, stop loss (1.5 ATR), T1 (3.0 ATR, 60% partial), T2 (7.5 ATR), leverage, funding cost estimate, and confidence rating.
 
 ### Signals
 Primary trade signal display with grade (A+/A/B/C/NO_TRADE), readiness level, confidence gauge, and full ICT confluence breakdown. Shows entry price, stop loss, take profit targets, and invalidation conditions.
@@ -49,8 +53,13 @@ ICT pattern intelligence dashboard showing:
 - Bull/Bear scores and average confidence
 - Context grid: session, regime, volatility, signal state
 
-### Opts (Options)
-BTC options chain analysis with contract scoring based on delta, gamma, spread, moneyness, open interest, and implied volatility. Qualifies CALL/PUT contracts with momentum gating.
+### Futures
+Real-time BTCUSD perpetual futures context:
+- Funding rate (current, annualized, cycle countdown)
+- Open interest (change %, trend, momentum confirmation)
+- Liquidation clusters (distance, concentration, proximity alerts)
+- Estimated funding cost per 8h cycle
+- Leverage and margin mode display
 
 ### Depth
 Orderbook depth analysis showing bid/ask imbalances, spread compression/expansion, depth saturation levels, and accumulation/distribution pattern detection.
@@ -71,20 +80,20 @@ System alert center with audio notifications for:
 - Regime phase transitions
 
 ### Paper
-Paper trading engine with quality gates:
-- Minimum confidence threshold (60%)
-- Max concurrent positions (1)
-- Max daily trades (5)
-- Max daily loss (3%)
-- Cooldown after 3 consecutive losses (90 min)
-- ATR trailing stops with breakeven at 1R
+Paper trading engine driven by scalp engine signals:
+- Leveraged futures simulation (10x cross margin)
+- Partial exits (60% at T1, 40% rides to T2)
+- ATR-based trailing stops with breakeven
+- Max concurrent positions (2), daily loss limit (3%)
+- Cooldown between signals
 
 ### BT (Backtest)
 Walk-forward backtesting engine with:
 - Configurable position size, max hold bars, trailing stops
 - Realistic friction (0.01% slippage, 0.02% commission)
 - CSV data import for extended historical testing
-- Verdict system: GOOD MODEL (WR >= 50%, PF >= 1.5, DD < 15%)
+- Parameter sweep optimization scripting
+- Verdict system: GOOD MODEL (PF >= 1.5), PROFITABLE (PF > 1.0), BAD MODEL (PF < 1.0)
 - Equity curve visualization
 - Full trade history with PnL analysis
 
@@ -152,47 +161,52 @@ Phases: trending, range_bound, consolidation, accumulation, distribution.
 
 Analyzes alignment across 1m, 5m, 15m, 1h, 4h timeframes. Applies confluence multiplier (0.85-1.15) based on higher timeframe bias agreement.
 
-### Unified Scalping Engine v2.0
+### Unified Scalping Engine v3.0 — Futures Only
 
-12 data sources fused into a single confluence-weighted signal:
+12 data sources fused into a single confluence-weighted signal for BTCUSD perpetual futures:
 
 | Source | Weight | Description |
 |--------|--------|-------------|
 | Order Flow | 0.25 | Delta, CVD slope, footprint imbalance |
-| VWAP | 0.12 | Price deviation, band position |
-| Open Interest | 0.10 | Change %, trend, momentum confirmation |
-| Funding Rate | 0.08 | Contrarian bias, extreme detection |
+| VWAP | 0.12 | Price deviation, band position, compression |
+| Open Interest | 0.12 | Change %, trend, momentum confirmation |
+| Funding Rate | 0.10 | Contrarian bias, extreme detection |
 | Liquidity Sweeps | 0.15 | Reclaim status, entry triggers |
 | Volume Profile | 0.07 | POC, VAH, VAL positioning |
-| RSI(3) | 0.07 | Exhaustion reads |
-| Killzone | 0.05 | Session timing |
+| RSI(3) | 0.07 | Exhaustion reads (oversold/overbought) |
+| Killzone | 0.05 | Session timing (London, NY) |
 | ICT FVG | 0.05 | Trend-following only (pullback entries) |
 | Order Block | 0.05 | Trend-following only (pullback entries) |
 | Market Regime | 0.05 | Phase and bias alignment |
-| BTC Options | 0.16 | Momentum and contract quality |
+| Wick Rejection | 0.08 | Long-wick reversal detection |
 
-**Key improvements:**
-- FVG/OB scoring is now **trend-following only** (pullback entries in trending markets)
-- VWAP compressed scoring removed (non-predictive)
-- Footprint imbalance added as confirmation factor
-- Adaptive threshold system for missing data sources
+**Key improvements from v2.0:**
+- Removed all options-specific scoring (IV, gamma, momentum)
+- OI and Funding weights increased (0.10 → 0.12, 0.08 → 0.10)
+- New **Wick Rejection** source (weight 0.08) — detects candle reversal patterns
+- Adaptive threshold normalization when futures data (OI, funding) is missing
+- Reason-count gate: minimum 3 data sources required for signal
+- Signal builder produces **3.2:1 blended RRR** (SL 1.5 ATR, T1 3.0 ATR, T2 7.5 ATR, 60% partial exit)
 
 ### Signal Quality Gates
 
 | Gate | Trending | Range | Consolidation |
 |------|----------|-------|---------------|
-| Trend strength | ≥ 0.001 | ≥ 0.0005 | ≥ 0.0003 |
+| Trend strength | ≥ 0.001 | ≥ 0.0003 | ≥ 0.0003 |
 | Trend stack | Full EMA alignment | Price vs EMA50 | Skipped |
 | Volume impulse | ≥ 0.80 | ≥ 0.50 | ≥ 0.40 |
-| Directional edge | ≥ 0.08 | ≥ 0.08 | ≥ 0.05 |
+| Directional edge | ≥ 0.10 | ≥ 0.10 | ≥ 0.05 |
 | EMA100 filter | Price must align | Skipped | Skipped |
-| Candle close | Strong (≥ 60%) | Strong (≥ 60%) | Strong (≥ 60%) |
-| RSI momentum | In trade direction | In trade direction | In trade direction |
+| Candle close | Strong (≥ 60%) | Discount/premium close | Strong (≥ 60%) |
+| RSI momentum | In trade direction | Overbought/oversold | In trade direction |
+| Data sources | ≥ 3 reasons | ≥ 3 reasons | ≥ 3 reasons |
 
 **Hard blocks:**
 - Never trade in consolidation or range_bound regimes
 - Only trade in direction of regime bias
-- Require strong candle close in signal direction
+- Require strong candle close in signal direction (trending regime)
+- Require minimum 3 contributing data sources for any trade
+- Counter-trend signals blocked in trending regimes
 
 ### AI Decision Grading
 
@@ -375,23 +389,37 @@ SQLite database (`data/nexus.db`) with 17 tables:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `NEXUS_SCALP_MIN_CONFLUENCE` | 0.45 | Minimum confluence score |
-| `NEXUS_SCALP_MIN_DIRECTIONAL_EDGE` | 0.08 | Minimum directional edge |
+| `NEXUS_SCALP_MIN_DIRECTIONAL_EDGE` | 0.10 | Minimum directional edge |
 | `NEXUS_SCALP_MIN_TREND_STRENGTH` | 0.001 | Minimum trend strength |
-| `NEXUS_SCALP_MIN_VOLUME_IMPULSE` | 0.80 | Minimum volume impulse |
-| `NEXUS_SCALP_MAX_RISK_PCT` | 0.01 | Max risk per trade (1%) |
+| `NEXUS_SCALP_MIN_VOLUME_IMPULSE` | 0.60 | Minimum volume impulse |
 | `NEXUS_SCALP_MAX_LEVERAGE` | 10 | Max leverage (10x) |
 | `NEXUS_SCALP_MAX_POSITIONS` | 2 | Max concurrent positions |
 | `NEXUS_SCALP_DAILY_LOSS_PCT` | 0.03 | Max daily loss (3%) |
-| `NEXUS_SCALP_MAX_HOLD_MINUTES` | 15 | Max hold time (15 min) |
+| `NEXUS_SCALP_MAX_HOLD_MINUTES` | 30 | Max hold time (30 min) |
+| `NEXUS_SCALP_PARTIAL_EXIT` | 0.60 | Partial exit at T1 (60%) |
+| `NEXUS_SCALP_BE_PREMIUM_PCT` | 0.25 | Breakeven premium above entry |
+| `NEXUS_SCALP_MIN_RRR` | 1.5 | Minimum risk-reward ratio |
+| `NEXUS_SCALP_REQUIRE_CANDLE_CONFIRMATION` | false | Require strong close (disabled) |
+| `NEXUS_SCALP_REQUIRE_MTF_ALIGNMENT` | false | Require multi-TF alignment (disabled) |
+
+### Wick Rejection Settings
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `NEXUS_SCALP_WICK_MIN_RATIO` | 2.0 | Min wick-to-body ratio for rejection |
+| `NEXUS_SCALP_WICK_LOOKBACK` | 5 | Candles to analyze for wick pattern |
+| `NEXUS_SCALP_WICK_MAX_LOOKBACK` | 8 | Max candles to scan for context |
 
 ### Default Settings
 
-- Symbol: BTCUSDT
+- Symbol: BTCUSD (perpetual futures)
+- Primary exchange: Delta Exchange (product_id=372)
+- Fallback: Binance spot (BTCUSDT)
 - Timeframes: 1m, 5m, 15m, 1h
-- Candle storage: 700 per timeframe
+- Candle storage: 1000 per timeframe
+- Futures context refresh: 30 seconds
 - AI refresh: 180 seconds
 - Sentiment refresh: 300 seconds
-- Options refresh: 60 seconds
 - History recording: Enabled
 - Daily reports: Midnight UTC
 
