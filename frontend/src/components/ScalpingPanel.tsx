@@ -29,13 +29,11 @@ export function ScalpingPanel() {
       openInterest: scalp.open_interest,
       vwap: scalp.vwap,
       volumeProfile: scalp.volume_profile,
-      optionsGreeks: scalp.options_greeks,
       liquidationLevels: scalp.liquidation_levels ?? [],
       liquiditySweeps: scalp.liquidity_sweeps ?? [],
       signals: scalp.signals ?? [],
       blockers: scalp.trade_blocked_reasons ?? [],
       spotVolumeOk: scalp.spot_volume_ok,
-      optionsSpreadOk: scalp.options_spread_ok,
       macroBlocked: scalp.macro_event_block,
       risk: scalpRisk,
     }
@@ -56,9 +54,8 @@ export function ScalpingPanel() {
     conf === 'HIGH' ? '#22c55e' : conf === 'MEDIUM' ? '#f59e0b' : '#ef4444'
 
   const getSignalTypeColor = (type: string) => {
-    if (type.includes('LONG') || type.includes('CALL') && !type.includes('SELL')) return '#22c55e'
-    if (type.includes('SHORT') || type.includes('PUT') && !type.includes('SELL')) return '#ef4444'
-    if (type.includes('SELL')) return '#f59e0b'
+    if (type.includes('LONG')) return '#22c55e'
+    if (type.includes('SHORT')) return '#ef4444'
     return '#94a3b8'
   }
 
@@ -344,8 +341,6 @@ export function ScalpingPanel() {
                 </div>
                 <div className="signal-meta">
                   {signal.leverage > 0 && <span>Lev: {signal.leverage}x</span>}
-                  {signal.strike > 0 && <span>Strike: ${signal.strike.toLocaleString()}</span>}
-                  {signal.expiry && <span>DTE: {signal.expiry}</span>}
                   <span>RR: 1:{signal.risk_reward.toFixed(2)}</span>
                   <span>Max: {signal.max_hold_minutes}m</span>
                 </div>
@@ -392,7 +387,7 @@ export function ScalpingPanel() {
             <div className="scalping-metric">
               <span className="scalping-label">Open Positions</span>
               <span className="scalping-value">{data.risk.total_open} / {data.risk.max_positions}</span>
-              <span className="scalping-sub">F: {data.risk.open_futures} / O: {data.risk.open_options}</span>
+              <span className="scalping-sub">Futures: {data.risk.open_futures}</span>
             </div>
           </div>
         </div>

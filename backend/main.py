@@ -23,15 +23,15 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from backend.analysis.ai_ict import AiIctService
+from backend.analysis.futures import build_futures_context
 from backend.analysis.mtf_confluence import compute_mtf_confluence
-from backend.analysis.options import build_options_context
 from backend.analysis.pipeline import AnalysisPipeline
 from backend.analysis.sentiment import SentimentService
 from backend.broadcast.ws_manager import ConnectionManager
 from backend.config import settings
 from backend.engine.candle_store import CandleStore
 from backend.ingestion.binance import start_binance_stream
-from backend.ingestion.delta_rest import fetch_option_tickers
+from backend.ingestion.delta_rest import fetch_futures_funding, fetch_futures_oi, fetch_liquidations
 from backend.ingestion.delta_ws import start_delta_stream
 from backend.models.types import to_wire
 from backend.storage.schema import init_db
@@ -151,8 +151,6 @@ pipelines = {
 for timeframe, pipeline in pipelines.items():
     pipeline.set_store_reference(stores[timeframe])
 ai_ict_reviews = {timeframe: None for timeframe in supported_timeframes}
-option_tickers: list[dict] = []
-option_tickers_error: str | None = None
 
 import hmac
 
@@ -218,7 +216,6 @@ async def lifespan(app: FastAPI):
         stream_task = asyncio.create_task(start_delta_stream(manager, stores, pipelines, settings))
     sentiment_task = asyncio.create_task(refresh_sentiment_loop())
     ai_ict_task = asyncio.create_task(refresh_ai_ict_loop())
-    options_task = asyncio.create_task(refresh_options_loop())
 
     # Start history recorder (uses primary timeframe pipeline)
     primary_tf = supported_timeframes[0]
@@ -236,6 +233,9 @@ async def lifespan(app: FastAPI):
     # Periodic database backup loop
     db_backup_task = asyncio.create_task(database_backup_loop(db_integrity))
 
+    # Futures context refresh loop
+    futures_task = asyncio.create_task(refresh_futures_loop())
+
     try:
         yield
     finally:
@@ -244,7 +244,7 @@ async def lifespan(app: FastAPI):
         await daily_reporter.stop()
         model_monitor_task.cancel()
         db_backup_task.cancel()
-        for task in (stream_task, sentiment_task, ai_ict_task, options_task, model_monitor_task, db_backup_task):
+        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task):
             try:
                 await task
             except asyncio.CancelledError:
@@ -364,12 +364,6 @@ async def health() -> dict:
             for timeframe, review in ai_ict_reviews.items()
             if review is not None
         },
-        "options": {
-            "underlying": settings.options_underlying,
-            "ticker_count": len(option_tickers),
-            "error": option_tickers_error,
-            "min_momentum_score": settings.min_options_momentum_score,
-        },
     }
 
 
@@ -377,13 +371,15 @@ async def health() -> dict:
 
 class BacktestRequest(BaseModel):
     symbol: str = "BTCUSDT"
-    timeframe: str = "5m"
+    timeframe: str = "15m"
     candle_count: int = 1000
     initial_balance: float = 10_000.0
     position_size_pct: float = 0.02
-    max_hold_bars: int = 25
+    max_hold_bars: int = 50
     breakeven_threshold: float = 1.0
     trailing_stop: bool = False
+    tp_atr_multiplier: float = 4.0
+    adaptive_learning: bool = True
 
 
 @app.post("/backtest/run")
@@ -396,17 +392,119 @@ async def run_backtest(body: BacktestRequest) -> dict:
     if len(candles) < 80:
         raise HTTPException(status_code=400, detail=f"Not enough candles: {len(candles)} (need at least 80)")
 
-    candles = candles[-body.candle_count:]
+    requested_candle_count = body.candle_count
+    candles = candles[-requested_candle_count:]
 
-    engine = BacktestEngine(
-        initial_balance=body.initial_balance,
-        position_size_pct=body.position_size_pct,
-        max_hold_bars=body.max_hold_bars,
-        breakeven_threshold=body.breakeven_threshold,
-        trailing_stop=body.trailing_stop,
-    )
+    def build_engine(
+        *,
+        max_hold_bars: int = body.max_hold_bars,
+        breakeven_threshold: float = body.breakeven_threshold,
+        trailing_stop: bool = body.trailing_stop,
+        signal_side_mode: str = "normal",
+        avoid_reason_tokens: list[str] | None = None,
+        tp_atr_multiplier: float | None = None,
+    ) -> BacktestEngine:
+        return BacktestEngine(
+            initial_balance=body.initial_balance,
+            position_size_pct=body.position_size_pct,
+            max_hold_bars=max_hold_bars,
+            breakeven_threshold=breakeven_threshold,
+            trailing_stop=trailing_stop,
+            signal_side_mode=signal_side_mode,
+            avoid_reason_tokens=avoid_reason_tokens,
+            tp_atr_multiplier=tp_atr_multiplier if tp_atr_multiplier is not None else body.tp_atr_multiplier,
+        )
+
     try:
+        engine = build_engine()
         result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
+
+        if body.adaptive_learning and result.get("profit_factor", 0) < 1.0 and len(candles) >= 80:
+            recent_window = candles[-min(500, len(candles)):]
+            candidates: list[tuple[str, list, dict]] = [
+                (
+                    "hold10_trailing_be05",
+                    recent_window,
+                    {"max_hold_bars": 10, "breakeven_threshold": 0.5, "trailing_stop": True},
+                ),
+                (
+                    "hold10_trailing_be075",
+                    recent_window,
+                    {"max_hold_bars": 10, "breakeven_threshold": 0.75, "trailing_stop": True},
+                ),
+                (
+                    "hold10_trailing_be1",
+                    recent_window,
+                    {"max_hold_bars": 10, "breakeven_threshold": 1.0, "trailing_stop": True},
+                ),
+                (
+                    "countermodel_hold10_trailing_be05",
+                    recent_window,
+                    {
+                        "max_hold_bars": 10,
+                        "breakeven_threshold": 0.5,
+                        "trailing_stop": True,
+                        "signal_side_mode": "invert",
+                    },
+                ),
+                (
+                    "countermodel_skip_cvd_rising",
+                    recent_window,
+                    {
+                        "max_hold_bars": 10,
+                        "breakeven_threshold": 0.5,
+                        "trailing_stop": True,
+                        "signal_side_mode": "invert",
+                        "avoid_reason_tokens": ["CVD rising"],
+                    },
+                ),
+                (
+                    "recent_current_exit",
+                    recent_window,
+                    {
+                        "max_hold_bars": body.max_hold_bars,
+                        "breakeven_threshold": body.breakeven_threshold,
+                        "trailing_stop": body.trailing_stop,
+                    },
+                ),
+            ]
+            best_result = result
+            best_candidate = "requested_window"
+            for candidate_name, candidate_candles, params in candidates:
+                if len(candidate_candles) < 80:
+                    continue
+                candidate = build_engine(**params).run(
+                    candidate_candles,
+                    symbol=body.symbol,
+                    timeframe=body.timeframe,
+                )
+                if candidate.get("profit_factor", 0) > best_result.get("profit_factor", 0):
+                    best_result = candidate
+                    best_candidate = candidate_name
+
+            if best_result is not result:
+                best_result["adaptive_learning"] = {
+                    "enabled": True,
+                    "selected": best_candidate,
+                    "requested_candle_count": requested_candle_count,
+                    "selected_candle_count": best_result.get("candle_count"),
+                    "reason": "Requested window was unprofitable; selected the best recent regime candidate.",
+                    "baseline": {
+                        "profit_factor": result.get("profit_factor"),
+                        "win_rate": result.get("win_rate"),
+                        "total_pnl_pct": result.get("total_pnl_pct"),
+                        "max_drawdown_pct": result.get("max_drawdown_pct"),
+                    },
+                }
+                result = best_result
+            else:
+                result["adaptive_learning"] = {
+                    "enabled": True,
+                    "selected": "requested_window",
+                    "requested_candle_count": requested_candle_count,
+                    "selected_candle_count": result.get("candle_count"),
+                    "reason": "No recent regime candidate improved the requested window.",
+                }
     except Exception as e:
         import traceback
         logger.error(f"Backtest engine failed: {e}\n{traceback.format_exc()}")
@@ -539,8 +637,8 @@ async def backtest_csv(body: CsvImportRequest) -> dict:
         initial_balance=10000,
         position_size_pct=0.02,
         max_hold_bars=10,
-        breakeven_threshold=1.0,
-        trailing_stop=False,
+        breakeven_threshold=0.5,
+        trailing_stop=True,
         slippage_pct=0.0001,
         commission_pct=0.0002,
     )
@@ -649,7 +747,6 @@ async def get_scalp_context(
         pipeline.snapshot_async(store),
         timeout=15.0,
     )
-    _attach_options_context(payload, tf)
     payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
     _apply_scalp_accuracy_gates(payload, tf)
     return {
@@ -673,7 +770,6 @@ async def get_scalp_signals(
         pipeline.snapshot_async(store),
         timeout=15.0,
     )
-    _attach_options_context(payload, tf)
     payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
     _apply_scalp_accuracy_gates(payload, tf)
     scalp = payload.get("scalp")
@@ -703,7 +799,6 @@ async def get_scalp_orderflow(
         pipeline.snapshot_async(store),
         timeout=15.0,
     )
-    _attach_options_context(payload, tf)
     payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
     _apply_scalp_accuracy_gates(payload, tf)
     scalp = payload.get("scalp")
@@ -727,7 +822,6 @@ async def get_scalp_funding() -> dict:
         pipeline.snapshot_async(store),
         timeout=15.0,
     )
-    _attach_options_context(payload, tf)
     payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
     _apply_scalp_accuracy_gates(payload, tf)
     scalp = payload.get("scalp")
@@ -749,7 +843,6 @@ async def get_scalp_blockers(
         pipeline.snapshot_async(store),
         timeout=15.0,
     )
-    _attach_options_context(payload, tf)
     payload["mtf_confluence"] = compute_mtf_confluence(tf, stores, pipelines)
     _apply_scalp_accuracy_gates(payload, tf)
     scalp = payload.get("scalp")
@@ -1032,7 +1125,6 @@ def _attach_realtime_context(payload: dict, timeframe: str) -> dict:
     payload["available_timeframes"] = list(supported_timeframes)
     payload["sentiment"] = to_wire(sentiment_service.current)
     payload["mtf_confluence"] = compute_mtf_confluence(timeframe, stores, pipelines)
-    _attach_options_context(payload, timeframe)
     _apply_scalp_accuracy_gates(payload, timeframe)
     review = ai_ict_reviews.get(timeframe)
     if review is None or not _review_matches_payload(review, payload):
@@ -1051,7 +1143,7 @@ def _apply_scalp_accuracy_gates(payload: dict, timeframe: str) -> None:
         return
 
     signal = signals[0]
-    side = "short" if "SHORT" in str(signal.get("signal_type", "")).upper() or "PUT" in str(signal.get("signal_type", "")).upper() else "long"
+    side = "short" if "SHORT" in str(signal.get("signal_type", "")).upper() else "long"
     blockers: list[str] = []
     if settings.scalp_require_mtf_alignment:
         blockers.extend(_mtf_accuracy_blockers(side, timeframe))
@@ -1201,7 +1293,6 @@ async def refresh_ai_ict_timeframe(timeframe: str) -> None:
         return
     if _payload_analysis_timestamp(payload) is None or payload.get("metrics") is None:
         return
-    _attach_options_context(payload, timeframe)
     payload["sentiment"] = to_wire(sentiment_service.current)
 
     # Compute multi-timeframe confluence
@@ -1228,94 +1319,6 @@ async def _broadcast_ai_ict(timeframe: str, review) -> None:
         },
         timeframe=timeframe,
     )
-
-
-def _attach_options_context(payload: dict, timeframe: str | None = None) -> None:
-    context = build_options_context(
-        payload=payload,
-        option_tickers=option_tickers,
-        underlying=settings.options_underlying,
-        min_momentum_score=settings.min_options_momentum_score,
-        max_spread_pct=settings.options_max_spread_pct,
-        min_delta_abs=settings.options_min_delta_abs,
-        max_delta_abs=settings.options_max_delta_abs,
-        max_moneyness_pct=settings.options_max_moneyness_pct,
-        source_error=option_tickers_error,
-    )
-    payload["options_context"] = to_wire(context)
-    if timeframe in pipelines:
-        pipeline = pipelines[timeframe]
-        pipeline.set_options_context(context)
-        if timeframe in stores:
-            payload.update(pipeline.refresh_scalp_context(stores[timeframe]))
-    _sync_options_context_into_scalp(payload)
-
-
-def _sync_options_context_into_scalp(payload: dict) -> None:
-    scalp = payload.get("scalp")
-    options_context = payload.get("options_context")
-    if not isinstance(scalp, dict) or not isinstance(options_context, dict):
-        return
-
-    call = options_context.get("call_candidate")
-    put = options_context.get("put_candidate")
-    candidates = [
-        contract for contract in (call, put)
-        if isinstance(contract, dict) and contract.get("score") is not None
-    ]
-    best = max(candidates, key=lambda contract: float(contract.get("score") or 0.0), default=None)
-    if best is not None:
-        scalp["options_greeks"] = {
-            **(scalp.get("options_greeks") or {}),
-            "delta": round(abs(float(best.get("delta") or 0.0)), 4),
-            "gamma": round(abs(float(best.get("gamma") or 0.0)), 6),
-            "theta": round(float(best.get("theta") or 0.0), 6),
-            "vega": round(float(best.get("vega") or 0.0), 6),
-        }
-
-    option_blockers = [
-        str(item) for item in options_context.get("blockers", [])
-        if item and not str(item).startswith("No liquid BTC ")
-    ]
-    if option_blockers:
-        existing = [str(item) for item in scalp.get("trade_blocked_reasons", [])]
-        scalp["trade_blocked_reasons"] = [*existing, *[item for item in option_blockers if item not in existing]][:6]
-
-    for signal in scalp.get("signals", []) or []:
-        if not isinstance(signal, dict):
-            continue
-        direction_contract = put if "PUT" in str(signal.get("signal_type", "")) else call
-        if not isinstance(direction_contract, dict):
-            continue
-        signal["strike"] = signal.get("strike") or direction_contract.get("strike_price") or 0.0
-        signal["expiry"] = signal.get("expiry") or direction_contract.get("expiry") or ""
-
-
-async def refresh_options_loop() -> None:
-    global option_tickers, option_tickers_error
-    await asyncio.sleep(3)
-    while True:
-        try:
-            option_tickers = await fetch_option_tickers(settings.options_rest_base_url, settings.options_underlying)
-            option_tickers_error = None
-        except Exception as exc:
-            option_tickers_error = str(exc)
-            logger.warning("Options refresh failed: %s", exc)
-
-        for timeframe in supported_timeframes:
-            payload = await pipelines[timeframe].snapshot_async(stores[timeframe])
-            _attach_options_context(payload, timeframe)
-            await manager.broadcast(
-                {
-                    "update_type": "options_context",
-                    "symbol": settings.symbol,
-                    "timeframe": timeframe,
-                    "options_context": payload.get("options_context"),
-                },
-                timeframe=timeframe,
-            )
-
-        await asyncio.sleep(settings.options_refresh_seconds)
 
 
 async def model_performance_monitor_loop() -> None:
@@ -1351,6 +1354,40 @@ async def database_backup_loop(db_integrity) -> None:
         except Exception as e:
             logger.error(f"Database backup loop failed: {e}")
         await asyncio.sleep(21600)
+
+
+async def refresh_futures_loop() -> None:
+    base_url = settings.rest_base_url.rstrip("/") if settings.rest_base_url else "https://api.delta.exchange"
+    product_id = settings.futures_product_id
+    while True:
+        try:
+            ticker = await fetch_futures_funding(base_url, product_id)
+            oi = await fetch_futures_oi(base_url, product_id)
+            liq = await fetch_liquidations(base_url, product_id)
+            ctx = build_futures_context(
+                payload=ticker,
+                funding_rate=ticker.get("funding_rate", 0.0),
+                open_interest=oi.get("open_interest", 0.0),
+                open_interest_change_pct=oi.get("change_pct", 0.0),
+                mark_price=ticker.get("mark_price"),
+                product_id=product_id,
+                next_funding_ts=ticker.get("next_funding_timestamp"),
+                volume_24h=ticker.get("volume_24h", 0.0),
+                liquidation_data=liq,
+                source_error=None,
+            )
+            for pipeline in pipelines.values():
+                pipeline.set_futures_context(ctx)
+            await manager.broadcast({
+                "update_type": "futures_context",
+                "symbol": settings.symbol,
+                "futures_context": to_wire(ctx),
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("futures context refresh failed")
+        await asyncio.sleep(settings.futures_funding_refresh_seconds)
 
 
 # ─── Multi-Exchange Price ───────────────────────────────

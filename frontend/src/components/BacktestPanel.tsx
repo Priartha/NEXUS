@@ -61,10 +61,11 @@ export default function BacktestPanel() {
   const [runs, setRuns] = useState<BacktestRun[]>([])
   const [selectedRun, setSelectedRun] = useState<BacktestRun | null>(null)
   const [running, setRunning] = useState(false)
-  const [candleCount, setCandleCount] = useState(1000)
+  const [candleCount, setCandleCount] = useState(500)
   const [positionSize, setPositionSize] = useState(2)
-  const [maxHoldBars, setMaxHoldBars] = useState(10)
+  const [maxHoldBars, setMaxHoldBars] = useState(50)
   const [trailingStop, setTrailingStop] = useState(false)
+  const [tpMultiplier, setTpMultiplier] = useState(4)
   const [trades, setTrades] = useState<any[]>([])
   const [equityCurve, setEquityCurve] = useState<any[]>([])
   const [expandedTrades, setExpandedTrades] = useState(false)
@@ -121,10 +122,13 @@ export default function BacktestPanel() {
           candle_count: candleCount,
           position_size_pct: positionSize / 100,
           symbol: 'BTCUSDT',
-          timeframe: '5m',
+          timeframe: '15m',
           initial_balance: 10000,
           max_hold_bars: maxHoldBars,
+          breakeven_threshold: 1.0,
           trailing_stop: trailingStop,
+          tp_atr_multiplier: tpMultiplier,
+          adaptive_learning: true,
         }),
       })
       if (!res.ok) {
@@ -269,18 +273,21 @@ export default function BacktestPanel() {
   }
 
   const verdict = selectedRun ? (() => {
-    const wr = selectedRun.win_rate ?? 0
     const pf = selectedRun.profit_factor ?? 0
     const dd = selectedRun.max_drawdown_pct ?? 100
     const trades = selectedRun.total_trades ?? 0
+    const pnl = selectedRun.total_pnl ?? 0
 
     if (trades < 3) {
       return { label: 'INSUFFICIENT DATA', icon: AlertTriangle, color: '#f59f43' }
     }
-    if (wr >= 0.50 && pf >= 1.5 && dd < 15) {
+    if (pf >= 1.5 && pnl > 0 && dd < 15) {
       return { label: 'GOOD MODEL', icon: CheckCircle, color: '#1fe3a3' }
     }
-    if (wr < 0.40 || pf < 1.0) {
+    if (pf > 1.0 && pnl > 0 && dd < 15) {
+      return { label: 'PROFITABLE MODEL', icon: CheckCircle, color: '#1fe3a3' }
+    }
+    if (pf < 1.0 || pnl < 0) {
       return { label: 'BAD MODEL', icon: XCircle, color: '#ff5b6b' }
     }
     return { label: 'NEEDS WORK', icon: AlertTriangle, color: '#f59f43' }
@@ -357,10 +364,22 @@ export default function BacktestPanel() {
             step={2}
           />
         </div>
+        <div className="bt-ctl-group">
+          <label className="bt-ctl-label">TP (ATR)</label>
+          <input
+            className="bt-ctl-input"
+            type="number"
+            value={tpMultiplier}
+            onChange={(e) => setTpMultiplier(Number(e.target.value))}
+            min={2}
+            max={8}
+            step={1}
+          />
+        </div>
         <button
           className={`bt-toggle-btn ${trailingStop ? 'active' : ''}`}
           onClick={() => setTrailingStop(!trailingStop)}
-          title="Trailing stop (recommended: OFF)"
+          title="Trailing stop — moves SL to breakeven at 1R profit"
         >
           Trail {trailingStop ? 'ON' : 'OFF'}
         </button>

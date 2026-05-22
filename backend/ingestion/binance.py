@@ -1,3 +1,9 @@
+"""
+Fallback market data provider: Binance.
+Used only when MARKET_DATA_PROVIDER=binance is set in .env.
+Primary provider is Delta Exchange (delta_rest.py / delta_ws.py).
+"""
+
 from __future__ import annotations
 
 import asyncio

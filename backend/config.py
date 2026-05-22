@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Settings:
-    symbol: str = os.getenv("ICT_SYMBOL", "BTCUSDT")
+    symbol: str = os.getenv("ICT_SYMBOL", "BTCUSD")
     timeframe: str = os.getenv("ICT_TIMEFRAME", "5m")
     timeframes: tuple[str, ...] = tuple(
         timeframe.strip()
@@ -15,22 +15,23 @@ class Settings:
     )
     max_candles: int = int(os.getenv("ICT_MAX_CANDLES", "500"))
     history_seed_candles: int = int(os.getenv("ICT_HISTORY_SEED_CANDLES", "500"))
-    market_data_provider: str = os.getenv("ICT_MARKET_DATA_PROVIDER", "binance")
-    rest_base_url: str = os.getenv("ICT_REST_BASE_URL", os.getenv("DELTA_REST_BASE_URL", "https://api.india.delta.exchange"))
-    ws_url: str = os.getenv("ICT_WS_URL", os.getenv("DELTA_WS_URL", "wss://public-socket.india.delta.exchange"))
+    market_data_provider: str = os.getenv("ICT_MARKET_DATA_PROVIDER", "delta")
+    rest_base_url: str = os.getenv("DELTA_REST_BASE_URL", "https://api.india.delta.exchange")
+    ws_url: str = os.getenv("DELTA_WS_URL", "wss://public-socket.india.delta.exchange")
     market_data_rest_base_url: str = os.getenv("ICT_MARKET_DATA_REST_BASE_URL", "https://api.binance.com")
     market_data_ws_url: str = os.getenv("ICT_MARKET_DATA_WS_URL", "wss://stream.binance.com:9443")
     market_data_rest_poll_seconds: float = float(os.getenv("ICT_MARKET_DATA_REST_POLL_SECONDS", "1"))
-    options_rest_base_url: str = os.getenv("ICT_OPTIONS_REST_BASE_URL", os.getenv("DELTA_REST_BASE_URL", "https://api.india.delta.exchange"))
     ws_reconnect_initial_seconds: float = float(os.getenv("ICT_WS_RECONNECT_INITIAL_SECONDS", "2"))
     ws_reconnect_max_seconds: float = float(os.getenv("ICT_WS_RECONNECT_MAX_SECONDS", "30"))
-    options_underlying: str = os.getenv("ICT_OPTIONS_UNDERLYING", "BTC")
-    options_refresh_seconds: float = float(os.getenv("ICT_OPTIONS_REFRESH_SECONDS", "60"))
-    min_options_momentum_score: float = float(os.getenv("ICT_MIN_OPTIONS_MOMENTUM_SCORE", "0.40"))
-    options_max_spread_pct: float = float(os.getenv("ICT_OPTIONS_MAX_SPREAD_PCT", "0.18"))
-    options_min_delta_abs: float = float(os.getenv("ICT_OPTIONS_MIN_DELTA_ABS", "0.35"))
-    options_max_delta_abs: float = float(os.getenv("ICT_OPTIONS_MAX_DELTA_ABS", "0.75"))
-    options_max_moneyness_pct: float = float(os.getenv("ICT_OPTIONS_MAX_MONEYNESS_PCT", "0.08"))
+
+    # Delta Exchange futures product config
+    futures_product_id: int = int(os.getenv("DELTA_FUTURES_PRODUCT_ID", "372"))  # BTCUSD perpetual
+    futures_leverage: int = int(os.getenv("DELTA_FUTURES_LEVERAGE", "10"))
+    futures_margin_mode: str = os.getenv("DELTA_FUTURES_MARGIN_MODE", "cross")
+    futures_funding_refresh_seconds: float = float(os.getenv("DELTA_FUTURES_FUNDING_REFRESH_SECONDS", "30"))
+    futures_oi_refresh_seconds: float = float(os.getenv("DELTA_FUTURES_OI_REFRESH_SECONDS", "30"))
+    futures_liq_refresh_seconds: float = float(os.getenv("DELTA_FUTURES_LIQ_REFRESH_SECONDS", "60"))
+
     ai_ict_refresh_seconds: float = float(os.getenv("ICT_AI_ICT_REFRESH_SECONDS", "180"))
     ai_ict_provider: str = os.getenv("ICT_AI_ICT_PROVIDER", "auto")
     sentiment_refresh_seconds: float = float(os.getenv("ICT_SENTIMENT_REFRESH_SECONDS", "300"))
@@ -52,7 +53,7 @@ class Settings:
     api_key: str = os.getenv("ICT_API_KEY", "")
     log_level: str = os.getenv("ICT_LOG_LEVEL", "INFO")
 
-    # Scalping engine configuration
+    # Scalping engine configuration (Futures-only)
     scalp_enabled: bool = os.getenv("NEXUS_SCALP_ENABLED", "true").lower() == "true"
     scalp_max_risk_pct: float = float(os.getenv("NEXUS_SCALP_MAX_RISK_PCT", "0.01"))
     scalp_max_leverage: int = int(os.getenv("NEXUS_SCALP_MAX_LEVERAGE", "10"))
@@ -61,15 +62,6 @@ class Settings:
     scalp_min_rrr: float = float(os.getenv("NEXUS_SCALP_MIN_RRR", "1.5"))
     scalp_max_hold_minutes: int = int(os.getenv("NEXUS_SCALP_MAX_HOLD_MINUTES", "15"))
     scalp_funding_rate_extreme: float = float(os.getenv("NEXUS_SCALP_FUNDING_EXTREME", "0.001"))
-    scalp_ivr_low_threshold: float = float(os.getenv("NEXUS_SCALP_IVR_LOW", "30"))
-    scalp_ivr_high_threshold: float = float(os.getenv("NEXUS_SCALP_IVR_HIGH", "70"))
-    scalp_ivr_no_trade_low: float = float(os.getenv("NEXUS_SCALP_IVR_NO_TRADE_LOW", "30"))
-    scalp_ivr_no_trade_high: float = float(os.getenv("NEXUS_SCALP_IVR_NO_TRADE_HIGH", "50"))
-    scalp_options_min_delta: float = float(os.getenv("NEXUS_SCALP_OPT_MIN_DELTA", "0.30"))
-    scalp_options_max_delta: float = float(os.getenv("NEXUS_SCALP_OPT_MAX_DELTA", "0.50"))
-    scalp_options_max_dte: int = int(os.getenv("NEXUS_SCALP_OPT_MAX_DTE", "3"))
-    scalp_options_premium_exit_pct: float = float(os.getenv("NEXUS_SCALP_OPT_EXIT_PCT", "0.60"))
-    scalp_options_spread_max_pct: float = float(os.getenv("NEXUS_SCALP_OPT_SPREAD_MAX", "0.005"))
     scalp_min_spot_volume_ratio: float = float(os.getenv("NEXUS_SCALP_MIN_VOL_RATIO", "0.70"))
     scalp_vwap_band_sd: float = float(os.getenv("NEXUS_SCALP_VWAP_SD", "1.0"))
     scalp_rsi_exhaustion: float = float(os.getenv("NEXUS_SCALP_RSI_EXHAUSTION", "3"))
@@ -79,10 +71,14 @@ class Settings:
     scalp_min_directional_edge: float = float(os.getenv("NEXUS_SCALP_MIN_DIRECTIONAL_EDGE", "0.08"))
     scalp_min_trend_strength: float = float(os.getenv("NEXUS_SCALP_MIN_TREND_STRENGTH", "0.001"))
     scalp_min_volume_impulse: float = float(os.getenv("NEXUS_SCALP_MIN_VOLUME_IMPULSE", "0.80"))
-    scalp_require_options_alignment: bool = os.getenv("NEXUS_SCALP_REQUIRE_OPTIONS_ALIGNMENT", "true").lower() == "true"
     scalp_require_mtf_alignment: bool = os.getenv("NEXUS_SCALP_REQUIRE_MTF_ALIGNMENT", "true").lower() == "true"
     scalp_require_candle_confirmation: bool = os.getenv("NEXUS_SCALP_REQUIRE_CANDLE_CONFIRMATION", "true").lower() == "true"
     scalp_max_entry_distance_pct: float = float(os.getenv("NEXUS_SCALP_MAX_ENTRY_DISTANCE_PCT", "0.0015"))
+
+    # Wick rejection analysis
+    scalp_wick_lookback: int = int(os.getenv("NEXUS_SCALP_WICK_LOOKBACK", "5"))
+    scalp_wick_min_ratio: float = float(os.getenv("NEXUS_SCALP_WICK_MIN_RATIO", "2.0"))
+    scalp_wick_max_lookback: int = int(os.getenv("NEXUS_SCALP_WICK_MAX_LOOKBACK", "8"))
 
 
 settings = Settings()

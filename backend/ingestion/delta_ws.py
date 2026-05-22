@@ -107,7 +107,15 @@ async def start_delta_stream(
                                     {
                                         "name": "ticker",
                                         "symbols": [config.symbol],
-                                    }
+                                    },
+                                    {
+                                        "name": "funding_rate",
+                                        "symbols": [config.symbol],
+                                    },
+                                    {
+                                        "name": "open_interest",
+                                        "symbols": [config.symbol],
+                                    },
                                 ]
                             },
                         }

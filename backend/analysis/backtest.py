@@ -30,6 +30,7 @@ from backend.analysis.regime import detect_market_regime
 from backend.analysis.unified_scalp import UnifiedScalpEngine
 from backend.analysis.statistical_tests import compute_full_statistics, compute_sharpe_ratio
 from backend.analysis.swing_detector import detect_swings
+from backend.engine.candle_aggregator import timeframe_to_ms
 from backend.models.types import Candle
 
 logger = logging.getLogger("backend")
@@ -50,6 +51,10 @@ class BacktestEngine:
         trailing_stop: bool = True,
         trailing_atr_multiplier: float = 1.5,
         funding_rate_per_8h: float = 0.0001,
+        signal_side_mode: str = "normal",
+        avoid_reason_tokens: list[str] | None = None,
+        tp_atr_multiplier: float = 0.0,  # 0 = use signal default
+        sl_atr_multiplier: float = 0.0,  # 0 = use signal default
     ):
         self.initial_balance = float(initial_balance)
         self.position_size_pct = float(position_size_pct)
@@ -61,6 +66,16 @@ class BacktestEngine:
         self.trailing_stop = trailing_stop
         self.trailing_atr_multiplier = trailing_atr_multiplier
         self.funding_rate_per_8h = funding_rate_per_8h
+        self.signal_side_mode = signal_side_mode
+        self.avoid_reason_tokens = avoid_reason_tokens or []
+        self.tp_atr_multiplier = tp_atr_multiplier
+        self.sl_atr_multiplier = sl_atr_multiplier
+        self._tp_atr_multiplier = None  # Set via set_tp_multiplier()
+
+    def set_tp_multiplier(self, mult: float | None):
+        """Override TP to be `mult` × SL distance instead of signal's target_2.
+        e.g., mult=3 means 3:1 R:R (6 ATR TP with 2 ATR SL). None = use signal default."""
+        self._tp_atr_multiplier = mult
 
     def run(
         self,
@@ -84,7 +99,7 @@ class BacktestEngine:
         timeframe: str,
     ) -> dict:
         try:
-            results, equity, balance, peak, open_trades, returns_series = self._execute_trades(candles)
+            results, equity, balance, peak, open_trades, returns_series = self._execute_trades(candles, timeframe)
         except Exception as e:
             logger.error(f"_execute_trades failed: {e}")
             return self._fallback_result(candles, symbol, timeframe)
@@ -246,13 +261,18 @@ class BacktestEngine:
             "equity_curve": train_result.get("equity_curve", []) + test_result.get("equity_curve", []),
         }
 
-    def _execute_trades(self, candles: list[Candle]):
+    def _execute_trades(self, candles: list[Candle], timeframe: str = "5m"):
         results: list[dict] = []
         equity: list[dict] = []
         balance = self.initial_balance
         peak = balance
         open_trades: list[dict] = []
         returns_series: list[float] = []
+
+        # Normalize funding rate to per-bar (was incorrectly using full 8h rate per bar)
+        bar_ms = timeframe_to_ms(timeframe)
+        bars_per_8h = 8 * 3600 * 1000 / bar_ms
+        funding_per_bar = self.funding_rate_per_8h / bars_per_8h
 
         swing_engine: list[Any] = []
         fvg_engine: list[Any] = []
@@ -323,15 +343,27 @@ class BacktestEngine:
                 # Scores range from ~0.20 to ~0.70 in backtest mode
                 raw_score = ss.risk_reward  # Not ideal, but use signal strength
                 conf_map = {"HIGH": 0.75, "MEDIUM": 0.60, "LOW": 0.45}
-                side = "buy" if "LONG" in ss.signal_type or ("CALL" in ss.signal_type and "SELL" not in ss.signal_type) else "sell"
                 entry = (ss.entry_zone_low + ss.entry_zone_high) / 2
+                side = "buy" if "LONG" in ss.signal_type else "sell"
+                stop_loss = ss.sl_level
+                exit_price = ss.target_2
+                if self.signal_side_mode == "invert":
+                    side = "sell" if side == "buy" else "buy"
+                    stop_distance = abs(entry - ss.sl_level)
+                    target_distance = abs(ss.target_2 - entry)
+                    if side == "buy":
+                        stop_loss = entry - stop_distance
+                        exit_price = entry + target_distance
+                    else:
+                        stop_loss = entry + stop_distance
+                        exit_price = entry - target_distance
                 compatible_signals.append(type("CompatSignal", (), {
                     "id": ss.id,
                     "timestamp": ss.timestamp,
                     "side": side,
                     "entry": entry,
-                    "stop_loss": ss.sl_level,
-                    "exit_price": ss.target_1,
+                    "stop_loss": stop_loss,
+                    "exit_price": exit_price,
                     "confidence": conf_map.get(ss.confidence, 0.50),
                     "reason": ss.reason,
                     "risk_reward": ss.risk_reward,
@@ -342,6 +374,8 @@ class BacktestEngine:
             last_signal_ts = max((s.timestamp for s in signals), default=last_signal_ts)
 
             for sig in new_signals:
+                if self.avoid_reason_tokens and any(token in sig.reason for token in self.avoid_reason_tokens):
+                    continue
                 if len([t for t in open_trades if t["status"] == "open"]) >= self.max_concurrent:
                     continue
                 if sig.confidence < 0.42:
@@ -358,6 +392,15 @@ class BacktestEngine:
                 commission = notional * self.commission_pct
 
                 tp = sig.exit_price
+                sl = sig.stop_loss
+                if self.tp_atr_multiplier > 0:
+                    # Override TP: entry +/- tp_atr_multiplier * (risk_per_unit / 2.0)
+                    atr_frac = risk_per_unit / 2.0
+                    tp = sig.entry + self.tp_atr_multiplier * atr_frac if sig.side == "buy" else sig.entry - self.tp_atr_multiplier * atr_frac
+                if self.sl_atr_multiplier > 0:
+                    # Override SL: entry -/+ sl_atr_multiplier * (risk_per_unit / 2.0)
+                    atr_frac = risk_per_unit / 2.0
+                    sl = sig.entry - self.sl_atr_multiplier * atr_frac if sig.side == "buy" else sig.entry + self.sl_atr_multiplier * atr_frac
                 trade = {
                     "id": str(uuid.uuid4()),
                     "signal_id": sig.id,
@@ -365,8 +408,8 @@ class BacktestEngine:
                     "side": sig.side,
                     "entry_price": round(entry_with_slippage, 2),
                     "raw_entry": sig.entry,
-                    "stop_loss": sig.stop_loss,
-                    "initial_sl": sig.stop_loss,
+                    "stop_loss": sl,
+                    "initial_sl": sl,
                     "take_profit": tp,
                     "quantity": quantity,
                     "status": "open",
@@ -390,6 +433,10 @@ class BacktestEngine:
                 bars_held = trade.get("bars_held", 0) + 1
                 trade["bars_held"] = bars_held
 
+                # Skip SL/TP on entry bar — its low/high occurred before entry at close
+                if bars_held == 1:
+                    continue
+
                 if self.trailing_stop:
                     risk = abs(entry - trade.get("initial_sl", sl))
                     if risk > 0:
@@ -404,8 +451,8 @@ class BacktestEngine:
                                 trade["stop_loss"] = min(trade["stop_loss"], entry)
                                 sl = trade["stop_loss"]
 
-                funding_cost = bars_held * self.funding_rate_per_8h * entry * qty
-                if bars_held >= self.max_hold_bars:
+                funding_cost = bars_held * funding_per_bar * entry * qty
+                if bars_held >= self.max_hold_bars + 1:
                     exit_price = current.close
                     pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
                     pnl -= trade["commission"] + funding_cost

@@ -1,10 +1,7 @@
-# Trading Analysis Constants
-
 from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class TechnicalIndicators:
-    """Trading indicator periods and parameters"""
     ATR_PERIOD = 14
     EMA_FAST = 20
     EMA_SLOW = 50
@@ -15,7 +12,6 @@ class TechnicalIndicators:
 
 @dataclass(frozen=True)
 class SentimentThresholds:
-    """Sentiment classification thresholds"""
     BULLISH_THRESHOLD = 0.18
     BEARISH_THRESHOLD = -0.18
     CONFIDENCE_WEIGHT = 0.65
@@ -23,7 +19,6 @@ class SentimentThresholds:
 
 @dataclass(frozen=True)
 class LiquidityScoring:
-    """Liquidity event scoring weights"""
     TOUCH_SCORE_CAP = 0.3
     TOUCH_SCORE_WEIGHT = 0.075
     DEPTH_SCORE_CAP = 0.24
@@ -36,25 +31,13 @@ class LiquidityScoring:
 
 @dataclass(frozen=True)
 class AiIctThresholds:
-    """AI ICT decision thresholds"""
-    MIN_CONFIDENCE = 0.49  # Below this, avoid trading
+    MIN_CONFIDENCE = 0.49
     HIGH_CONFIDENCE_MIN = 0.68
     MAX_CONFIDENCE = 0.95
     DEFAULT_RISK_REWARD = 3.0
 
 @dataclass(frozen=True)
-class OptionsFiltering:
-    """Options contract filtering parameters"""
-    MIN_DELTA_ABS = 0.35
-    MAX_DELTA_ABS = 0.75
-    MAX_MONEYNESS_PCT = 0.08
-    MAX_SPREAD_PCT = 0.18
-    MIN_VOLUME = 0  # Can be configured
-    MIN_OPEN_INTEREST = 0  # Can be configured
-
-@dataclass(frozen=True)
 class MarketRegimeThresholds:
-    """Market regime detection thresholds"""
     TRENDING_THRESHOLD = 0.28
     RANGE_BOUND_THRESHOLD = 0.24
     CONSOLIDATION_THRESHOLD = 0.42
@@ -62,7 +45,6 @@ class MarketRegimeThresholds:
 
 @dataclass(frozen=True)
 class RiskManagement:
-    """Risk management parameters"""
     DEFAULT_STOP_LOSS_ATR_MULTIPLIER = 1.5
     DEFAULT_TARGET_RISK_REWARD = 3.0
-    MAX_POSITION_SIZE_PCT = 0.02  # 2% of portfolio
+    MAX_POSITION_SIZE_PCT = 0.02

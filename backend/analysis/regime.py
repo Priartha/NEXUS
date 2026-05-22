@@ -54,8 +54,12 @@ def detect_market_regime(
     total_move = sum(abs(closes[i] - closes[i-1]) for i in range(1, len(closes)))
     efficiency = _safe_div(net_move, total_move) if total_move > 0 else 0
 
-    # ── ATR Compression ──
-    atr_compression = _safe_div(metrics.atr14, max(width, metrics.atr14))
+    # ── ATR Compression (shorter lookback — compare ATR to recent ~1h range) ──
+    short_window = window[-12:] if len(window) >= 12 else window
+    short_high = max(c.high for c in short_window)
+    short_low = min(c.low for c in short_window)
+    short_width = max(short_high - short_low, 0.0)
+    atr_compression = _safe_div(metrics.atr14, max(short_width, metrics.atr14))
 
     # ── Volume State ──
     volume_state = "expanding" if metrics.volume_zscore >= 1.0 else "compressed" if metrics.volume_zscore <= -0.7 else "normal"

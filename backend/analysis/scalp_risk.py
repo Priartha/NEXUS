@@ -3,8 +3,8 @@ BTC/USDT Scalping Risk Manager
 
 Enforces strict risk parameters for scalping:
 - Max risk per trade: 1% of capital
-- Max leverage: 10x Futures | No leverage on options premium
-- Max simultaneous positions: 2 (one futures, one options hedge)
+- Max leverage: 10x Futures
+- Max simultaneous positions: 1 futures position
 - Daily loss limit: 3% -> STOP ALL TRADING for the day
 - Minimum RRR: 1:1.5
 - Position sizing: Based on SL distance, not gut feel
@@ -31,7 +31,6 @@ class ScalpRiskState:
     consecutive_losses: int = 0
     max_consecutive_losses: int = 0
     open_futures_positions: int = 0
-    open_options_positions: int = 0
     total_exposure: float = 0.0
     last_reset_date: str = ""
     daily_loss_hit: bool = False
@@ -73,14 +72,10 @@ class ScalpRiskManager:
         if self.state.daily_trades >= 10:
             blockers.append("Max daily trades reached (10)")
 
-        if signal.signal_type in ("LONG FUTURES", "SHORT FUTURES"):
-            if self.state.open_futures_positions >= 1:
-                blockers.append("Max 1 futures position allowed")
-        else:
-            if self.state.open_options_positions >= 1:
-                blockers.append("Max 1 options position allowed")
+        if self.state.open_futures_positions >= 1:
+            blockers.append("Max 1 futures position allowed")
 
-        total_open = self.state.open_futures_positions + self.state.open_options_positions
+        total_open = self.state.open_futures_positions
         if total_open >= settings.scalp_max_positions:
             blockers.append(f"Max simultaneous positions: {settings.scalp_max_positions}")
 
@@ -122,13 +117,9 @@ class ScalpRiskManager:
         position_size = risk_amount / sl_distance
         notional = position_size * entry_mid
 
-        leverage = 1
-        if "FUTURES" in signal.signal_type:
-            leverage = min(signal.leverage, settings.scalp_max_leverage)
-            notional = position_size * entry_mid
-            margin = notional / leverage
-        else:
-            margin = notional
+        leverage = min(signal.leverage, settings.scalp_max_leverage)
+        notional = position_size * entry_mid
+        margin = notional / leverage
 
         return {
             "position_size": round(position_size, 6),
@@ -144,20 +135,12 @@ class ScalpRiskManager:
     def record_trade_open(self, signal: ScalpSignal) -> None:
         self._reset_if_new_day()
         self.state.daily_trades += 1
+        self.state.open_futures_positions += 1
 
-        if "FUTURES" in signal.signal_type:
-            self.state.open_futures_positions += 1
-        else:
-            self.state.open_options_positions += 1
-
-    def record_trade_close(self, pnl: float, is_futures: bool = True) -> None:
+    def record_trade_close(self, pnl: float) -> None:
         self._reset_if_new_day()
         self.state.daily_pnl += pnl
-
-        if is_futures:
-            self.state.open_futures_positions = max(0, self.state.open_futures_positions - 1)
-        else:
-            self.state.open_options_positions = max(0, self.state.open_options_positions - 1)
+        self.state.open_futures_positions = max(0, self.state.open_futures_positions - 1)
 
         if pnl > 0:
             self.state.daily_wins += 1
@@ -210,8 +193,7 @@ class ScalpRiskManager:
             "consecutive_losses": self.state.consecutive_losses,
             "max_consecutive_losses": self.state.max_consecutive_losses,
             "open_futures": self.state.open_futures_positions,
-            "open_options": self.state.open_options_positions,
-            "total_open": self.state.open_futures_positions + self.state.open_options_positions,
+            "total_open": self.state.open_futures_positions,
             "max_positions": settings.scalp_max_positions,
             "max_risk_per_trade_pct": round(settings.scalp_max_risk_pct * 100, 2),
             "max_leverage": settings.scalp_max_leverage,

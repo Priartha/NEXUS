@@ -27,6 +27,7 @@ from backend.models.types import (
     BtcPatternContext,
     Candle,
     FVG,
+    FuturesContext,
     LiquidityEvent,
     LiquidityLevel,
     MarketMetrics,
@@ -36,7 +37,6 @@ from backend.models.types import (
     OrderbookAccumulation,
     OrderbookDepthLevel,
     OrderbookImbalance,
-    OptionsContext,
     PriceProjection,
     SpreadDynamics,
     Swing,
@@ -91,7 +91,7 @@ class AnalysisPipeline:
         self.scalp_engine = UnifiedScalpEngine()
         self.scalp_risk = ScalpRiskManager()
         self.scalp_context = None
-        self.options_context: OptionsContext | dict | None = None
+        self.futures_context: FuturesContext | dict | None = None
 
     def add_quote(self, quote: MarketQuote) -> None:
         """Add a market quote for orderbook analysis."""
@@ -99,8 +99,8 @@ class AnalysisPipeline:
         self.orderbook_analyzer.add_quote(quote)
         self.scalp_engine.ingest_quote(quote)
 
-    def set_options_context(self, options_context: OptionsContext | dict | None) -> None:
-        self.options_context = options_context
+    def set_futures_context(self, futures_context: FuturesContext | dict | None) -> None:
+        self.futures_context = futures_context
 
     def refresh_scalp_context(self, store: CandleStore) -> dict:
         closed_candles = store.get_closed_candles()
@@ -113,7 +113,7 @@ class AnalysisPipeline:
                 swings=self.swings,
                 regime=self.regime,
                 liquidity_events=self.liquidity_events,
-                options_context=self.options_context,
+                futures_context=self.futures_context,
             )
         return {
             "scalp": to_wire(self.scalp_context) if self.scalp_context else None,
@@ -366,7 +366,7 @@ class AnalysisPipeline:
                 swings=self.swings,
                 regime=self.regime,
                 liquidity_events=self.liquidity_events,
-                options_context=self.options_context,
+                futures_context=self.futures_context,
             )
 
         # Convert scalping signals to TradeSignal for system compatibility

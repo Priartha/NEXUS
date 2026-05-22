@@ -225,49 +225,6 @@ export interface MarketRegime {
   reason: string
 }
 
-export interface OptionContract {
-  symbol: string
-  product_id?: number | null
-  contract_type: 'call_options' | 'put_options' | string
-  side: 'call' | 'put'
-  strike_price: number
-  expiry?: string | null
-  expiry_timestamp?: number | null
-  spot_price?: number | null
-  mark_price?: number | null
-  best_bid?: number | null
-  best_ask?: number | null
-  mid_price?: number | null
-  spread_pct?: number | null
-  bid_iv?: number | null
-  ask_iv?: number | null
-  volume?: number | null
-  open_interest?: number | null
-  delta?: number | null
-  gamma?: number | null
-  theta?: number | null
-  vega?: number | null
-  rho?: number | null
-  score: number
-  qualified: boolean
-  reason: string
-}
-
-export interface OptionsContext {
-  timestamp: number
-  underlying: string
-  momentum_score: number
-  bullish_momentum_score: number
-  bearish_momentum_score: number
-  minimum_momentum_score: number
-  momentum_state: 'high' | 'low'
-  call_candidate?: OptionContract | null
-  put_candidate?: OptionContract | null
-  blockers: string[]
-  source_count: number
-  error?: string | null
-}
-
 export interface SentimentHeadline {
   title: string
   source: string
@@ -308,9 +265,6 @@ export interface AiIctDecision {
   invalidation?: number | null
   primary_signal_id?: string | null
   summary: string
-  option_contract?: OptionContract | null
-  momentum_score?: number | null
-  options_score?: number | null
   confirmations: string[]
   blockers: string[]
   calculations: string[]
@@ -509,7 +463,7 @@ export interface InstitutionalMetrics {
 }
 
 export interface MarketMessage {
-  update_type: 'snapshot' | 'tick' | 'close' | 'status' | 'sentiment' | 'ai_ict' | 'quote' | 'options_context'
+  update_type: 'snapshot' | 'tick' | 'close' | 'status' | 'sentiment' | 'ai_ict' | 'quote' | 'futures_context'
   symbol?: string
   timeframe?: string
   quote?: MarketQuote | null
@@ -527,7 +481,6 @@ export interface MarketMessage {
   regime?: MarketRegime | null
   psychology?: PsychologySnapshot | null
   readability?: ReadabilitySnapshot | null
-  options_context?: OptionsContext | null
   btc_patterns?: BtcPatternContext | null
   sentiment?: SentimentSnapshot | null
   ai_ict?: AiIctDecision | null
@@ -769,6 +722,17 @@ export interface ScalpFunding {
   contrarian_bias: string
 }
 
+export interface ScalpFundingRate {
+  timestamp: number
+  current_rate: number
+  annualized: number
+  funding_apr: number
+  predicted_8h: number
+  time_to_next: number
+  is_extreme: boolean
+  bias: string
+}
+
 export interface ScalpOpenInterest {
   timestamp: number
   current_oi: number
@@ -805,18 +769,6 @@ export interface ScalpVolumeProfile {
   value_area_width_pct: number
 }
 
-export interface ScalpOptionsGreeks {
-  timestamp: number
-  delta: number
-  gamma: number
-  theta: number
-  vega: number
-  iv_rank: number
-  iv_percentile: number
-  iv_regime: string
-  theta_decay_per_hour: number
-}
-
 export interface ScalpLiquiditySweep {
   timestamp: number
   level: number
@@ -837,8 +789,6 @@ export interface ScalpSignal {
   target_1: number
   target_2: number
   leverage: number
-  strike: number
-  expiry: string
   reason: string
   risk_reward: number
   confidence: string
@@ -849,22 +799,37 @@ export interface ScalpSignal {
   partial_exit_pct: number
 }
 
+export interface ScalpWickRejection {
+  active_upper_wick_candles: number
+  active_lower_wick_candles: number
+  max_upper_wick_ratio: number
+  max_lower_wick_ratio: number
+  avg_upper_wick_ratio: number
+  avg_lower_wick_ratio: number
+  bearish_rejection_active: boolean
+  bullish_rejection_active: boolean
+  rejection_strength: number
+  description: string
+}
+
 export interface ScalpContext {
   timestamp: number
   order_flow: ScalpOrderFlow | null
   funding: ScalpFunding | null
+  funding_rate: ScalpFundingRate | null
   open_interest: ScalpOpenInterest | null
   liquidation_levels: ScalpLiquidationLevel[]
   vwap: ScalpVWAP | null
   volume_profile: ScalpVolumeProfile | null
-  options_greeks: ScalpOptionsGreeks | null
   liquidity_sweeps: ScalpLiquiditySweep[]
   signals: ScalpSignal[]
   trade_blocked_reasons: string[]
   rsi_3: number
   spot_volume_ok: boolean
-  options_spread_ok: boolean
   macro_event_block: boolean
+  futures_leverage: number
+  estimated_funding_cost_8h: number
+  wick_rejection: ScalpWickRejection | null
 }
 
 export interface ScalpRiskSummary {
@@ -881,7 +846,6 @@ export interface ScalpRiskSummary {
   consecutive_losses: number
   max_consecutive_losses: number
   open_futures: number
-  open_options: number
   total_open: number
   max_positions: number
   max_risk_per_trade_pct: number

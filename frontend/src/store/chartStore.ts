@@ -15,7 +15,6 @@ import {
   type MarketStats,
   type OrderBlock,
   type OrderbookData,
-  type OptionsContext,
   type PaperTradeStats,
   type PriceProjection,
   type PsychologySnapshot,
@@ -42,7 +41,6 @@ interface ChartStore {
   metrics: MarketMetrics | null
   quote: MarketQuote | null
   regime: MarketRegime | null
-  optionsContext: OptionsContext | null
   projection: PriceProjection | null
   sentiment: SentimentSnapshot | null
   aiIct: AiIctDecision | null
@@ -96,7 +94,6 @@ export const useChartStore = create<ChartStore>((set) => ({
   metrics: null,
   quote: null,
   regime: null,
-  optionsContext: null,
   projection: null,
   sentiment: null,
   aiIct: null,
@@ -135,7 +132,6 @@ export const useChartStore = create<ChartStore>((set) => ({
       aiIct: null,
       quote: null,
       regime: null,
-      optionsContext: null,
       orderbook: null,
       stats: null,
       psychology: null,
@@ -171,10 +167,10 @@ export const useChartStore = create<ChartStore>((set) => ({
         availableTimeframes: message.available_timeframes ?? state.availableTimeframes,
         lastUpdateType: message.update_type,
         feedStatus:
-          message.update_type === 'tick'
-            ? 'live_tick'
-            : message.update_type === 'sentiment' || message.update_type === 'ai_ict' || message.update_type === 'quote' || message.update_type === 'options_context'
+            message.update_type === 'futures_context' || message.update_type === 'sentiment' || message.update_type === 'ai_ict' || message.update_type === 'quote'
               ? state.feedStatus
+              : message.update_type === 'tick'
+                ? 'live_tick'
               : 'analysis_ready',
         feedMessage: '',
       }
@@ -218,7 +214,6 @@ export const useChartStore = create<ChartStore>((set) => ({
       if (message.metrics !== undefined) next.metrics = message.metrics
       if (message.projection !== undefined) next.projection = message.projection
       if (message.regime !== undefined) next.regime = message.regime
-      if (message.options_context !== undefined) next.optionsContext = message.options_context
       if (message.sentiment !== undefined) next.sentiment = message.sentiment
       if (message.ai_ict !== undefined) next.aiIct = message.ai_ict
       if (message.btc_patterns !== undefined) next.btcPatterns = message.btc_patterns

@@ -321,7 +321,7 @@ class AiIctService:
                                 "confidence, confirmations, and blockers only. Do not claim certainty and do not use the word guarantee "
                                 "except to say there is no guarantee. Return strict JSON. Grade only if the setup has sufficient evidence "
                                 "from VWAP deviations, Bollinger Bands, RSI extremes, volatility regimes, volume confirmation, trend "
-                                "slope, options Greeks, and sentiment.\n\n"
+                                "slope, and sentiment.\n\n"
                                 f"{json.dumps(_compact_context(payload, sentiment, fallback), separators=(',', ':'))}"
                             )
                         }
@@ -349,9 +349,7 @@ class AiIctService:
             confidence = _clamp(float(parsed.get("confidence", fallback.confidence)), 0.0, 0.95)
             setup_score = _clamp(float(parsed.get("setup_score", fallback.setup_score)), 0.0, 1.0)
             blockers = _string_list(parsed.get("blockers"))[:6] or fallback.blockers
-            phase_block = _phase_block_reason(payload, direction)
-            options_block = _options_block_reason(payload, direction)
-            execution_block = phase_block or options_block
+            execution_block = _phase_block_reason(payload, direction)
             signal = _best_signal_for_side(
                 [_dict(item) for item in payload.get("signals", [])],
                 "buy" if direction == "bullish" else "sell" if direction == "bearish" else "",
@@ -388,11 +386,9 @@ class AiIctService:
                 price_plan["primary_signal_id"] = None
             confirmations = _string_list(parsed.get("confirmations"))[:7] or fallback.confirmations
             summary = str(parsed.get("summary", fallback.summary))[:520]
-            selected_option = _option_for_direction(payload, direction)
             if execution_block:
                 confirmations = []
-                selected_option = None
-                summary = f"WAIT setup: NO_TRADE / avoid. {execution_block}; one final options setup is blocked until momentum and Greeks confirm."
+                summary = f"WAIT setup: NO_TRADE / avoid. {execution_block}."
 
             return AiIctDecision(
                 timestamp=fallback.timestamp,
@@ -411,9 +407,6 @@ class AiIctService:
                 invalidation=price_plan["invalidation"],
                 primary_signal_id=price_plan["primary_signal_id"],
                 summary=summary,
-                option_contract=selected_option,
-                momentum_score=_directional_momentum(payload, direction),
-                options_score=_as_float(selected_option.get("score"), None) if selected_option else None,
                 confirmations=confirmations,
                 blockers=blockers,
                 calculations=[
@@ -452,7 +445,6 @@ class AiIctService:
         metrics = _dict(payload.get("metrics"))
         projection = _dict(payload.get("projection"))
         regime = _dict(payload.get("regime"))
-        options_context = _dict(payload.get("options_context"))
         signals = [_dict(item) for item in payload.get("signals", [])]
         candles = [_dict(item) for item in payload.get("candles", [])]
         candle = _dict(payload.get("candle"))
@@ -681,17 +673,6 @@ class AiIctService:
         elif premium_discount >= 0.30:
             add("bearish", 0.03, "Deep premium pricing")
 
-        # Options momentum
-        call_candidate = _dict(options_context.get("call_candidate"))
-        put_candidate = _dict(options_context.get("put_candidate"))
-        bullish_momentum = _as_float(options_context.get("bullish_momentum_score"), 0.0)
-        bearish_momentum = _as_float(options_context.get("bearish_momentum_score"), 0.0)
-        minimum_momentum = _as_float(options_context.get("minimum_momentum_score"), 0.40)
-        if call_candidate.get("qualified") and bullish_momentum >= minimum_momentum:
-            add("bullish", min(_as_float(call_candidate.get("score"), 0.0) * 0.08, 0.08), f"CALL qualified momentum {bullish_momentum:.0%}")
-        if put_candidate.get("qualified") and bearish_momentum >= minimum_momentum:
-            add("bearish", min(_as_float(put_candidate.get("score"), 0.0) * 0.08, 0.08), f"PUT qualified momentum {bearish_momentum:.0%}")
-
         # ── Conflict detection: penalize when subsystems disagree ──
         direction = "bullish" if scorecard["bullish"] > scorecard["bearish"] else "bearish" if scorecard["bearish"] > scorecard["bullish"] else "neutral"
         opposite = "bearish" if direction == "bullish" else "bullish" if direction == "bearish" else ""
@@ -736,14 +717,9 @@ class AiIctService:
             blockers.append("Combined confluence below execution threshold")
         if separation < 0.20:
             blockers.append("Bullish and bearish evidence too close (no clear edge)")
-        phase_block = _phase_block_reason(payload, direction)
-        if phase_block:
-            blockers.append(phase_block)
-        options_block = _options_block_reason(payload, direction)
-        if options_block:
-            blockers.append(options_block)
-
-        execution_block = phase_block or options_block
+        execution_block = _phase_block_reason(payload, direction)
+        if execution_block:
+            blockers.append(execution_block)
         if execution_block:
             direction = "neutral"
             score = min(score, 0.45)
@@ -775,11 +751,9 @@ class AiIctService:
         score = _clamp(score, 0.0, 0.92)
         grade, readiness = _grade(score)
         confidence = min(0.92, score * 0.94)
-        selected_option = _option_for_direction(payload, direction)
 
         if grade == "NO_TRADE":
             readiness = "avoid"
-            selected_option = None
             price_plan = {
                 "entry": None,
                 "stop_loss": None,
@@ -802,8 +776,6 @@ class AiIctService:
             f"Live volume pulse {volume_pulse:.2f}x",
             f"Phase {regime_phase or 'unknown'}",
             f"BTC patterns: {len(btc_patterns.get('patterns',[])) if btc_patterns else 0} patterns, signal {btc_patterns.get('pattern_signal','neutral') if btc_patterns else 'neutral'}",
-            f"Options momentum {_directional_momentum(payload, direction):.0%}",
-            *(_option_calculations(selected_option) if selected_option else []),
             *price_plan["calculations"],
         ]
 
@@ -838,9 +810,6 @@ class AiIctService:
             invalidation=price_plan["invalidation"],
             primary_signal_id=price_plan["primary_signal_id"],
             summary=summary,
-            option_contract=selected_option,
-            momentum_score=_directional_momentum(payload, direction),
-            options_score=_as_float(selected_option.get("score"), None) if selected_option else None,
             confirmations=confirmations[:7],
             blockers=blockers[:6],
             calculations=calculations,
@@ -865,7 +834,6 @@ def _compact_context(payload: dict[str, Any], sentiment: SentimentSnapshot, fall
         "metrics": payload.get("metrics"),
         "projection": payload.get("projection"),
         "regime": payload.get("regime"),
-        "options_context": payload.get("options_context"),
         "latest_signals": payload.get("signals", [])[-8:],
         "btc_patterns": payload.get("btc_patterns"),
         "psychology": {
@@ -1141,56 +1109,8 @@ def _phase_block_reason(payload: dict[str, Any], direction: str) -> str | None:
     if phase == "distribution" and direction == "bullish" and confidence >= 0.55:
         return "Distribution phase blocks longs until bullish reclaim confirms"
     if phase in {"consolidation", "range_bound"}:
-        if _option_for_direction(payload, direction):
-            return None
         return f"Market phase is {phase}; wait for statistical breakout confirmation"
     return None
-
-
-def _options_block_reason(payload: dict[str, Any], direction: str) -> str | None:
-    if direction not in {"bullish", "bearish"}:
-        return None
-
-    options_context = _dict(payload.get("options_context"))
-    if not options_context:
-        return None
-
-    candidate = _option_for_direction(payload, direction)
-    if not candidate:
-        return "No Delta option contract available for final direction"
-
-    return None
-
-
-def _option_for_direction(payload: dict[str, Any], direction: str) -> dict[str, Any] | None:
-    options_context = _dict(payload.get("options_context"))
-    key = "call_candidate" if direction == "bullish" else "put_candidate" if direction == "bearish" else ""
-    candidate = _dict(options_context.get(key))
-    return candidate or None
-
-
-def _directional_momentum(payload: dict[str, Any], direction: str) -> float:
-    options_context = _dict(payload.get("options_context"))
-    if direction == "bullish":
-        return _as_float(options_context.get("bullish_momentum_score"), 0.0)
-    if direction == "bearish":
-        return _as_float(options_context.get("bearish_momentum_score"), 0.0)
-    return _as_float(options_context.get("momentum_score"), 0.0)
-
-
-def _option_calculations(option_contract: dict[str, Any]) -> list[str]:
-    if not option_contract:
-        return []
-    delta = _as_float(option_contract.get("delta"), 0.0)
-    gamma = _as_float(option_contract.get("gamma"), 0.0)
-    spread_pct = _as_float(option_contract.get("spread_pct"), 0.0) * 100
-    score = _as_float(option_contract.get("score"), 0.0)
-    return [
-        f"Option {option_contract.get('symbol')}",
-        f"Delta {delta:.2f} Gamma {gamma:.6f}",
-        f"Spread {spread_pct:.1f}%",
-        f"Greeks score {score:.0%}",
-    ]
 
 
 def _prepend_unique(items: list[str], first: str) -> list[str]:

@@ -60,8 +60,8 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'options' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp'
-const PRIMARY_PANEL_VIEWS: readonly PanelView[] = ['signals', 'scalp', 'options', 'risk', 'trades', 'backtest', 'alerts']
+type PanelView = 'signals' | 'patterns' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp'
+const PRIMARY_PANEL_VIEWS: readonly PanelView[] = ['signals', 'scalp', 'risk', 'trades', 'backtest', 'alerts']
 
 const SESSION_COLORS: Record<string, string> = {
   asian: '#8ab4f8',
@@ -92,7 +92,6 @@ function App() {
   const aiIct = useChartStore((state) => state.aiIct)
   const psychology = useChartStore((state) => state.psychology)
   const readability = useChartStore((state) => state.readability)
-  const optionsContext = useChartStore((state) => state.optionsContext)
   const btcPatterns = useChartStore((state) => state.btcPatterns)
   const availableTimeframes = useChartStore((state) => state.availableTimeframes)
   const selectedTimeframe = useChartStore((state) => state.selectedTimeframe)
@@ -127,21 +126,11 @@ function App() {
   const scalpBlockers = scalpContext?.trade_blocked_reasons ?? []
 
   const scalpAction = primaryScalpSignal
-    ? primaryScalpSignal.signal_type.includes('LONG') && primaryScalpSignal.signal_type.includes('CALL')
-      ? 'LONG + CALL'
-      : primaryScalpSignal.signal_type.includes('SHORT') && primaryScalpSignal.signal_type.includes('PUT')
-        ? 'SHORT + PUT'
-        : primaryScalpSignal.signal_type.includes('LONG')
-          ? 'LONG'
-          : primaryScalpSignal.signal_type.includes('SHORT')
-            ? 'SHORT'
-            : primaryScalpSignal.signal_type.includes('CALL') && !primaryScalpSignal.signal_type.includes('SELL')
-          ? 'BUY CALL'
-          : primaryScalpSignal.signal_type.includes('PUT') && !primaryScalpSignal.signal_type.includes('SELL')
-            ? 'BUY PUT'
-            : primaryScalpSignal.signal_type.includes('SELL')
-              ? 'SELL SPREAD'
-              : 'WAIT'
+    ? primaryScalpSignal.signal_type.includes('LONG')
+      ? 'LONG'
+      : primaryScalpSignal.signal_type.includes('SHORT')
+        ? 'SHORT'
+        : 'WAIT'
     : scalpBlockers.length > 0
       ? 'BLOCKED'
       : 'WAIT'
@@ -154,10 +143,6 @@ function App() {
     ? primaryScalpSignal.confidence === 'HIGH' ? 'SNIPER' : 'QUALIFIED'
     : scalpBlockers.length > 0 ? 'FILTERED' : '--'
 
-  const scalpConfidence = primaryScalpSignal
-    ? primaryScalpSignal.confidence === 'HIGH' ? '80%' : '65%'
-    : '--'
-
   const finalAction = scalpAction
   const signalSummary = primaryScalpSignal
     ? primaryScalpSignal.reason
@@ -165,29 +150,18 @@ function App() {
       ? `Trading blocked: ${scalpBlockers.join('; ')}`
       : aiIct?.summary ?? 'NEXUS scalping engine analyzing order flow, VWAP, funding, OI, and liquidity for sniper entry.'
 
-  const finalSideClass = finalAction === 'LONG' || finalAction === 'BUY CALL' || finalAction === 'LONG + CALL'
+  const finalSideClass = finalAction === 'LONG'
     ? 'bullish'
-    : finalAction === 'SHORT' || finalAction === 'BUY PUT' || finalAction === 'SHORT + PUT'
+    : finalAction === 'SHORT'
       ? 'bearish'
       : 'neutral'
 
-  const confidenceText = scalpConfidence
-  const optionContract = aiIct?.option_contract
-    ?? (primaryScalpSignal?.signal_type.includes('PUT') ? optionsContext?.put_candidate : optionsContext?.call_candidate)
-    ?? null
   const priceRsiText = scalpContext?.rsi_3 != null
     ? `RSI(3): ${scalpContext.rsi_3.toFixed(1)}`
-    : aiIct?.momentum_score != null
-      ? `${(aiIct.momentum_score * 100).toFixed(0)}%`
-      : '--'
-  const optionsMomentumText = optionsContext
-    ? `Options: ${(optionsContext.momentum_score * 100).toFixed(0)}% / ${(optionsContext.minimum_momentum_score * 100).toFixed(0)}%`
-    : 'Options: --'
-  const optionExecutionStatus = primaryScalpSignal
+    : '--'
+  const scalpSignalStatus = primaryScalpSignal
     ? `${primaryScalpSignal.signal_type} | RR 1:${primaryScalpSignal.risk_reward.toFixed(2)}`
-    : optionContract?.qualified
-      ? 'qualified'
-      : 'watchlist'
+    : '--'
   const scalpRiskStatus = scalpRisk
     ? `Risk ${scalpRisk.total_open}/${scalpRisk.max_positions} | loss ${scalpRisk.daily_loss_pct.toFixed(2)}%/${scalpRisk.max_daily_loss_pct.toFixed(2)}%`
     : 'Risk --'
@@ -307,8 +281,7 @@ function App() {
         <Metric icon={<Activity size={16} />} label="Feed" value={(feedStatus ?? 'unknown').replaceAll('_', ' ')} />
         <Metric icon={<Target size={16} />} label="Signal" value={finalAction} />
         <Metric icon={<Gauge size={16} />} label="Price RSI" value={priceRsiText} />
-        <Metric icon={<BrainCircuit size={16} />} label="Options Flow" value={optionsMomentumText} />
-        <Metric icon={<BrainCircuit size={16} />} label="Option" value={optionContract?.symbol ?? 'WAIT'} />
+        <Metric icon={<BrainCircuit size={16} />} label="Signal" value={scalpSignalStatus} />
         {ctx && (
           <Metric
             icon={patternSignal === 'bullish' ? <TrendingUp size={16} /> : patternSignal === 'bearish' ? <TrendingDown size={16} /> : <Orbit size={16} />}
@@ -358,13 +331,13 @@ function App() {
             </div>
             <div className="cg-labels">
               <span>Confidence</span>
-              <span>{confidenceText}</span>
+              <span>{primaryScalpSignal ? (primaryScalpSignal.confidence === 'HIGH' ? '80%' : '65%') : '--'}</span>
             </div>
           </div>
           <p className="hero-summary">{signalSummary}</p>
           <div className="hero-meta">
             <span>Model: UNIFIED-SCALP-V2</span>
-            <span>{optionExecutionStatus}</span>
+            <span>{scalpSignalStatus}</span>
             <span>{scalpRiskStatus}</span>
             {primaryScalpSignal && (
               <>
@@ -377,7 +350,6 @@ function App() {
               </>
             )}
             <span>{priceRsiText}</span>
-            <span>{optionsMomentumText}</span>
           </div>
         </div>
       </section>
@@ -410,13 +382,6 @@ function App() {
                     <Layers size={11} />
                     Pats
                     {patterns.length > 0 && <span className="badge-count">{patterns.length}</span>}
-                  </>
-                )}
-                {view === 'options' && (
-                  <>
-                    <BrainCircuit size={11} />
-                    Opts
-                    {optionContract && <span className="badge-dot" />}
                   </>
                 )}
                 {view === 'depth' && (
@@ -984,73 +949,6 @@ function App() {
                   <p className="empty-state">No active patterns detected. Waiting for sufficient candle data.</p>
                 </section>
               )}
-            </div>
-          )}
-
-          {/* ─── OPTIONS TAB ────────────────────────── */}
-          {panelView === 'options' && (
-            <div className="panel-content">
-              <section>
-                <h2>Option Contracts</h2>
-                <div className="option-grid">
-                  <div className="option-card call">
-                    <div className="option-head">
-                      <strong>CALL</strong>
-                      <span className="option-score">Score: {optionContract?.score != null ? (optionContract.score * 100).toFixed(0) : '--'}%</span>
-                    </div>
-                    {optionContract ? (
-                      <>
-                        <div className="option-detail"><span className="od-label">Contract</span><span className="od-value">{optionContract.symbol}</span></div>
-                        <div className="option-detail"><span className="od-label">Delta / Gamma</span><span className="od-value">{optionContract.delta?.toFixed(2)} / {optionContract.gamma?.toFixed(6)}</span></div>
-                        <div className="option-detail"><span className="od-label">Strike / Spot</span><span className="od-value">${formatPrice(optionContract.strike_price)} / ${formatPrice(optionContract.spot_price)}</span></div>
-                        <div className="option-detail"><span className="od-label">Mid / Spread</span><span className="od-value">${formatPrice(optionContract.mid_price)} / {optionContract.spread_pct != null ? (optionContract.spread_pct * 100).toFixed(1) : '--'}%</span></div>
-                        <div className="option-detail"><span className="od-label">Volume / OI</span><span className="od-value">{formatPrice(optionContract.volume)} / {formatPrice(optionContract.open_interest)}</span></div>
-                      </>
-                    ) : (
-                      <p className="empty-state">No qualified CALL contract</p>
-                    )}
-                  </div>
-
-                  <div className="option-card put">
-                    <div className="option-head">
-                      <strong>PUT</strong>
-                      <span className="option-score">Score: {optionsContext?.put_candidate?.score != null ? (optionsContext.put_candidate.score * 100).toFixed(0) : '--'}%</span>
-                    </div>
-                    {optionsContext?.put_candidate ? (
-                      <>
-                        <div className="option-detail"><span className="od-label">Contract</span><span className="od-value">{optionsContext.put_candidate.symbol}</span></div>
-                        <div className="option-detail"><span className="od-label">Delta / Gamma</span><span className="od-value">{optionsContext.put_candidate.delta?.toFixed(2)} / {optionsContext.put_candidate.gamma?.toFixed(6)}</span></div>
-                        <div className="option-detail"><span className="od-label">Strike / Spot</span><span className="od-value">${formatPrice(optionsContext.put_candidate.strike_price)} / ${formatPrice(optionsContext.put_candidate.spot_price)}</span></div>
-                        <div className="option-detail"><span className="od-label">Mid / Spread</span><span className="od-value">${formatPrice(optionsContext.put_candidate.mid_price)} / {optionsContext.put_candidate.spread_pct != null ? (optionsContext.put_candidate.spread_pct * 100).toFixed(1) : '--'}%</span></div>
-                      </>
-                    ) : (
-                      <p className="empty-state">No qualified PUT contract</p>
-                    )}
-                  </div>
-                </div>
-
-                {aiIct?.blockers && aiIct.blockers.length > 0 && (
-                  <div className="blockers-section">
-                    <h3><AlertTriangle size={11} /> Blockers</h3>
-                    <div className="chip-list">
-                      {aiIct.blockers.map((b, i) => (
-                        <span key={i} className="chip blocker">{b}</span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {aiIct?.confirmations && aiIct.confirmations.length > 0 && (
-                  <div className="confirmations-section">
-                    <h3>Confirmations</h3>
-                    <div className="chip-list">
-                      {aiIct.confirmations.map((c, i) => (
-                        <span key={i} className="chip confirmation">{c}</span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </section>
             </div>
           )}
 

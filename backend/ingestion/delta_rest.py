@@ -52,27 +52,79 @@ async def fetch_historical_candles(
     return sorted(candles, key=lambda candle: candle.timestamp)[-limit:]
 
 
-async def fetch_option_tickers(
+async def fetch_futures_funding(
     base_url: str,
-    underlying_asset: str = "BTC",
-) -> list[dict]:
-    url = f"{base_url.rstrip('/')}/v2/tickers"
+    product_id: int = 372,
+) -> dict:
+    url = f"{base_url.rstrip('/')}/v2/ticker"
     headers = {
         "Accept": "application/json",
         "User-Agent": "NEXUS/1.0",
     }
-    params = {
-        "contract_types": "call_options,put_options",
-        "underlying_asset_symbols": underlying_asset,
-    }
+    params = {"product_id": product_id}
 
-    async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
+    async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
         response = await client.get(url, params=params)
         response.raise_for_status()
         body = response.json()
 
     if not body.get("success", True):
-        raise RuntimeError(f"Delta options ticker request failed: {body}")
+        raise RuntimeError(f"Delta ticker request failed: {body}")
+
+    result = body.get("result", {})
+    return {
+        "funding_rate": float(result.get("funding_rate", 0)),
+        "mark_price": float(result.get("mark_price", 0)),
+        "spot_price": float(result.get("spot_price", 0)),
+        "volume_24h": float(result.get("volume_24h", 0)),
+        "next_funding_timestamp": int(result.get("next_funding_timestamp", 0) or 0),
+    }
+
+
+async def fetch_futures_oi(
+    base_url: str,
+    product_id: int = 372,
+) -> dict:
+    url = f"{base_url.rstrip('/')}/v2/products/{product_id}/open_interest"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "NEXUS/1.0",
+    }
+
+    async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        body = response.json()
+
+    if not body.get("success", True):
+        raise RuntimeError(f"Delta OI request failed: {body}")
+
+    result = body.get("result", {})
+    return {
+        "open_interest": float(result.get("open_interest", 0)),
+        "change_pct": float(result.get("change_pct", 0)),
+    }
+
+
+async def fetch_liquidations(
+    base_url: str,
+    product_id: int = 372,
+    limit: int = 50,
+) -> list[dict]:
+    url = f"{base_url.rstrip('/')}/v2/liquidations"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "NEXUS/1.0",
+    }
+    params = {"product_id": product_id, "limit": limit}
+
+    async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+        response = await client.get(url, params=params)
+        response.raise_for_status()
+        body = response.json()
+
+    if not body.get("success", True):
+        raise RuntimeError(f"Delta liquidations request failed: {body}")
 
     result = body.get("result", [])
     return result if isinstance(result, list) else []

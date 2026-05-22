@@ -237,72 +237,6 @@ const MessageSchema = z.union([
       bias: z.enum(['bullish', 'bearish', 'neutral']),
       reason: z.string(),
     }).nullable().optional(),
-    options_context: z.object({
-      timestamp: z.number(),
-      underlying: z.string(),
-      momentum_score: z.number(),
-      bullish_momentum_score: z.number(),
-      bearish_momentum_score: z.number(),
-      minimum_momentum_score: z.number(),
-      momentum_state: z.enum(['high', 'low']),
-      call_candidate: z.object({
-        symbol: z.string(),
-        product_id: z.number().nullable().optional(),
-        contract_type: z.string(),
-        side: z.enum(['call', 'put']),
-        strike_price: z.number(),
-        expiry: z.string().nullable().optional(),
-        expiry_timestamp: z.number().nullable().optional(),
-        spot_price: z.number().nullable().optional(),
-        mark_price: z.number().nullable().optional(),
-        best_bid: z.number().nullable().optional(),
-        best_ask: z.number().nullable().optional(),
-        mid_price: z.number().nullable().optional(),
-        spread_pct: z.number().nullable().optional(),
-        bid_iv: z.number().nullable().optional(),
-        ask_iv: z.number().nullable().optional(),
-        volume: z.number().nullable().optional(),
-        open_interest: z.number().nullable().optional(),
-        delta: z.number().nullable().optional(),
-        gamma: z.number().nullable().optional(),
-        theta: z.number().nullable().optional(),
-        vega: z.number().nullable().optional(),
-        rho: z.number().nullable().optional(),
-        score: z.number(),
-        qualified: z.boolean(),
-        reason: z.string(),
-      }).nullable().optional(),
-      put_candidate: z.object({
-        symbol: z.string(),
-        product_id: z.number().nullable().optional(),
-        contract_type: z.string(),
-        side: z.enum(['call', 'put']),
-        strike_price: z.number(),
-        expiry: z.string().nullable().optional(),
-        expiry_timestamp: z.number().nullable().optional(),
-        spot_price: z.number().nullable().optional(),
-        mark_price: z.number().nullable().optional(),
-        best_bid: z.number().nullable().optional(),
-        best_ask: z.number().nullable().optional(),
-        mid_price: z.number().nullable().optional(),
-        spread_pct: z.number().nullable().optional(),
-        bid_iv: z.number().nullable().optional(),
-        ask_iv: z.number().nullable().optional(),
-        volume: z.number().nullable().optional(),
-        open_interest: z.number().nullable().optional(),
-        delta: z.number().nullable().optional(),
-        gamma: z.number().nullable().optional(),
-        theta: z.number().nullable().optional(),
-        vega: z.number().nullable().optional(),
-        rho: z.number().nullable().optional(),
-        score: z.number(),
-        qualified: z.boolean(),
-        reason: z.string(),
-      }).nullable().optional(),
-      blockers: z.array(z.string()),
-      source_count: z.number(),
-      error: z.string().nullable().optional(),
-    }).nullable().optional(),
     sentiment: z.object({
       label: z.enum(['loading', 'bullish', 'bearish', 'neutral', 'unavailable']),
       score: z.number(),
@@ -340,9 +274,6 @@ const MessageSchema = z.union([
       invalidation: z.number().nullable().optional(),
       primary_signal_id: z.string().nullable().optional(),
       summary: z.string(),
-      option_contract: z.any().optional(), // Complex, skip for now
-      momentum_score: z.number().nullable().optional(),
-      options_score: z.number().nullable().optional(),
       confirmations: z.array(z.string()),
       blockers: z.array(z.string()),
       calculations: z.array(z.string()),
@@ -377,13 +308,12 @@ const MessageSchema = z.union([
   z.object({ update_type: z.literal('sentiment'), sentiment: z.any() }), // Simplified
   z.object({ update_type: z.literal('ai_ict'), ai_ict: z.any() }), // Simplified
   z.object({ update_type: z.literal('quote'), quote: z.any() }), // Simplified
-  z.object({ update_type: z.literal('options_context'), options_context: z.any() }), // Simplified
 ])
 
 export function parseMarketMessage(value: unknown): MarketMessage | null {
   // Silently skip update_type values not declared in the schema (e.g. "alert")
   const maybe = value as Record<string, unknown> | null
-  if (maybe?.update_type === 'alert') return null
+  if (maybe?.update_type === 'alert' || maybe?.update_type === 'futures_context') return null
   const result = MessageSchema.safeParse(value)
   if (result.success) {
     return result.data as MarketMessage

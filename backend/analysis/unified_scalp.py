@@ -1,24 +1,24 @@
 """
-NEXUS Unified Scalping Engine v2.0
+NEXUS Unified Scalping Engine v3.0 — Futures Only
 
-Single-signal scalping engine that combines ALL data sources into one
-confluence-weighted scalping signal for BTC/USDT perpetual futures.
+Single-signal scalping engine for BTCUSD perpetual futures on Delta Exchange.
+Combines ALL data sources into one confluence-weighted scalping signal.
 
 Data sources fused:
   1. Order Flow: Delta, CVD, absorption, footprint imbalance
   2. VWAP: Price deviation, compression state, band position
-  3. Funding Rate: Current rate, contrarian bias, extreme detection
+  3. Funding Rate: Current rate, annualized, contrarian bias, extreme detection
   4. Open Interest: Change %, trend, momentum confirmation
   5. Liquidation Levels: Cluster proximity, sweep targets
   6. Liquidity Sweeps: Reclaim status, entry triggers
   7. Volume Profile: POC, VAH, VAL positioning
-  8. Options: IV regime, gamma exposure
-  9. ICT Patterns: FVG proximity, order blocks, market structure
-  10. Market Regime: Phase, bias, volatility state
-  11. RSI(3): Exhaustion reads on 1m/3m/5m
-  12. Killzone: Session timing for high-probability windows
+  8. ICT Patterns: FVG proximity, order blocks, market structure
+  9. Market Regime: Phase, bias, volatility state
+  10. RSI(3): Exhaustion reads on 1m/3m/5m
+  11. Killzone: Session timing for high-probability windows
+  12. Wick Rejection: Long-wick reversal detection (price rejects long wick side)
 
-Output: EXACTLY ONE scalping signal or NO_TRADE.
+Output: EXACTLY ONE futures scalping signal or NO_TRADE.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
+from backend.analysis.wick_rejection import analyze_wick_rejection
 from backend.config import settings
 from backend.models.types import (
     Candle,
@@ -38,24 +39,22 @@ from backend.models.types import (
     MarketMetrics,
     MarketQuote,
     MarketRegime,
-    OptionContract,
-    OptionsContext,
     OrderBlock,
     ScalpContext,
     ScalpFunding,
+    ScalpFundingRate,
     ScalpLiquidationLevel,
     ScalpOpenInterest,
-    ScalpOptionsGreeks,
+    ScalpWickRejection,
     ScalpOrderFlow,
     ScalpSignal,
     ScalpVWAP,
     ScalpVolumeProfile,
     ScalpLiquiditySweep,
     Swing,
+    FuturesContext,
 )
 
-
-# ─── Micro-helpers ────────────────────────────────────────────────────────
 
 def _ema(values: list[float], period: int) -> float:
     if not values:
@@ -110,12 +109,10 @@ def _is_killzone(ts_ms: int) -> tuple[bool, str]:
     return False, "off_hours"
 
 
-# ─── Unified Scalping Engine ──────────────────────────────────────────────
-
 class UnifiedScalpEngine:
     """
-    Computes all 12 data sources and fuses them into a single
-    confluence-weighted scalping signal.
+    Computes all 11 data sources and fuses them into a single
+    confluence-weighted futures scalping signal.
     """
 
     def __init__(self) -> None:
@@ -125,14 +122,10 @@ class UnifiedScalpEngine:
         self._cur_funding: float = 0.0
         self._cur_oi: float = 0.0
         self._spot_vol_avg: float = 0.0
-        self._iv_hist: deque[float] = deque(maxlen=252)
-        self._cur_iv: float = 0.0
         self._liq_cache: list[dict] = []
         self._last_signal_ts: int = 0
-        self._signal_cooldown_ms: int = 5 * 60 * 1000  # 5 minutes between signals
-        self._use_candle_timestamp_for_cooldown: bool = False  # Set True for backtest
-
-    # ── Data ingestion ────────────────────────────────────────────────
+        self._signal_cooldown_ms: int = 5 * 60 * 1000
+        self._use_candle_timestamp_for_cooldown: bool = False
 
     def ingest_quote(self, q: MarketQuote) -> None:
         self._quotes.append(q)
@@ -145,17 +138,11 @@ class UnifiedScalpEngine:
         self._cur_oi = oi
         self._oi_hist.append((ts or int(time.time() * 1000), oi))
 
-    def ingest_iv(self, iv: float) -> None:
-        self._cur_iv = iv
-        self._iv_hist.append(iv)
-
     def ingest_spot_vol_avg(self, avg: float) -> None:
         self._spot_vol_avg = avg
 
     def ingest_liquidations(self, levels: list[dict]) -> None:
         self._liq_cache = levels
-
-    # ── Public entry point ────────────────────────────────────────────
 
     def compute(
         self,
@@ -166,7 +153,7 @@ class UnifiedScalpEngine:
         swings: list[Swing] | None = None,
         regime: MarketRegime | None = None,
         liquidity_events: list[LiquidityEvent] | None = None,
-        options_context: OptionsContext | dict[str, Any] | None = None,
+        futures_context: FuturesContext | dict[str, Any] | None = None,
     ) -> ScalpContext:
         now_ms = int(time.time() * 1000)
         if len(candles) < 20:
@@ -176,255 +163,184 @@ class UnifiedScalpEngine:
         closes = [c.close for c in ordered]
         price = closes[-1]
 
-        # Compute all 12 data sources
         order_flow = self._order_flow(ordered)
         funding = self._funding(now_ms)
-        oi = self._open_interest()
-        liq_levels = self._liquidation_levels(price)
+        funding_rate = self._funding_rate(now_ms, futures_context)
+        oi = self._open_interest(futures_context)
+        liq_levels = self._liquidation_levels(price, futures_context)
         vwap = self._vwap(ordered)
         vol_profile = self._volume_profile(ordered)
-        options_greeks = self._options_greeks(now_ms, options_context)
         sweeps = self._liquidity_sweeps(ordered)
+        wick = self._wick_rejection(ordered)
         rsi_3 = _rsi(closes[-20:], 3) if len(closes) >= 4 else 50.0
         kill_active, kill_session = _is_killzone(ordered[-1].timestamp)
 
-        blockers = self._filters(ordered, funding, options_greeks, options_context)
+        blockers = self._filters(ordered, funding, funding_rate, futures_context)
 
-        # If blocked, return context with blockers only
         if blockers:
-            return ScalpContext(
+            ctx = ScalpContext(
                 timestamp=now_ms,
                 order_flow=order_flow,
                 funding=funding,
+                funding_rate=funding_rate,
                 open_interest=oi,
                 liquidation_levels=liq_levels,
                 vwap=vwap,
                 volume_profile=vol_profile,
-                options_greeks=options_greeks,
                 liquidity_sweeps=sweeps,
+                wick_rejection=wick,
                 rsi_3=round(rsi_3, 2),
                 spot_volume_ok=all(b != "Spot volume below 30-day average" for b in blockers),
-                options_spread_ok=all("spread" not in b.lower() for b in blockers),
                 macro_event_block=any("macro" in b.lower() for b in blockers),
                 trade_blocked_reasons=blockers,
             )
+            ctx.futures_leverage = settings.futures_leverage
+            ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
+            return ctx
 
-        # Fuse ALL sources into confluence scores for LONG and SHORT
         long_score, long_reasons = self._confluence_long(
             price, order_flow, vwap, oi, funding, sweeps,
             vol_profile, rsi_3, kill_active, kill_session,
-            metrics, fvgs, order_blocks, regime, ordered, options_context,
+            metrics, fvgs, order_blocks, regime, ordered, futures_context, wick,
         )
         short_score, short_reasons = self._confluence_short(
             price, order_flow, vwap, oi, funding, sweeps,
             vol_profile, rsi_3, kill_active, kill_session,
-            metrics, fvgs, order_blocks, regime, ordered, options_context,
+            metrics, fvgs, order_blocks, regime, ordered, futures_context, wick,
         )
 
-        # Select the winning direction only after hard quality gates. The
-        # optimizer showed that loose confidence thresholds overtrade badly.
         atr = _atr(ordered, 14)
         signals: list[ScalpSignal] = []
         threshold = settings.scalp_min_confluence_score
 
-        # Adaptive threshold: if options/OI/funding data are missing,
-        # lower the threshold proportionally since max achievable score drops.
-        has_options = options_context is not None
-        has_oi = len(self._oi_hist) >= 2
+        has_oi = oi.current_oi > 0 and len(self._oi_hist) >= 2
         has_funding = self._cur_funding != 0.0
-        missing_sources = sum([not has_options, not has_oi, not has_funding])
+        missing_sources = sum([not has_oi, not has_funding])
         if missing_sources > 0:
-            # Each missing source reduces max score significantly.
-            # Normalize: scale threshold down proportionally.
-            max_possible = 1.0 - (missing_sources * 0.11)  # ~0.67 with 3 missing
+            max_possible = 1.0 - (missing_sources * 0.11)
             normalized_threshold = threshold * (max_possible / 1.0)
-            threshold = max(normalized_threshold, 0.35)  # Floor at 0.35
+            threshold = max(normalized_threshold, 0.35)
 
         winning_side = "long" if long_score >= short_score else "short"
         winning_score = long_score if winning_side == "long" else short_score
         losing_score = short_score if winning_side == "long" else long_score
 
-        # Regime-aware quality blockers — pass adaptive threshold
+        winning_reasons = long_reasons if winning_side == "long" else short_reasons
         quality_blockers = self._signal_quality_blockers(
-            ordered, winning_side, winning_score, losing_score, options_context, regime, threshold
+            ordered, winning_side, winning_score, losing_score, regime, threshold, winning_reasons
         )
 
         if quality_blockers:
-            return ScalpContext(
+            ctx = ScalpContext(
                 timestamp=now_ms,
                 order_flow=order_flow,
                 funding=funding,
+                funding_rate=funding_rate,
                 open_interest=oi,
                 liquidation_levels=liq_levels,
                 vwap=vwap,
                 volume_profile=vol_profile,
-                options_greeks=options_greeks,
                 liquidity_sweeps=sweeps,
+                wick_rejection=wick,
                 signals=[],
                 rsi_3=round(rsi_3, 2),
                 spot_volume_ok=True,
-                options_spread_ok=all("spread" not in b.lower() for b in quality_blockers),
                 macro_event_block=False,
                 trade_blocked_reasons=quality_blockers,
             )
+            ctx.futures_leverage = settings.futures_leverage
+            ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
+            return ctx
 
-        # HARD BLOCK: Never trade in consolidation or range_bound
-        # Analysis shows: consolidation = 65% loss rate, trending = 100% win rate
-        if regime and regime.phase in ("consolidation", "range_bound"):
-            return ScalpContext(
+        if regime and regime.phase == "consolidation":
+            ctx = ScalpContext(
                 timestamp=now_ms,
                 order_flow=order_flow,
                 funding=funding,
+                funding_rate=funding_rate,
                 open_interest=oi,
                 liquidation_levels=liq_levels,
                 vwap=vwap,
                 volume_profile=vol_profile,
-                options_greeks=options_greeks,
                 liquidity_sweeps=sweeps,
+                wick_rejection=wick,
                 signals=[],
                 rsi_3=round(rsi_3, 2),
                 spot_volume_ok=True,
-                options_spread_ok=True,
                 macro_event_block=False,
-                trade_blocked_reasons=[f"Blocked: {regime.phase} regime — only trade trending markets"],
+                trade_blocked_reasons=[f"Blocked: {regime.phase} regime only trade trending or defined range"],
             )
+            ctx.futures_leverage = settings.futures_leverage
+            ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
+            return ctx
 
-        # Signal candle confirmation - require strong close in signal direction
         last_candle = ordered[-2]
         candle_range = last_candle.high - last_candle.low
+        is_range_candle = regime is not None and regime.phase == "range_bound"
         if candle_range > 0:
             close_position = (last_candle.close - last_candle.low) / candle_range
-            if winning_side == "long" and close_position < 0.60:
-                return ScalpContext(
-                    timestamp=now_ms,
-                    order_flow=order_flow,
-                    funding=funding,
-                    open_interest=oi,
-                    liquidation_levels=liq_levels,
-                    vwap=vwap,
-                    volume_profile=vol_profile,
-                    options_greeks=options_greeks,
-                    liquidity_sweeps=sweeps,
-                    signals=[],
-                    rsi_3=round(rsi_3, 2),
-                    spot_volume_ok=True,
-                    options_spread_ok=True,
-                    macro_event_block=False,
-                    trade_blocked_reasons=["Weak bullish candle close"],
-                )
-            if winning_side == "short" and close_position > 0.40:
-                return ScalpContext(
-                    timestamp=now_ms,
-                    order_flow=order_flow,
-                    funding=funding,
-                    open_interest=oi,
-                    liquidation_levels=liq_levels,
-                    vwap=vwap,
-                    volume_profile=vol_profile,
-                    options_greeks=options_greeks,
-                    liquidity_sweeps=sweeps,
-                    signals=[],
-                    rsi_3=round(rsi_3, 2),
-                    spot_volume_ok=True,
-                    options_spread_ok=True,
-                    macro_event_block=False,
-                    trade_blocked_reasons=["Weak bearish candle close"],
-                )
+            if is_range_candle:
+                if winning_side == "long" and close_position >= 0.40:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: long needs discount close (<40%)"])
+                if winning_side == "short" and close_position <= 0.60:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: short needs premium close (>60%)"])
+            else:
+                if winning_side == "long" and close_position < 0.60:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bullish candle close"])
+                if winning_side == "short" and close_position > 0.40:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bearish candle close"])
 
-        # HARD BLOCK: Only trade in direction of regime bias
         if regime and regime.phase == "trending":
             if regime.bias == "bullish" and winning_side == "short":
-                return ScalpContext(
-                    timestamp=now_ms,
-                    order_flow=order_flow,
-                    funding=funding,
-                    open_interest=oi,
-                    liquidation_levels=liq_levels,
-                    vwap=vwap,
-                    volume_profile=vol_profile,
-                    options_greeks=options_greeks,
-                    liquidity_sweeps=sweeps,
-                    signals=[],
-                    rsi_3=round(rsi_3, 2),
-                    spot_volume_ok=True,
-                    options_spread_ok=True,
-                    macro_event_block=False,
-                    trade_blocked_reasons=["Blocked: short signal in bullish trend"],
-                )
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: short signal in bullish trend"])
             if regime.bias == "bearish" and winning_side == "long":
-                return ScalpContext(
-                    timestamp=now_ms,
-                    order_flow=order_flow,
-                    funding=funding,
-                    open_interest=oi,
-                    liquidation_levels=liq_levels,
-                    vwap=vwap,
-                    volume_profile=vol_profile,
-                    options_greeks=options_greeks,
-                    liquidity_sweeps=sweeps,
-                    signals=[],
-                    rsi_3=round(rsi_3, 2),
-                    spot_volume_ok=True,
-                    options_spread_ok=True,
-                    macro_event_block=False,
-                    trade_blocked_reasons=["Blocked: long signal in bearish trend"],
-                )
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: long signal in bearish trend"])
 
-        # Cooldown check — only apply AFTER we know a valid signal exists
-        # This prevents showing "cooldown active" when no signal would pass anyway
         cooldown_ts = ordered[-1].timestamp if self._use_candle_timestamp_for_cooldown else now_ms
         if cooldown_ts - self._last_signal_ts < self._signal_cooldown_ms:
             remaining = (self._signal_cooldown_ms - (cooldown_ts - self._last_signal_ts)) / 60000
-            return ScalpContext(
-                timestamp=now_ms,
-                order_flow=order_flow,
-                funding=funding,
-                open_interest=oi,
-                liquidation_levels=liq_levels,
-                vwap=vwap,
-                volume_profile=vol_profile,
-                options_greeks=options_greeks,
-                liquidity_sweeps=sweeps,
-                signals=[],
-                rsi_3=round(rsi_3, 2),
-                spot_volume_ok=True,
-                options_spread_ok=True,
-                macro_event_block=False,
-                trade_blocked_reasons=[f"Cooldown: {remaining:.1f}m until next signal allowed"],
-            )
+            return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, [f"Cooldown: {remaining:.1f}m until next signal"])
 
         if long_score >= threshold and long_score >= short_score:
-            option_contract = self._select_directional_option(options_context, "call")
-            signals.append(self._build_signal(
-                "LONG FUTURES + BUY CALL", price, atr, long_score, long_reasons, now_ms, option_contract,
-            ))
+            signals.append(self._build_signal("LONG BTCUSD", price, atr, long_score, long_reasons, now_ms, funding_rate))
             self._last_signal_ts = cooldown_ts
         elif short_score >= threshold and short_score > long_score:
-            option_contract = self._select_directional_option(options_context, "put")
-            signals.append(self._build_signal(
-                "SHORT FUTURES + BUY PUT", price, atr, short_score, short_reasons, now_ms, option_contract,
-            ))
+            signals.append(self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate))
             self._last_signal_ts = cooldown_ts
 
-        return ScalpContext(
+        ctx = ScalpContext(
             timestamp=now_ms,
             order_flow=order_flow,
             funding=funding,
+            funding_rate=funding_rate,
             open_interest=oi,
             liquidation_levels=liq_levels,
             vwap=vwap,
             volume_profile=vol_profile,
-            options_greeks=options_greeks,
             liquidity_sweeps=sweeps,
+            wick_rejection=wick,
             signals=signals,
             rsi_3=round(rsi_3, 2),
             spot_volume_ok=True,
-            options_spread_ok=True,
             macro_event_block=False,
             trade_blocked_reasons=[],
         )
+        ctx.futures_leverage = settings.futures_leverage
+        ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
+        return ctx
 
-    # ── 12 Data source computations ───────────────────────────────────
+    def _blocked_ctx(self, now_ms, of, fund, fr, oi, liq, vwap, vp, sweeps, rsi_3, reasons, wick=None):
+        ctx = ScalpContext(
+            timestamp=now_ms, order_flow=of, funding=fund, funding_rate=fr,
+            open_interest=oi, liquidation_levels=liq, vwap=vwap, volume_profile=vp,
+            liquidity_sweeps=sweeps, wick_rejection=wick, signals=[], rsi_3=round(rsi_3, 2),
+            spot_volume_ok=True, macro_event_block=False, trade_blocked_reasons=reasons,
+        )
+        ctx.futures_leverage = settings.futures_leverage
+        ctx.estimated_funding_cost_8h = round(fr.current_rate * 3 * 100, 4) if fr else 0.0
+        return ctx
+
+    # ── Data source computations ──
 
     def _order_flow(self, candles: list[Candle]) -> ScalpOrderFlow:
         deltas: list[float] = []
@@ -436,7 +352,6 @@ class UnifiedScalpEngine:
                 deltas.append(-candles[i].volume)
             else:
                 deltas.append(0.0)
-
         cvd = sum(deltas)
         recent = deltas[-10:] if len(deltas) >= 10 else deltas
         slope = (sum(recent[-3:]) - sum(recent[:3])) / max(len(recent), 1)
@@ -449,16 +364,11 @@ class UnifiedScalpEngine:
         last_delta = deltas[-1] if deltas else 0.0
         last_c = candles[-1]
         footprint = abs(last_delta) / last_c.volume if last_c.volume > 0 else 0.0
-
         return ScalpOrderFlow(
             timestamp=candles[-1].timestamp,
-            delta=round(last_delta, 4),
-            cvd=round(cvd, 4),
-            cvd_slope=round(slope, 4),
-            volume_delta_ratio=round(vol_delta_ratio, 4),
-            absorption_ratio=round(absorption, 4),
-            aggressive_buy_volume=round(buy_vol, 4),
-            aggressive_sell_volume=round(sell_vol, 4),
+            delta=round(last_delta, 4), cvd=round(cvd, 4), cvd_slope=round(slope, 4),
+            volume_delta_ratio=round(vol_delta_ratio, 4), absorption_ratio=round(absorption, 4),
+            aggressive_buy_volume=round(buy_vol, 4), aggressive_sell_volume=round(sell_vol, 4),
             footprint_imbalance=round(footprint, 4),
         )
 
@@ -470,15 +380,30 @@ class UnifiedScalpEngine:
             "bullish" if rate < -settings.scalp_funding_rate_extreme else "neutral"
         )
         return ScalpFunding(
-            timestamp=now_ms,
-            current_rate=round(rate, 6),
-            projected_8h=round(proj, 6),
+            timestamp=now_ms, current_rate=round(rate, 6), projected_8h=round(proj, 6),
+            annualized_rate=round(rate * 365 * 3, 4),
             next_reset_ms=self._next_funding_reset(now_ms),
-            is_extreme=extreme,
-            contrarian_bias=bias,
+            is_extreme=extreme, contrarian_bias=bias,
         )
 
-    def _open_interest(self) -> ScalpOpenInterest:
+    def _funding_rate(self, now_ms: int, fc: FuturesContext | dict | None = None) -> ScalpFundingRate:
+        rate = self._context_value(fc, "funding_rate", self._cur_funding)
+        annualized = rate * 365 * 3
+        apr = annualized * 100
+        predicted = rate * 3
+        reset = self._next_funding_reset(now_ms)
+        extreme = abs(rate) > 0.001
+        bias = "bullish" if rate < -0.0005 else ("bearish" if rate > 0.0005 else "neutral")
+        return ScalpFundingRate(
+            timestamp=now_ms, current_rate=round(rate, 6), annualized=round(annualized, 6),
+            funding_apr=round(apr, 4), predicted_8h=round(predicted, 6),
+            time_to_next=max(0, reset - now_ms), is_extreme=extreme, bias=bias,
+        )
+
+    def _open_interest(self, fc: FuturesContext | dict | None = None) -> ScalpOpenInterest:
+        oi_from_context = self._context_value(fc, "oi_value", 0.0)
+        if oi_from_context > 0:
+            self._cur_oi = oi_from_context
         if len(self._oi_hist) < 2:
             return ScalpOpenInterest(timestamp=int(time.time() * 1000))
         cur = self._cur_oi
@@ -493,43 +418,27 @@ class UnifiedScalpEngine:
             trend = "neutral"
         momentum = change_pct > 1.0 and trend == "increasing"
         return ScalpOpenInterest(
-            timestamp=int(time.time() * 1000),
-            current_oi=round(cur, 2),
-            oi_change_pct=round(change_pct, 4),
-            oi_delta=round(cur - prev, 2),
-            oi_trend=trend,
-            momentum_confirmation=momentum,
+            timestamp=int(time.time() * 1000), current_oi=round(cur, 2),
+            oi_change_pct=round(change_pct, 4), oi_delta=round(cur - prev, 2),
+            oi_trend=trend, momentum_confirmation=momentum,
         )
 
-    def _liquidation_levels(self, price: float) -> list[ScalpLiquidationLevel]:
-        if self._liq_cache:
+    def _liquidation_levels(self, price: float, fc: FuturesContext | dict | None = None) -> list[ScalpLiquidationLevel]:
+        clusters = self._context_value(fc, "liquidation_clusters", [])
+        if clusters:
             out: list[ScalpLiquidationLevel] = []
-            for e in self._liq_cache:
+            for e in clusters:
                 p = e.get("price", 0)
                 s = e.get("size", 0)
                 side = e.get("side", "long")
                 d = abs(p - price) / price * 100
-                out.append(ScalpLiquidationLevel(
-                    price=p, size=s, side=side,
-                    distance_pct=round(d, 3),
-                    cluster_strength=_clamp(s / 1_000_000, 0, 1),
-                ))
+                cs = e.get("strength", _clamp(s / 1_000_000, 0, 1))
+                out.append(ScalpLiquidationLevel(price=p, size=s, side=side, distance_pct=round(d, 3), cluster_strength=cs))
             return sorted(out, key=lambda x: x.distance_pct)[:10]
-
         out = []
         for pct in [0.5, 1.0, 1.5, 2.0, 3.0, 5.0]:
-            out.append(ScalpLiquidationLevel(
-                price=round(price * (1 - pct / 100), 2),
-                size=round(500_000 / pct, 0),
-                side="long", distance_pct=pct,
-                cluster_strength=round(1.0 - pct / 10, 3),
-            ))
-            out.append(ScalpLiquidationLevel(
-                price=round(price * (1 + pct / 100), 2),
-                size=round(500_000 / pct, 0),
-                side="short", distance_pct=pct,
-                cluster_strength=round(1.0 - pct / 10, 3),
-            ))
+            out.append(ScalpLiquidationLevel(price=round(price * (1 - pct / 100), 2), size=round(500_000 / pct, 0), side="long", distance_pct=pct, cluster_strength=round(1.0 - pct / 10, 3)))
+            out.append(ScalpLiquidationLevel(price=round(price * (1 + pct / 100), 2), size=round(500_000 / pct, 0), side="short", distance_pct=pct, cluster_strength=round(1.0 - pct / 10, 3)))
         return sorted(out, key=lambda x: x.distance_pct)[:10]
 
     def _vwap(self, candles: list[Candle]) -> ScalpVWAP:
@@ -547,14 +456,10 @@ class UnifiedScalpEngine:
         price = candles[-1].close
         dev = ((price - vwap) / vwap * 100) if vwap > 0 else 0
         return ScalpVWAP(
-            timestamp=candles[-1].timestamp,
-            vwap=round(vwap, 2),
-            upper_band_1sd=round(vwap + std, 2),
-            lower_band_1sd=round(vwap - std, 2),
-            upper_band_2sd=round(vwap + 2 * std, 2),
-            lower_band_2sd=round(vwap - 2 * std, 2),
-            price_deviation_pct=round(dev, 4),
-            is_compressed=abs(dev) < 0.15,
+            timestamp=candles[-1].timestamp, vwap=round(vwap, 2),
+            upper_band_1sd=round(vwap + std, 2), lower_band_1sd=round(vwap - std, 2),
+            upper_band_2sd=round(vwap + 2 * std, 2), lower_band_2sd=round(vwap - 2 * std, 2),
+            price_deviation_pct=round(dev, 4), is_compressed=abs(dev) < 0.15,
         )
 
     def _volume_profile(self, candles: list[Candle]) -> ScalpVolumeProfile:
@@ -585,42 +490,13 @@ class UnifiedScalpEngine:
                 val = lo + (i + 0.5) * bs
                 break
         return ScalpVolumeProfile(
-            timestamp=candles[-1].timestamp,
-            poc=round(poc, 2),
-            vah=round(vah, 2),
-            val=round(val, 2),
+            timestamp=candles[-1].timestamp, poc=round(poc, 2),
+            vah=round(vah, 2), val=round(val, 2),
             value_area_width_pct=round(((vah - val) / poc * 100) if poc > 0 else 0, 4),
         )
 
-    def _options_greeks(self, now_ms: int, options_context: OptionsContext | dict[str, Any] | None = None) -> ScalpOptionsGreeks:
-        best_contract = self._best_options_contract(options_context)
-        iv_values = [
-            value for value in (
-                self._contract_value(best_contract, "bid_iv"),
-                self._contract_value(best_contract, "ask_iv"),
-            )
-            if value is not None and value > 0
-        ]
-        if iv_values:
-            self.ingest_iv(sum(iv_values) / len(iv_values))
-
-        iv = self._cur_iv
-        ivr = self._iv_rank()
-        ivp = self._iv_percentile()
-        regime = "low" if ivr < 30 else ("high" if ivr > 70 else (
-            "no_trade" if 30 <= ivr <= 50 else "neutral"
-        ))
-        return ScalpOptionsGreeks(
-            timestamp=now_ms,
-            delta=round(abs(self._contract_value(best_contract, "delta") or 0.0), 4),
-            gamma=round(abs(self._contract_value(best_contract, "gamma") or 0.0), 6),
-            theta=round(self._contract_value(best_contract, "theta") or 0.0, 6),
-            vega=round(self._contract_value(best_contract, "vega") or 0.0, 6),
-            iv_rank=round(ivr, 2),
-            iv_percentile=round(ivp, 2),
-            iv_regime=regime,
-            theta_decay_per_hour=round(iv * 0.0001, 6),
-        )
+    def _wick_rejection(self, candles: list[Candle]) -> ScalpWickRejection:
+        return analyze_wick_rejection(candles)
 
     def _liquidity_sweeps(self, candles: list[Candle]) -> list[ScalpLiquiditySweep]:
         if len(candles) < 20:
@@ -633,35 +509,12 @@ class UnifiedScalpEngine:
         for lv in highs:
             if cur.high >= lv and cur.close < lv:
                 d = abs(cur.close - lv) / lv
-                sweeps.append(ScalpLiquiditySweep(
-                    timestamp=cur.timestamp, level=lv, side="short",
-                    sweep_type="resistance_sweep", reclaimed=True,
-                    strength=_clamp(1.0 - d * 100, 0, 1),
-                    entry_trigger=cur.close < lv * 0.999,
-                ))
+                sweeps.append(ScalpLiquiditySweep(timestamp=cur.timestamp, level=lv, side="short", sweep_type="resistance_sweep", reclaimed=True, strength=_clamp(1.0 - d * 100, 0, 1), entry_trigger=cur.close < lv * 0.999))
         for lv in lows:
             if cur.low <= lv and cur.close > lv:
                 d = abs(cur.close - lv) / lv
-                sweeps.append(ScalpLiquiditySweep(
-                    timestamp=cur.timestamp, level=lv, side="long",
-                    sweep_type="support_sweep", reclaimed=True,
-                    strength=_clamp(1.0 - d * 100, 0, 1),
-                    entry_trigger=cur.close > lv * 1.001,
-                ))
+                sweeps.append(ScalpLiquiditySweep(timestamp=cur.timestamp, level=lv, side="long", sweep_type="support_sweep", reclaimed=True, strength=_clamp(1.0 - d * 100, 0, 1), entry_trigger=cur.close > lv * 1.001))
         return sorted(sweeps, key=lambda s: s.strength, reverse=True)[:5]
-
-    def _iv_rank(self) -> float:
-        hist = list(self._iv_hist)
-        if len(hist) < 2:
-            return 0.0
-        lo, hi = min(hist), max(hist)
-        return (self._cur_iv - lo) / (hi - lo) * 100 if hi != lo else 50.0
-
-    def _iv_percentile(self) -> float:
-        hist = list(self._iv_hist)
-        if len(hist) < 2:
-            return 0.0
-        return sum(1 for v in hist if v <= self._cur_iv) / len(hist) * 100
 
     def _next_funding_reset(self, now_ms: int) -> int:
         from datetime import timedelta
@@ -673,54 +526,35 @@ class UnifiedScalpEngine:
         nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         return int(nxt.timestamp() * 1000)
 
-    # ── Trade filters ─────────────────────────────────────────────────
+    # ── Trade filters ──
 
-    def _filters(
-        self,
-        candles: list[Candle],
-        funding: ScalpFunding,
-        options: ScalpOptionsGreeks,
-        options_context: OptionsContext | dict[str, Any] | None,
-    ) -> list[str]:
+    def _filters(self, candles: list[Candle], funding: ScalpFunding, fr: ScalpFundingRate, fc: FuturesContext | dict | None = None) -> list[str]:
         blockers: list[str] = []
         if funding.is_extreme:
             blockers.append(f"Funding extreme: {funding.current_rate * 100:.3f}%")
-        if 30 <= options.iv_rank <= 50:
-            blockers.append(f"IVR {options.iv_rank:.0f} in no-edge zone")
-        source_count = self._context_value(options_context, "source_count", 0) or 0
-        if source_count > 0:
-            blockers.extend(self._options_blockers(options_context)[:3])
         if self._spot_vol_avg > 0:
             avg_vol = sum(c.volume for c in candles[-20:]) / 20
             if avg_vol < self._spot_vol_avg * settings.scalp_min_spot_volume_ratio:
                 blockers.append("Spot volume below 30-day average")
         return blockers
 
-    def _signal_quality_blockers(
-        self,
-        candles: list[Candle],
-        side: str,
-        winning_score: float,
-        losing_score: float,
-        options_context: OptionsContext | dict[str, Any] | None,
-        regime: MarketRegime | None = None,
-        adaptive_threshold: float | None = None,
-    ) -> list[str]:
+    def _signal_quality_blockers(self, candles: list[Candle], side: str, winning_score: float, losing_score: float, regime: MarketRegime | None = None, adaptive_threshold: float | None = None, winning_reasons: list[str] | None = None) -> list[str]:
         blockers: list[str] = []
         closes = [c.close for c in candles]
         price = closes[-1]
         threshold = adaptive_threshold if adaptive_threshold is not None else settings.scalp_min_confluence_score
         edge = winning_score - losing_score
 
-        # Regime-aware thresholds
+        if winning_reasons is not None and len(winning_reasons) < 3:
+            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 3+)")
+            return blockers[:6]
         is_trending = regime is not None and regime.phase == "trending"
-        is_range = regime is not None and regime.phase in ("range_bound", "consolidation")
-
-        # Relaxed edge requirement for range/consolidation regimes
-        if regime is not None and regime.phase == "consolidation":
+        is_consolidation = regime is not None and regime.phase == "consolidation"
+        is_range_bound = regime is not None and regime.phase == "range_bound"
+        if is_consolidation:
             min_edge = 0.05
-        elif is_range:
-            min_edge = 0.08
+        elif is_range_bound:
+            min_edge = 0.12
         else:
             min_edge = settings.scalp_min_directional_edge
         if edge < min_edge:
@@ -733,495 +567,354 @@ class UnifiedScalpEngine:
         trend_strength = abs(ema21 - ema100) / price if price > 0 else 0.0
 
         if is_trending:
-            # Trending regime: require full trend stack alignment
             if trend_strength < settings.scalp_min_trend_strength:
                 blockers.append(f"Trend strength {trend_strength:.4f} below minimum")
             if side == "long":
                 if not (price > ema21 and ema9 > ema21 > ema50):
                     blockers.append("Long trend stack not aligned")
-                # HARD FILTER: Only long when price is above EMA100
                 if price < ema100:
-                    blockers.append("Long blocked: price below EMA100 — bearish trend")
+                    blockers.append("Long blocked: price below EMA100")
             if side == "short":
                 if not (price < ema21 and ema9 < ema21 < ema50):
                     blockers.append("Short trend stack not aligned")
-                # HARD FILTER: Only short when price is below EMA100
                 if price > ema100:
-                    blockers.append("Short blocked: price above EMA100 — bullish trend")
+                    blockers.append("Short blocked: price above EMA100")
         else:
-            # Range/consolidation: relaxed checks — only require basic direction
             if trend_strength < 0.0003:
-                blockers.append(f"Trend strength {trend_strength:.4f} too flat for any trade")
-            # In consolidation, allow trades even near EMA50 — price oscillates
-            if regime is not None and regime.phase == "consolidation":
-                pass  # Skip EMA50 check in consolidation
-            else:
-                if side == "long" and price < ema50:
-                    blockers.append("Long: price below EMA50 even in range")
-                if side == "short" and price > ema50:
-                    blockers.append("Short: price above EMA50 even in range")
+                blockers.append(f"Trend strength {trend_strength:.4f} too flat")
+            if regime is not None and regime.phase == "range_bound":
+                if side == "long" and price > ema50:
+                    blockers.append("Range long: price above EMA50")
+                if side == "short" and price < ema50:
+                    blockers.append("Range short: price below EMA50")
 
         recent_volume = sum(c.volume for c in candles[-5:]) / min(len(candles), 5)
         base_window = candles[-50:-5] if len(candles) >= 55 else candles[:-5]
         base_volume = sum(c.volume for c in base_window) / len(base_window) if base_window else recent_volume
         volume_ratio = recent_volume / base_volume if base_volume > 0 else 1.0
-        # Regime-aware volume check: trending requires volume expansion
         if is_trending:
-            vol_threshold = 0.80  # Require at least 80% of average volume
-        elif regime is not None and regime.phase == "consolidation":
+            vol_threshold = 0.80
+        elif is_consolidation:
             vol_threshold = 0.40
         else:
             vol_threshold = 0.50
         if volume_ratio < vol_threshold:
             blockers.append(f"Volume impulse {volume_ratio:.2f} below {vol_threshold:.2f}")
 
-        # RSI momentum confirmation - require RSI moving in trade direction
         rsi_current = _rsi(closes[-10:], 10) if len(closes) >= 11 else 50.0
         rsi_prev = _rsi(closes[-20:-10], 10) if len(closes) >= 21 else 50.0
         rsi_momentum = rsi_current - rsi_prev
-        if side == "long" and rsi_momentum < -2:
-            blockers.append(f"RSI momentum negative ({rsi_momentum:.1f}) — bearish divergence")
-        if side == "short" and rsi_momentum > 2:
-            blockers.append(f"RSI momentum positive ({rsi_momentum:.1f}) — bullish divergence")
+        if is_range_bound:
+            if side == "long" and rsi_current > 60:
+                blockers.append(f"Range long: RSI {rsi_current:.0f} overbought")
+            if side == "short" and rsi_current < 40:
+                blockers.append(f"Range short: RSI {rsi_current:.0f} oversold")
+        else:
+            if side == "long" and rsi_momentum < -2:
+                blockers.append(f"RSI momentum negative ({rsi_momentum:.1f})")
+            if side == "short" and rsi_momentum > 2:
+                blockers.append(f"RSI momentum positive ({rsi_momentum:.1f})")
 
-        source_count = self._context_value(options_context, "source_count", 0) or 0
-        if settings.scalp_require_options_alignment and source_count > 0:
-            momentum_key = "bullish_momentum_score" if side == "long" else "bearish_momentum_score"
-            option_side = "call" if side == "long" else "put"
-            momentum = self._context_value(options_context, momentum_key, 0.0) or 0.0
-            contract = self._select_directional_option(options_context, option_side)
-            if momentum < settings.min_options_momentum_score:
-                blockers.append(f"BTC options momentum {momentum:.0%} below {settings.min_options_momentum_score:.0%}")
-            if not self._context_value(contract, "qualified", False):
-                blockers.append(f"No qualified BTC {option_side} contract")
         return blockers[:6]
 
-    # ── Confluence scoring ────────────────────────────────────────────
+    # ── Confluence scoring ──
 
-    def _confluence_long(
-        self,
-        price: float,
-        of: ScalpOrderFlow,
-        vwap: ScalpVWAP,
-        oi: ScalpOpenInterest,
-        funding: ScalpFunding,
-        sweeps: list[ScalpLiquiditySweep],
-        vp: ScalpVolumeProfile,
-        rsi_3: float,
-        kill_active: bool,
-        kill_session: str,
-        metrics: MarketMetrics | None,
-        fvgs: list[FVG] | None,
-        obs: list[OrderBlock] | None,
-        regime: MarketRegime | None,
-        candles: list[Candle],
-        options_context: OptionsContext | dict[str, Any] | None,
-    ) -> tuple[float, list[str]]:
+    def _confluence_long(self, price: float, of: ScalpOrderFlow, vwap: ScalpVWAP, oi: ScalpOpenInterest, funding: ScalpFunding, sweeps: list[ScalpLiquiditySweep], vp: ScalpVolumeProfile, rsi_3: float, kill_active: bool, kill_session: str, metrics: MarketMetrics | None, fvgs: list[FVG] | None, obs: list[OrderBlock] | None, regime: MarketRegime | None, candles: list[Candle], fc: FuturesContext | dict | None = None, wick: ScalpWickRejection | None = None) -> tuple[float, list[str]]:
         score = 0.0
         reasons: list[str] = []
 
-        # 1. Order Flow (weight: 0.25) — MOST IMPORTANT
+        # 1. Order Flow (weight: 0.25)
         if of.delta > 0:
-            score += 0.12
-            reasons.append("Delta positive")
+            score += 0.12; reasons.append("Delta positive")
         if of.cvd_slope > 0:
-            score += 0.08
-            reasons.append("CVD rising")
+            score += 0.08; reasons.append("CVD rising")
         if of.footprint_imbalance > 0.6:
-            score += 0.05
-            reasons.append("Footprint bullish imbalance")
+            score += 0.05; reasons.append("Footprint bullish")
 
-        # 2. VWAP (weight: 0.12) — Only directional factors
+        # 2. VWAP (weight: 0.12)
         if price > vwap.vwap:
-            score += 0.07
-            reasons.append("Above VWAP")
+            score += 0.07; reasons.append("Above VWAP")
         if price <= vwap.lower_band_1sd:
-            score += 0.05
-            reasons.append("Near lower VWAP band — bounce zone")
+            score += 0.05; reasons.append("Near lower VWAP band")
 
-        # 3. Open Interest (weight: 0.10)
+        # 3. Open Interest (weight: 0.12) — INCREASED FROM 0.10
         if oi.momentum_confirmation:
-            score += 0.06
-            reasons.append(f"OI spike +{oi.oi_change_pct:.1f}%")
+            score += 0.07; reasons.append(f"OI spike +{oi.oi_change_pct:.1f}%")
         if oi.oi_trend == "increasing":
-            score += 0.04
-            reasons.append("OI increasing")
+            score += 0.05; reasons.append("OI increasing")
 
-        # 4. Funding (weight: 0.08)
+        # 4. Funding Rate (weight: 0.10) — INCREASED FROM 0.08
         if funding.contrarian_bias == "bullish":
-            score += 0.08
-            reasons.append("Funding contrarian bullish")
+            score += 0.10; reasons.append("Funding contrarian bullish")
 
         # 5. Liquidity Sweeps (weight: 0.15)
         for s in sweeps:
             if s.side == "long" and s.entry_trigger and s.reclaimed:
-                score += 0.15
-                reasons.append(f"Sweep reclaimed ${s.level:.0f}")
+                score += 0.15; reasons.append(f"Sweep reclaimed ${s.level:.0f}")
                 break
             elif s.side == "long" and s.reclaimed:
-                score += 0.08
-                reasons.append(f"Sweep reclaimed ${s.level:.0f}")
+                score += 0.08; reasons.append(f"Sweep reclaimed ${s.level:.0f}")
                 break
 
         # 6. Volume Profile (weight: 0.07)
         if vp.poc > 0:
             dist_to_poc = abs(price - vp.poc) / vp.poc
             if dist_to_poc < 0.002:
-                score += 0.04
-                reasons.append("At POC")
+                score += 0.04; reasons.append("At POC")
             if price <= vp.val:
-                score += 0.03
-                reasons.append("Below VAL — discount zone")
+                score += 0.03; reasons.append("Below VAL — discount zone")
 
         # 7. RSI(3) exhaustion (weight: 0.07)
         if 25 <= rsi_3 <= 45:
-            score += 0.05
-            reasons.append(f"RSI(3) {rsi_3:.0f} recovery zone")
+            score += 0.05; reasons.append(f"RSI(3) {rsi_3:.0f} recovery zone")
         elif rsi_3 < 20:
-            score -= 0.05
-            reasons.append(f"RSI(3) {rsi_3:.0f} extreme — wait")
+            score -= 0.05; reasons.append(f"RSI(3) {rsi_3:.0f} extreme — wait")
         elif rsi_3 < 30:
-            score += 0.03
-            reasons.append(f"RSI(3) {rsi_3:.0f} oversold bounce")
+            score += 0.03; reasons.append(f"RSI(3) {rsi_3:.0f} oversold bounce")
 
         # 8. Killzone (weight: 0.05)
         if kill_active:
-            score += 0.05
-            reasons.append(f"Killzone: {kill_session}")
+            score += 0.05; reasons.append(f"Killzone: {kill_session}")
 
-        # 9. ICT FVG proximity (weight: 0.05) — TREND-FOLLOWING only
-        # In trending markets, FVGs are continuation zones, not reversals
+        # 9. ICT FVG proximity (weight: 0.05)
         if fvgs and regime:
             if regime.phase == "trending":
-                # Only score FVGs in trend direction (pullback entries)
                 if regime.bias == "bullish":
                     active = [f for f in fvgs if not f.is_filled and f.direction == "bullish"]
                     for f in active:
                         if abs(price - f.bottom) / price < 0.003:
-                            score += 0.05
-                            reasons.append("Pullback into bullish FVG (trend continuation)")
+                            score += 0.05; reasons.append("Pullback into bullish FVG")
                             break
                 elif regime.bias == "bearish":
                     active = [f for f in fvgs if not f.is_filled and f.direction == "bearish"]
                     for f in active:
                         if abs(price - f.top) / price < 0.003:
-                            score += 0.05
-                            reasons.append("Pullback into bearish FVG (trend continuation)")
+                            score += 0.05; reasons.append("Pullback into bearish FVG")
                             break
             else:
-                # In ranging markets, FVGs can be reversal zones
                 active = [f for f in fvgs if not f.is_filled and f.direction == "bullish"]
                 for f in active:
                     if abs(price - f.bottom) / price < 0.003:
-                        score += 0.03
-                        reasons.append("Near bullish FVG (range bounce)")
+                        score += 0.03; reasons.append("Near bullish FVG (range)")
                         break
 
-        # 10. Order Block proximity (weight: 0.05) — TREND-FOLLOWING only
+        # 10. Order Block proximity (weight: 0.05)
         if obs and regime:
             if regime.phase == "trending":
-                # Only score OBs in trend direction (pullback entries)
                 if regime.bias == "bullish":
                     active = [o for o in obs if not o.is_breaker and o.direction == "bullish"]
                     for o in active:
                         if abs(price - o.top) / price < 0.003:
-                            score += 0.05
-                            reasons.append("Pullback into bullish OB (trend continuation)")
+                            score += 0.05; reasons.append("Pullback into bullish OB")
                             break
                 elif regime.bias == "bearish":
                     active = [o for o in obs if not o.is_breaker and o.direction == "bearish"]
                     for o in active:
                         if abs(price - o.bottom) / price < 0.003:
-                            score += 0.05
-                            reasons.append("Pullback into bearish OB (trend continuation)")
+                            score += 0.05; reasons.append("Pullback into bearish OB")
                             break
             else:
-                # In ranging markets, OBs can be reversal zones
                 active = [o for o in obs if not o.is_breaker and o.direction == "bullish"]
                 for o in active:
                     if abs(price - o.top) / price < 0.003:
-                        score += 0.03
-                        reasons.append("Near bullish OB (range bounce)")
+                        score += 0.03; reasons.append("Near bullish OB (range)")
                         break
 
-        # 11. Regime filter (weight: 0.05)
+        # 11. Regime (weight: 0.05)
         if regime:
             if regime.phase == "trending" and regime.bias == "bullish":
-                score += 0.05
-                reasons.append("Trending bullish regime")
+                score += 0.05; reasons.append("Trending bullish regime")
             elif regime.phase == "accumulation":
-                score += 0.04
-                reasons.append("Accumulation regime")
+                score += 0.04; reasons.append("Accumulation regime")
             elif regime.phase == "range_bound" and price <= vp.val:
-                score += 0.03
-                reasons.append("Range bound — buying at value low")
+                score += 0.03; reasons.append("Range bound — buying value low")
 
         # 12. Market metrics trend (weight: 0.03)
         if metrics and metrics.trend_score > 0.15:
-            score += 0.03
-            reasons.append("Trend score bullish")
+            score += 0.03; reasons.append("Trend score bullish")
 
-        # 13. BTC options momentum and contract quality (weight: 0.16)
-        options_momentum = self._context_value(options_context, "bullish_momentum_score", 0.0) or 0.0
-        if options_momentum >= settings.min_options_momentum_score:
-            score += _clamp(options_momentum, 0.0, 1.0) * 0.11
-            reasons.append(f"BTC call momentum {options_momentum:.0%}")
-        call_contract = self._select_directional_option(options_context, "call")
-        if self._context_value(call_contract, "qualified", False):
-            score += 0.05
-            reasons.append("Qualified BTC call contract")
+        # 13. Futures funding bias (weight: 0.06) — REPLACED options momentum
+        fc_bias = self._context_value(fc, "funding_contrarian_bias", "neutral")
+        if fc_bias == "bullish":
+            score += 0.06; reasons.append("Futures funding bullish contrarian")
+
+        # 14. Futures OI momentum (weight: 0.04) — REPLACED options contract
+        fc_oi_mom = self._context_value(fc, "oi_momentum_confirmation", False)
+        if fc_oi_mom:
+            score += 0.04; reasons.append("OI confirms bullish momentum")
+
+        # 15. Wick Rejection (weight: 0.08)
+        # Long lower wick = price rejected at low → bullish move expected
+        if wick and wick.bullish_rejection_active:
+            wick_score = abs(wick.rejection_strength) * 0.08
+            score += wick_score
+            reasons.append(f"Long lower wick: {wick.description}")
 
         return _clamp(score, 0, 1), reasons
 
-    def _confluence_short(
-        self,
-        price: float,
-        of: ScalpOrderFlow,
-        vwap: ScalpVWAP,
-        oi: ScalpOpenInterest,
-        funding: ScalpFunding,
-        sweeps: list[ScalpLiquiditySweep],
-        vp: ScalpVolumeProfile,
-        rsi_3: float,
-        kill_active: bool,
-        kill_session: str,
-        metrics: MarketMetrics | None,
-        fvgs: list[FVG] | None,
-        obs: list[OrderBlock] | None,
-        regime: MarketRegime | None,
-        candles: list[Candle],
-        options_context: OptionsContext | dict[str, Any] | None,
-    ) -> tuple[float, list[str]]:
+    def _confluence_short(self, price: float, of: ScalpOrderFlow, vwap: ScalpVWAP, oi: ScalpOpenInterest, funding: ScalpFunding, sweeps: list[ScalpLiquiditySweep], vp: ScalpVolumeProfile, rsi_3: float, kill_active: bool, kill_session: str, metrics: MarketMetrics | None, fvgs: list[FVG] | None, obs: list[OrderBlock] | None, regime: MarketRegime | None, candles: list[Candle], fc: FuturesContext | dict | None = None, wick: ScalpWickRejection | None = None) -> tuple[float, list[str]]:
         score = 0.0
         reasons: list[str] = []
 
-        # 1. Order Flow (weight: 0.25) — MOST IMPORTANT
+        # 1. Order Flow (weight: 0.25)
         if of.delta < 0:
-            score += 0.12
-            reasons.append("Delta negative")
+            score += 0.12; reasons.append("Delta negative")
         if of.cvd_slope < 0:
-            score += 0.08
-            reasons.append("CVD falling")
+            score += 0.08; reasons.append("CVD falling")
         if of.footprint_imbalance > 0.6:
-            score += 0.05
-            reasons.append("Footprint bearish imbalance")
+            score += 0.05; reasons.append("Footprint bearish")
 
-        # 2. VWAP (weight: 0.12) — Only directional factors
+        # 2. VWAP (weight: 0.12)
         if price < vwap.vwap:
-            score += 0.07
-            reasons.append("Below VWAP")
+            score += 0.07; reasons.append("Below VWAP")
         if price >= vwap.upper_band_1sd:
-            score += 0.05
-            reasons.append("Near upper VWAP band — rejection zone")
+            score += 0.05; reasons.append("Near upper VWAP band")
 
-        # 3. Open Interest (weight: 0.10)
+        # 3. Open Interest (weight: 0.12)
         if oi.momentum_confirmation and oi.oi_trend == "increasing":
-            score += 0.06
-            reasons.append(f"OI spike confirms bearish +{oi.oi_change_pct:.1f}%")
+            score += 0.07; reasons.append(f"OI spike confirms bearish +{oi.oi_change_pct:.1f}%")
         if oi.oi_trend == "decreasing":
-            score += 0.04
-            reasons.append("OI decreasing")
+            score += 0.05; reasons.append("OI decreasing")
 
-        # 4. Funding (weight: 0.08)
+        # 4. Funding Rate (weight: 0.10)
         if funding.contrarian_bias == "bearish":
-            score += 0.08
-            reasons.append("Funding contrarian bearish")
+            score += 0.10; reasons.append("Funding contrarian bearish")
 
         # 5. Liquidity Sweeps (weight: 0.15)
         for s in sweeps:
             if s.side == "short" and s.entry_trigger and s.reclaimed:
-                score += 0.15
-                reasons.append(f"Sweep reclaimed ${s.level:.0f}")
+                score += 0.15; reasons.append(f"Sweep reclaimed ${s.level:.0f}")
                 break
             elif s.side == "short" and s.reclaimed:
-                score += 0.08
-                reasons.append(f"Sweep reclaimed ${s.level:.0f}")
+                score += 0.08; reasons.append(f"Sweep reclaimed ${s.level:.0f}")
                 break
 
         # 6. Volume Profile (weight: 0.07)
         if vp.poc > 0:
             if price >= vp.vah:
-                score += 0.04
-                reasons.append("Above VAH — premium zone")
+                score += 0.04; reasons.append("Above VAH — premium zone")
             dist_to_poc = abs(price - vp.poc) / vp.poc
             if dist_to_poc < 0.002:
-                score += 0.03
-                reasons.append("At POC rejection")
+                score += 0.03; reasons.append("At POC rejection")
 
         # 7. RSI(3) exhaustion (weight: 0.07)
         if 55 <= rsi_3 <= 75:
-            score += 0.05
-            reasons.append(f"RSI(3) {rsi_3:.0f} rejection zone")
+            score += 0.05; reasons.append(f"RSI(3) {rsi_3:.0f} rejection zone")
         elif rsi_3 > 80:
-            score -= 0.05
-            reasons.append(f"RSI(3) {rsi_3:.0f} extreme — wait")
+            score -= 0.05; reasons.append(f"RSI(3) {rsi_3:.0f} extreme — wait")
 
         # 8. Killzone (weight: 0.05)
         if kill_active:
-            score += 0.05
-            reasons.append(f"Killzone: {kill_session}")
+            score += 0.05; reasons.append(f"Killzone: {kill_session}")
 
-        # 9. ICT FVG proximity (weight: 0.05) — TREND-FOLLOWING only
+        # 9. ICT FVG proximity (weight: 0.05)
         if fvgs and regime:
             if regime.phase == "trending":
                 if regime.bias == "bearish":
                     active = [f for f in fvgs if not f.is_filled and f.direction == "bearish"]
                     for f in active:
                         if abs(price - f.top) / price < 0.003:
-                            score += 0.05
-                            reasons.append("Pullback into bearish FVG (trend continuation)")
+                            score += 0.05; reasons.append("Pullback into bearish FVG")
                             break
                 elif regime.bias == "bullish":
                     active = [f for f in fvgs if not f.is_filled and f.direction == "bullish"]
                     for f in active:
                         if abs(price - f.bottom) / price < 0.003:
-                            score += 0.05
-                            reasons.append("Pullback into bullish FVG (trend continuation)")
+                            score += 0.05; reasons.append("Pullback into bullish FVG")
                             break
             else:
                 active = [f for f in fvgs if not f.is_filled and f.direction == "bearish"]
                 for f in active:
                     if abs(price - f.top) / price < 0.003:
-                        score += 0.03
-                        reasons.append("Near bearish FVG (range bounce)")
+                        score += 0.03; reasons.append("Near bearish FVG (range)")
                         break
 
-        # 10. Order Block proximity (weight: 0.05) — TREND-FOLLOWING only
+        # 10. Order Block proximity (weight: 0.05)
         if obs and regime:
             if regime.phase == "trending":
                 if regime.bias == "bearish":
                     active = [o for o in obs if not o.is_breaker and o.direction == "bearish"]
                     for o in active:
                         if abs(price - o.bottom) / price < 0.003:
-                            score += 0.05
-                            reasons.append("Pullback into bearish OB (trend continuation)")
+                            score += 0.05; reasons.append("Pullback into bearish OB")
                             break
                 elif regime.bias == "bullish":
                     active = [o for o in obs if not o.is_breaker and o.direction == "bullish"]
                     for o in active:
                         if abs(price - o.top) / price < 0.003:
-                            score += 0.05
-                            reasons.append("Pullback into bullish OB (trend continuation)")
+                            score += 0.05; reasons.append("Pullback into bullish OB")
                             break
             else:
                 active = [o for o in obs if not o.is_breaker and o.direction == "bearish"]
                 for o in active:
                     if abs(price - o.bottom) / price < 0.003:
-                        score += 0.03
-                        reasons.append("Near bearish OB (range bounce)")
+                        score += 0.03; reasons.append("Near bearish OB (range)")
                         break
 
-        # 11. Regime filter (weight: 0.05)
+        # 11. Regime (weight: 0.05)
         if regime:
             if regime.phase == "trending" and regime.bias == "bearish":
-                score += 0.05
-                reasons.append("Trending bearish regime")
+                score += 0.05; reasons.append("Trending bearish regime")
             elif regime.phase == "distribution":
-                score += 0.04
-                reasons.append("Distribution regime")
+                score += 0.04; reasons.append("Distribution regime")
             elif regime.phase == "range_bound" and price >= vp.vah:
-                score += 0.03
-                reasons.append("Range bound — selling at value high")
+                score += 0.03; reasons.append("Range bound — selling at value high")
 
         # 12. Market metrics trend (weight: 0.03)
         if metrics and metrics.trend_score < -0.15:
-            score += 0.03
-            reasons.append("Trend score bearish")
+            score += 0.03; reasons.append("Trend score bearish")
 
-        # 13. BTC options momentum and contract quality (weight: 0.16)
-        options_momentum = self._context_value(options_context, "bearish_momentum_score", 0.0) or 0.0
-        if options_momentum >= settings.min_options_momentum_score:
-            score += _clamp(options_momentum, 0.0, 1.0) * 0.11
-            reasons.append(f"BTC put momentum {options_momentum:.0%}")
-        put_contract = self._select_directional_option(options_context, "put")
-        if self._context_value(put_contract, "qualified", False):
-            score += 0.05
-            reasons.append("Qualified BTC put contract")
+        # 13. Futures funding bias (weight: 0.06)
+        fc_bias = self._context_value(fc, "funding_contrarian_bias", "neutral")
+        if fc_bias == "bearish":
+            score += 0.06; reasons.append("Futures funding bearish contrarian")
+
+        # 14. Futures OI momentum (weight: 0.04)
+        fc_oi_mom = self._context_value(fc, "oi_momentum_confirmation", False)
+        if fc_oi_mom:
+            score += 0.04; reasons.append("OI confirms bearish momentum")
+
+        # 15. Wick Rejection (weight: 0.08)
+        # Long upper wick = price rejected at high → bearish move expected
+        if wick and wick.bearish_rejection_active:
+            wick_score = abs(wick.rejection_strength) * 0.08
+            score += wick_score
+            reasons.append(f"Long upper wick: {wick.description}")
 
         return _clamp(score, 0, 1), reasons
 
-    # ── Signal builder ────────────────────────────────────────────────
+    # ── Signal builder ──
 
-    def _build_signal(
-        self,
-        signal_type: str,
-        price: float,
-        atr: float,
-        score: float,
-        reasons: list[str],
-        now_ms: int,
-        option_contract: OptionContract | dict[str, Any] | None = None,
-    ) -> ScalpSignal:
-        is_long = "LONG" in signal_type or "CALL" in signal_type
-
+    def _build_signal(self, signal_type: str, price: float, atr: float, score: float, reasons: list[str], now_ms: int, fr: ScalpFundingRate | None = None) -> ScalpSignal:
+        is_long = "LONG" in signal_type
         entry = price
-        sl = price - atr * 3.0 if is_long else price + atr * 3.0
-        t1 = price + atr * 3.0 if is_long else price - atr * 3.0
-        t2 = price + atr * 6.0 if is_long else price - atr * 6.0
-        rr = abs(t2 - entry) / abs(entry - sl) if abs(entry - sl) > 0 else 0
-
+        sl_dist = atr * 1.5
+        entry_dist = atr * 0.1
+        t2_dist = atr * 7.5
+        t1_dist = atr * 3.0
+        sl = entry - sl_dist if is_long else entry + sl_dist
+        t1 = entry + t1_dist if is_long else entry - t1_dist
+        t2 = entry + t2_dist if is_long else entry - t2_dist
+        rr = round(abs(t2 - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0.0
         leverage = min(settings.scalp_max_leverage, max(3, int(8 * score)))
         confidence = "HIGH" if score >= 0.50 else ("MEDIUM" if score >= 0.40 else "LOW")
         time_limit = now_ms + settings.scalp_max_hold_minutes * 60 * 1000
-        strike = self._contract_value(option_contract, "strike_price") or 0.0
-        expiry = str(self._contract_value(option_contract, "expiry") or "")
-        option_symbol = self._contract_value(option_contract, "symbol")
-        if option_symbol:
-            reasons = [*reasons, f"Option contract {option_symbol}"]
+        funding_impact = (fr.current_rate * 3 * 100) if fr else 0.0
+        if funding_impact != 0:
+            reasons.append(f"Funding cost ~{funding_impact:.3f}% per 8h")
 
         from backend.analysis.ids import stable_id
         return ScalpSignal(
             id=stable_id("scalp", "long" if is_long else "short", now_ms, int(price * 10), int(sl * 10)),
-            timestamp=now_ms,
-            signal_type=signal_type,
-            entry_zone_low=round(entry - atr * 0.1, 2),
-            entry_zone_high=round(entry + atr * 0.1, 2),
-            sl_level=round(sl, 2),
-            target_1=round(t1, 2),
-            target_2=round(t2, 2),
-            leverage=leverage,
-            strike=round(strike, 2),
-            expiry=expiry,
-            reason=" | ".join(reasons),
-            risk_reward=round(rr, 2),
-            confidence=confidence,
-            time_limit_ms=time_limit,
+            timestamp=now_ms, signal_type=signal_type,
+            entry_zone_low=round(entry - entry_dist, 2), entry_zone_high=round(entry + entry_dist, 2),
+            sl_level=round(sl, 2), target_1=round(t1, 2), target_2=round(t2, 2),
+            leverage=leverage, reason=" | ".join(reasons), risk_reward=round(rr, 2),
+            confidence=confidence, time_limit_ms=time_limit,
             max_hold_minutes=settings.scalp_max_hold_minutes,
             partial_exit_pct=settings.scalp_partial_exit_pct,
+            funding_impact_pct=round(funding_impact, 4),
         )
-
-    def _best_options_contract(self, options_context: OptionsContext | dict[str, Any] | None) -> OptionContract | dict[str, Any] | None:
-        candidates = [
-            contract
-            for contract in (
-                self._select_directional_option(options_context, "call"),
-                self._select_directional_option(options_context, "put"),
-            )
-            if contract is not None
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda contract: self._contract_value(contract, "score") or 0.0)
-
-    def _select_directional_option(
-        self,
-        options_context: OptionsContext | dict[str, Any] | None,
-        side: str,
-    ) -> OptionContract | dict[str, Any] | None:
-        key = "call_candidate" if side == "call" else "put_candidate"
-        contract = self._context_value(options_context, key)
-        return contract if contract else None
-
-    def _options_blockers(self, options_context: OptionsContext | dict[str, Any] | None) -> list[str]:
-        blockers = self._context_value(options_context, "blockers", []) or []
-        return [
-            str(item)
-            for item in blockers
-            if item and not str(item).startswith("No liquid BTC ")
-        ]
-
-    def _contract_value(self, contract: OptionContract | dict[str, Any] | None, key: str) -> Any:
-        return self._context_value(contract, key)
 
     def _context_value(self, source: Any, key: str, default: Any = None) -> Any:
         if source is None:

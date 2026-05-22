@@ -163,47 +163,34 @@ class MarketRegime:
 
 
 @dataclass
-class OptionContract:
+class FuturesContract:
     symbol: str
-    product_id: Optional[int]
-    contract_type: str
-    side: str
-    strike_price: float
-    expiry: Optional[str]
-    expiry_timestamp: Optional[int]
-    spot_price: Optional[float]
-    mark_price: Optional[float]
-    best_bid: Optional[float]
-    best_ask: Optional[float]
-    mid_price: Optional[float]
-    spread_pct: Optional[float]
-    bid_iv: Optional[float]
-    ask_iv: Optional[float]
-    volume: Optional[float]
-    open_interest: Optional[float]
-    delta: Optional[float]
-    gamma: Optional[float]
-    theta: Optional[float]
-    vega: Optional[float]
-    rho: Optional[float]
-    score: float
-    qualified: bool
-    reason: str
+    product_id: int
+    mark_price: Optional[float] = None
+    mark_price_timestamp: Optional[int] = None
+    funding_rate: float = 0.0
+    funding_rate_timestamp: Optional[int] = None
+    next_funding_timestamp: Optional[int] = None
+    open_interest: float = 0.0
+    open_interest_change_pct: float = 0.0
+    volume_24h: float = 0.0
 
 
 @dataclass
-class OptionsContext:
+class FuturesContext:
     timestamp: int
-    underlying: str
-    momentum_score: float
-    bullish_momentum_score: float
-    bearish_momentum_score: float
-    minimum_momentum_score: float
-    momentum_state: str
-    call_candidate: Optional[OptionContract]
-    put_candidate: Optional[OptionContract]
+    contract: Optional[FuturesContract] = None
+    funding_rate: float = 0.0
+    funding_annualized: float = 0.0
+    funding_contrarian_bias: str = "neutral"
+    is_funding_extreme: bool = False
+    oi_value: float = 0.0
+    oi_change_pct: float = 0.0
+    oi_trend: str = "neutral"
+    oi_momentum_confirmation: bool = False
+    liquidation_clusters: list[dict] = field(default_factory=list)
+    estimated_funding_pnl_pct: float = 0.0
     blockers: list[str] = field(default_factory=list)
-    source_count: int = 0
     error: Optional[str] = None
 
 
@@ -250,9 +237,8 @@ class AiIctDecision:
     invalidation: Optional[float]
     primary_signal_id: Optional[str]
     summary: str
-    option_contract: Optional[OptionContract] = None
-    momentum_score: Optional[float] = None
-    options_score: Optional[float] = None
+    futures_score: Optional[float] = None
+    futures_funding_bias: Optional[str] = None
     confirmations: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     calculations: list[str] = field(default_factory=list)
@@ -337,45 +323,42 @@ class TradeSignal:
 
 @dataclass
 class OrderbookImbalance:
-    """Tracks bid/ask imbalance patterns in the orderbook."""
     id: str
     timestamp: int
     price_level: float
-    imbalance_ratio: float  # ask_size / bid_size; > 1 = more sellers, < 1 = more buyers
-    side: str  # "buy" or "sell" dominant side
-    strength: float  # 0-1, confidence score
+    imbalance_ratio: float
+    side: str
+    strength: float
     duration_ms: int
-    status: str = "active"  # "active", "reversed", "filled"
+    status: str = "active"
     reversal_timestamp: Optional[int] = None
     reversal_price: Optional[float] = None
 
 
 @dataclass
 class SpreadDynamics:
-    """Tracks bid-ask spread changes and anomalies."""
     id: str
     timestamp: int
     spread: float
     spread_pct: float
-    spread_zscore: float  # Z-score relative to recent average
+    spread_zscore: float
     bid: float
     ask: float
     bid_ask_midpoint: float
-    status: str = "normal"  # "normal", "wide", "tight", "squeezed"
-    anomaly_type: Optional[str] = None  # e.g., "compression", "expansion", "inversion"
+    status: str = "normal"
+    anomaly_type: Optional[str] = None
 
 
 @dataclass
 class OrderbookDepthLevel:
-    """Analyzes market depth at specific price tiers."""
     id: str
     timestamp: int
     price_level: float
-    level_type: str  # "bid", "ask"
-    estimated_size: float  # Estimated cumulative size within this tier
-    order_count: int  # Approximate count of orders
-    depth_tier: int  # 1-5: 1=immediate, 5=far
-    saturation: float  # 0-1, how saturated this level is relative to recent average
+    level_type: str
+    estimated_size: float
+    order_count: int
+    depth_tier: int
+    saturation: float
     touched_count: int = 0
     last_touch: Optional[int] = None
     filled_count: int = 0
@@ -383,14 +366,13 @@ class OrderbookDepthLevel:
 
 @dataclass
 class OrderbookAccumulation:
-    """Detects accumulation/distribution patterns from orderbook structure."""
     id: str
     timestamp: int
     price_range_low: float
     price_range_high: float
-    side: str  # "accumulation" or "distribution"
-    confidence: float  # 0-1
-    volume_ratio: float  # Accumulation vs distribution volume
+    side: str
+    confidence: float
+    volume_ratio: float
     pattern_duration_ms: int
     candle_touches: int
     status: str = "active"
@@ -400,7 +382,6 @@ class OrderbookAccumulation:
 
 @dataclass
 class OrderbookSnapshot:
-    """Historical quote snapshot for analysis."""
     timestamp: int
     bid: float
     ask: float
@@ -412,7 +393,6 @@ class OrderbookSnapshot:
 
 @dataclass
 class ScalpOrderFlow:
-    """Order flow metrics for scalping."""
     timestamp: int
     delta: float = 0.0
     cvd: float = 0.0
@@ -426,10 +406,10 @@ class ScalpOrderFlow:
 
 @dataclass
 class ScalpFunding:
-    """Funding rate tracking for scalping."""
     timestamp: int
     current_rate: float = 0.0
     projected_8h: float = 0.0
+    annualized_rate: float = 0.0
     next_reset_ms: int = 0
     is_extreme: bool = False
     contrarian_bias: str = "neutral"
@@ -437,7 +417,6 @@ class ScalpFunding:
 
 @dataclass
 class ScalpOpenInterest:
-    """Open interest tracking for scalping."""
     timestamp: int
     current_oi: float = 0.0
     oi_change_pct: float = 0.0
@@ -448,7 +427,6 @@ class ScalpOpenInterest:
 
 @dataclass
 class ScalpLiquidationLevel:
-    """Liquidation heatmap level."""
     price: float
     size: float
     side: str
@@ -458,7 +436,6 @@ class ScalpLiquidationLevel:
 
 @dataclass
 class ScalpVWAP:
-    """VWAP bands for scalping."""
     timestamp: int
     vwap: float = 0.0
     upper_band_1sd: float = 0.0
@@ -471,7 +448,6 @@ class ScalpVWAP:
 
 @dataclass
 class ScalpVolumeProfile:
-    """Volume profile levels."""
     timestamp: int
     poc: float = 0.0
     vah: float = 0.0
@@ -480,22 +456,19 @@ class ScalpVolumeProfile:
 
 
 @dataclass
-class ScalpOptionsGreeks:
-    """Options Greeks for scalping."""
+class ScalpFundingRate:
     timestamp: int
-    delta: float = 0.0
-    gamma: float = 0.0
-    theta: float = 0.0
-    vega: float = 0.0
-    iv_rank: float = 0.0
-    iv_percentile: float = 0.0
-    iv_regime: str = "neutral"
-    theta_decay_per_hour: float = 0.0
+    current_rate: float = 0.0
+    annualized: float = 0.0
+    funding_apr: float = 0.0
+    predicted_8h: float = 0.0
+    time_to_next: int = 0
+    is_extreme: bool = False
+    bias: str = "neutral"
 
 
 @dataclass
 class ScalpLiquiditySweep:
-    """Liquidity sweep zone for scalping."""
     timestamp: int
     level: float
     side: str
@@ -507,7 +480,6 @@ class ScalpLiquiditySweep:
 
 @dataclass
 class ScalpSignal:
-    """Scalping-specific trade signal."""
     id: str
     timestamp: int
     signal_type: str
@@ -517,8 +489,6 @@ class ScalpSignal:
     target_1: float
     target_2: float
     leverage: int = 0
-    strike: float = 0.0
-    expiry: str = ""
     reason: str = ""
     risk_reward: float = 0.0
     confidence: str = "MEDIUM"
@@ -527,26 +497,47 @@ class ScalpSignal:
     status: str = "active"
     entry_triggered: bool = False
     partial_exit_pct: float = 0.0
+    funding_impact_pct: float = 0.0
+
+
+@dataclass
+class ScalpWickRejection:
+    """Long-wick rejection analysis for the last N candles.
+    A long upper wick means price was rejected at the high → bearish signal.
+    A long lower wick means price was rejected at the low → bullish signal.
+    """
+    active_upper_wick_candles: int = 0
+    active_lower_wick_candles: int = 0
+    max_upper_wick_ratio: float = 0.0
+    max_lower_wick_ratio: float = 0.0
+    avg_upper_wick_ratio: float = 0.0
+    avg_lower_wick_ratio: float = 0.0
+    bearish_rejection_active: bool = False
+    bullish_rejection_active: bool = False
+    rejection_strength: float = 0.0  # -1 (bearish) to +1 (bullish)
+    description: str = ""
 
 
 @dataclass
 class ScalpContext:
-    """Complete scalping context snapshot."""
+    """Complete scalping context - futures only."""
     timestamp: int
     order_flow: Optional[ScalpOrderFlow] = None
     funding: Optional[ScalpFunding] = None
+    funding_rate: Optional[ScalpFundingRate] = None
     open_interest: Optional[ScalpOpenInterest] = None
     liquidation_levels: list[ScalpLiquidationLevel] = field(default_factory=list)
     vwap: Optional[ScalpVWAP] = None
     volume_profile: Optional[ScalpVolumeProfile] = None
-    options_greeks: Optional[ScalpOptionsGreeks] = None
     liquidity_sweeps: list[ScalpLiquiditySweep] = field(default_factory=list)
     signals: list[ScalpSignal] = field(default_factory=list)
     trade_blocked_reasons: list[str] = field(default_factory=list)
     rsi_3: float = 50.0
     spot_volume_ok: bool = True
-    options_spread_ok: bool = True
     macro_event_block: bool = False
+    futures_leverage: int = 10
+    estimated_funding_cost_8h: float = 0.0
+    wick_rejection: Optional[ScalpWickRejection] = None
 
 
 @dataclass
@@ -562,7 +553,7 @@ class ChartUpdate:
     metrics: Optional[MarketMetrics]
     projection: Optional[PriceProjection]
     regime: Optional[MarketRegime]
-    options_context: Optional[OptionsContext]
+    futures_context: Optional[FuturesContext]
     btc_patterns: Optional[BtcPatternContext]
     update_type: str
 
@@ -571,7 +562,6 @@ def to_wire(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
     if is_dataclass(value):
-        # Serialize dataclasses field-by-field to avoid the extra deep-copy work from asdict.
         return {item.name: to_wire(getattr(value, item.name)) for item in fields(value)}
     if isinstance(value, list):
         return [to_wire(item) for item in value]
