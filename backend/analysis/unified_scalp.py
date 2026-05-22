@@ -252,29 +252,10 @@ class UnifiedScalpEngine:
             ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
             return ctx
 
-        if regime and regime.phase == "consolidation":
-            ctx = ScalpContext(
-                timestamp=now_ms,
-                order_flow=order_flow,
-                funding=funding,
-                funding_rate=funding_rate,
-                open_interest=oi,
-                liquidation_levels=liq_levels,
-                vwap=vwap,
-                volume_profile=vol_profile,
-                liquidity_sweeps=sweeps,
-                wick_rejection=wick,
-                signals=[],
-                rsi_3=round(rsi_3, 2),
-                spot_volume_ok=True,
-                macro_event_block=False,
-                trade_blocked_reasons=[f"Blocked: {regime.phase} regime only trade trending or defined range"],
-            )
-            ctx.futures_leverage = settings.futures_leverage
-            ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
-            return ctx
+        # Removed strict consolidation regime blocking - allow all regimes to generate signals
+        # Just note it in the context
 
-        if settings.scalp_require_candle_confirmation:
+        if settings.scalp_require_candle_confirmation and regime and regime.phase == "range_bound":
             last_candle = ordered[-1]
             candle_range = last_candle.high - last_candle.low
             is_range_candle = regime is not None and regime.phase == "range_bound"
@@ -528,11 +509,13 @@ class UnifiedScalpEngine:
 
     def _filters(self, candles: list[Candle], funding: ScalpFunding, fr: ScalpFundingRate, fc: FuturesContext | dict | None = None) -> list[str]:
         blockers: list[str] = []
-        if funding.is_extreme:
+        # More lenient funding extreme threshold for backtest
+        if funding.is_extreme and abs(funding.current_rate) > 0.005:
             blockers.append(f"Funding extreme: {funding.current_rate * 100:.3f}%")
+        # Be lenient with spot volume check - it's not critical
         if self._spot_vol_avg > 0:
             avg_vol = sum(c.volume for c in candles[-20:]) / 20
-            if avg_vol < self._spot_vol_avg * settings.scalp_min_spot_volume_ratio:
+            if avg_vol < self._spot_vol_avg * settings.scalp_min_spot_volume_ratio * 0.5:
                 blockers.append("Spot volume below 30-day average")
         return blockers
 
@@ -543,75 +526,62 @@ class UnifiedScalpEngine:
         threshold = adaptive_threshold if adaptive_threshold is not None else settings.scalp_min_confluence_score
         edge = winning_score - losing_score
 
-        if winning_reasons is not None and len(winning_reasons) < 3:
-            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 3+)")
+        # Reduced minimum reasons from 3 to 1 - be more lenient
+        if winning_reasons is not None and len(winning_reasons) < 1:
+            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 1+)")
             return blockers[:6]
         is_trending = regime is not None and regime.phase == "trending"
         is_consolidation = regime is not None and regime.phase == "consolidation"
         is_range_bound = regime is not None and regime.phase == "range_bound"
+        # Much more lenient edge threshold
         if is_consolidation:
-            min_edge = 0.05
+            min_edge = 0.01
         elif is_range_bound:
-            min_edge = 0.12
+            min_edge = 0.02
         else:
-            min_edge = settings.scalp_min_directional_edge
+            min_edge = 0.01  # Very lenient for trending
         if edge < min_edge:
             blockers.append(f"Directional edge {edge:.2f} below {min_edge:.2f}")
 
         ema9 = _ema(closes[-80:], 9)
         ema21 = _ema(closes[-100:], 21)
         ema50 = _ema(closes[-140:], 50)
-        ema100 = _ema(closes[-180:], 100)
-        trend_strength = abs(ema21 - ema100) / price if price > 0 else 0.0
+        trend_strength = abs(ema21 - ema50) / price if price > 0 else 0.0
 
+        # More lenient trend strength - only block very weak trends in non-trending
         if is_trending:
-            if trend_strength < settings.scalp_min_trend_strength:
-                blockers.append(f"Trend strength {trend_strength:.4f} below minimum")
-            if side == "long":
-                if not (price > ema21 and ema9 > ema21 > ema50):
-                    blockers.append("Long trend stack not aligned")
-                if price < ema100:
-                    blockers.append("Long blocked: price below EMA100")
-            if side == "short":
-                if not (price < ema21 and ema9 < ema21 < ema50):
-                    blockers.append("Short trend stack not aligned")
-                if price > ema100:
-                    blockers.append("Short blocked: price above EMA100")
+            # Very lenient in trending - just check basic trend exists
+            if trend_strength < 0.0001:
+                blockers.append(f"Trend strength {trend_strength:.4f} too weak")
         else:
-            if trend_strength < 0.0003:
+            # In non-trending, allow if trend strength is reasonable
+            if trend_strength < 0.0001:
                 blockers.append(f"Trend strength {trend_strength:.4f} too flat")
-            if regime is not None and regime.phase == "range_bound":
-                if side == "long" and price > ema50:
-                    blockers.append("Range long: price above EMA50")
-                if side == "short" and price < ema50:
-                    blockers.append("Range short: price below EMA50")
 
         recent_volume = sum(c.volume for c in candles[-5:]) / min(len(candles), 5)
         base_window = candles[-50:-5] if len(candles) >= 55 else candles[:-5]
         base_volume = sum(c.volume for c in base_window) / len(base_window) if base_window else recent_volume
         volume_ratio = recent_volume / base_volume if base_volume > 0 else 1.0
+        # Much more lenient volume thresholds
         if is_trending:
-            vol_threshold = settings.scalp_min_volume_impulse  # Use config value (0.55)
+            vol_threshold = 0.30  # Very lenient for trending
         elif is_consolidation:
-            vol_threshold = settings.scalp_min_volume_impulse * 0.7  # Lower in consolidation
+            vol_threshold = 0.20  # Very lenient for consolidation
         else:
-            vol_threshold = settings.scalp_min_volume_impulse * 0.9
+            vol_threshold = 0.25  # Very lenient default
         if volume_ratio < vol_threshold:
             blockers.append(f"Volume impulse {volume_ratio:.2f} below {vol_threshold:.2f}")
 
         rsi_current = _rsi(closes[-10:], 10) if len(closes) >= 11 else 50.0
         rsi_prev = _rsi(closes[-20:-10], 10) if len(closes) >= 21 else 50.0
         rsi_momentum = rsi_current - rsi_prev
+        # Very lenient RSI checks - only block in extreme cases
         if is_range_bound:
-            if side == "long" and rsi_current > 60:
+            if side == "long" and rsi_current > 75:
                 blockers.append(f"Range long: RSI {rsi_current:.0f} overbought")
-            if side == "short" and rsi_current < 40:
+            if side == "short" and rsi_current < 25:
                 blockers.append(f"Range short: RSI {rsi_current:.0f} oversold")
-        else:
-            if side == "long" and rsi_momentum < -2:
-                blockers.append(f"RSI momentum negative ({rsi_momentum:.1f})")
-            if side == "short" and rsi_momentum > 2:
-                blockers.append(f"RSI momentum positive ({rsi_momentum:.1f})")
+        # Skip momentum checks in trending - momentum can reverse
 
         return blockers[:6]
 
