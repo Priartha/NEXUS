@@ -1,8 +1,8 @@
 """
-NEXUS Unified Scalping Engine v3.0 - Industry Grade AI Trading Brain
+NEXUS Unified Scalping Engine v3.0 — Futures Only
 
 Single-signal scalping engine for BTCUSD perpetual futures on Delta Exchange.
-PRIMARY SIGNAL: Self-Aware Trading Agent - no external dependencies, pure price action.
+Combines ALL data sources into one confluence-weighted scalping signal.
 
 Data sources fused:
   1. Order Flow: Delta, CVD, absorption, footprint imbalance
@@ -30,7 +30,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.analysis.wick_rejection import analyze_wick_rejection
-from backend.analysis.self_aware_agent import SelfAwareTradingAgent, agent as ai_agent
 from backend.config import settings
 from backend.models.types import (
     Candle,
@@ -253,53 +252,45 @@ class UnifiedScalpEngine:
             ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
             return ctx
 
-        # ── Self-Aware AI Agent (Primary Brain) ─────────────────────────────
-        # Pure price action analysis - no external dependencies
-        ai_signal = ai_agent.analyze_market(ordered)
-        
-        # Boost or override confluence scores based on AI brain
-        if ai_signal['signal'] in ['LONG', 'SHORT']:
-            ai_confidence = ai_signal.get('confidence', 0.5)
-            
-            # If AI has strong confidence (>0.7), boost that direction
-            if ai_confidence > 0.70:
-                if ai_signal['signal'] == 'LONG':
-                    long_score = max(long_score, ai_confidence)
-                    long_reasons.extend([f"AI Brain: {ai_signal.get('pattern_type', 'pattern')}", 
-                                        f"AI: {ai_signal.get('reason', '')[:50]}"])
-                else:
-                    short_score = max(short_score, ai_confidence)
-                    short_reasons.extend([f"AI Brain: {ai_signal.get('pattern_type', 'pattern')}",
-                                         f"AI: {ai_signal.get('reason', '')[:50]}"])
-            elif ai_confidence > 0.55 and long_score < threshold and short_score < threshold:
-                # AI can generate signal even if confluence is weak
-                if ai_signal['signal'] == 'LONG':
-                    long_score = ai_confidence
-                    long_reasons.append(f"AI Signal: {ai_signal.get('reason', '')[:80]}")
-                else:
-                    short_score = ai_confidence
-                    short_reasons.append(f"AI Signal: {ai_signal.get('reason', '')[:80]}")
+        if regime and regime.phase == "consolidation":
+            ctx = ScalpContext(
+                timestamp=now_ms,
+                order_flow=order_flow,
+                funding=funding,
+                funding_rate=funding_rate,
+                open_interest=oi,
+                liquidation_levels=liq_levels,
+                vwap=vwap,
+                volume_profile=vol_profile,
+                liquidity_sweeps=sweeps,
+                wick_rejection=wick,
+                signals=[],
+                rsi_3=round(rsi_3, 2),
+                spot_volume_ok=True,
+                macro_event_block=False,
+                trade_blocked_reasons=[f"Blocked: {regime.phase} regime only trade trending or defined range"],
+            )
+            ctx.futures_leverage = settings.futures_leverage
+            ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
+            return ctx
 
-        # Removed strict consolidation regime blocking - allow all regimes to generate signals
+        last_candle = ordered[-2]
+        candle_range = last_candle.high - last_candle.low
+        is_range_candle = regime is not None and regime.phase == "range_bound"
+        if candle_range > 0:
+            close_position = (last_candle.close - last_candle.low) / candle_range
+            if is_range_candle:
+                if winning_side == "long" and close_position >= 0.40:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: long needs discount close (<40%)"])
+                if winning_side == "short" and close_position <= 0.60:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: short needs premium close (>60%)"])
+            else:
+                if winning_side == "long" and close_position < 0.60:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bullish candle close"])
+                if winning_side == "short" and close_position > 0.40:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bearish candle close"])
 
-        if settings.scalp_require_candle_confirmation and regime and regime.phase == "range_bound":
-            last_candle = ordered[-1]
-            candle_range = last_candle.high - last_candle.low
-            is_range_candle = regime is not None and regime.phase == "range_bound"
-            if candle_range > 0:
-                close_position = (last_candle.close - last_candle.low) / candle_range
-                if is_range_candle:
-                    if winning_side == "long" and close_position >= 0.40:
-                        return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: long needs discount close (<40%)"])
-                    if winning_side == "short" and close_position <= 0.60:
-                        return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: short needs premium close (>60%)"])
-                else:
-                    if winning_side == "long" and close_position < 0.60:
-                        return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bullish candle close"])
-                    if winning_side == "short" and close_position > 0.40:
-                        return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bearish candle close"])
-
-        if settings.scalp_require_mtf_alignment and regime and regime.phase == "trending":
+        if regime and regime.phase == "trending":
             if regime.bias == "bullish" and winning_side == "short":
                 return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: short signal in bullish trend"])
             if regime.bias == "bearish" and winning_side == "long":
@@ -310,13 +301,10 @@ class UnifiedScalpEngine:
             remaining = (self._signal_cooldown_ms - (cooldown_ts - self._last_signal_ts)) / 60000
             return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, [f"Cooldown: {remaining:.1f}m until next signal"])
 
-        # More lenient threshold - allow AI brain to override
-        effective_threshold = 0.35  # Lower threshold for futures
-
-        if long_score >= effective_threshold and long_score >= short_score:
+        if long_score >= threshold and long_score >= short_score:
             signals.append(self._build_signal("LONG BTCUSD", price, atr, long_score, long_reasons, now_ms, funding_rate))
             self._last_signal_ts = cooldown_ts
-        elif short_score >= effective_threshold and short_score > long_score:
+        elif short_score >= threshold and short_score > long_score:
             signals.append(self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate))
             self._last_signal_ts = cooldown_ts
 
@@ -339,11 +327,6 @@ class UnifiedScalpEngine:
         )
         ctx.futures_leverage = settings.futures_leverage
         ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
-        
-        # Store AI brain status in context
-        ctx.ai_brain_active = True
-        ctx.ai_intelligence = ai_agent.get_agent_status()
-        
         return ctx
 
     def _blocked_ctx(self, now_ms, of, fund, fr, oi, liq, vwap, vp, sweeps, rsi_3, reasons, wick=None):
@@ -355,8 +338,6 @@ class UnifiedScalpEngine:
         )
         ctx.futures_leverage = settings.futures_leverage
         ctx.estimated_funding_cost_8h = round(fr.current_rate * 3 * 100, 4) if fr else 0.0
-        ctx.ai_brain_active = True
-        ctx.ai_intelligence = ai_agent.get_agent_status()
         return ctx
 
     # ── Data source computations ──
@@ -364,10 +345,13 @@ class UnifiedScalpEngine:
     def _order_flow(self, candles: list[Candle]) -> ScalpOrderFlow:
         deltas: list[float] = []
         for i in range(1, len(candles)):
-            if candles[i].close >= candles[i].open:
+            mid = (candles[i - 1].close + candles[i].close) / 2.0
+            if candles[i].close > mid:
                 deltas.append(candles[i].volume)
-            else:
+            elif candles[i].close < mid:
                 deltas.append(-candles[i].volume)
+            else:
+                deltas.append(0.0)
         cvd = sum(deltas)
         recent = deltas[-10:] if len(deltas) >= 10 else deltas
         slope = (sum(recent[-3:]) - sum(recent[:3])) / max(len(recent), 1)
@@ -546,13 +530,11 @@ class UnifiedScalpEngine:
 
     def _filters(self, candles: list[Candle], funding: ScalpFunding, fr: ScalpFundingRate, fc: FuturesContext | dict | None = None) -> list[str]:
         blockers: list[str] = []
-        # More lenient funding extreme threshold for backtest
-        if funding.is_extreme and abs(funding.current_rate) > 0.005:
+        if funding.is_extreme:
             blockers.append(f"Funding extreme: {funding.current_rate * 100:.3f}%")
-        # Be lenient with spot volume check - it's not critical
         if self._spot_vol_avg > 0:
             avg_vol = sum(c.volume for c in candles[-20:]) / 20
-            if avg_vol < self._spot_vol_avg * settings.scalp_min_spot_volume_ratio * 0.5:
+            if avg_vol < self._spot_vol_avg * settings.scalp_min_spot_volume_ratio:
                 blockers.append("Spot volume below 30-day average")
         return blockers
 
@@ -563,62 +545,75 @@ class UnifiedScalpEngine:
         threshold = adaptive_threshold if adaptive_threshold is not None else settings.scalp_min_confluence_score
         edge = winning_score - losing_score
 
-        # Reduced minimum reasons from 3 to 1 - be more lenient
-        if winning_reasons is not None and len(winning_reasons) < 1:
-            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 1+)")
+        if winning_reasons is not None and len(winning_reasons) < 3:
+            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 3+)")
             return blockers[:6]
         is_trending = regime is not None and regime.phase == "trending"
         is_consolidation = regime is not None and regime.phase == "consolidation"
         is_range_bound = regime is not None and regime.phase == "range_bound"
-        # Much more lenient edge threshold
         if is_consolidation:
-            min_edge = 0.01
+            min_edge = 0.05
         elif is_range_bound:
-            min_edge = 0.02
+            min_edge = 0.12
         else:
-            min_edge = 0.01  # Very lenient for trending
+            min_edge = settings.scalp_min_directional_edge
         if edge < min_edge:
             blockers.append(f"Directional edge {edge:.2f} below {min_edge:.2f}")
 
         ema9 = _ema(closes[-80:], 9)
         ema21 = _ema(closes[-100:], 21)
         ema50 = _ema(closes[-140:], 50)
-        trend_strength = abs(ema21 - ema50) / price if price > 0 else 0.0
+        ema100 = _ema(closes[-180:], 100)
+        trend_strength = abs(ema21 - ema100) / price if price > 0 else 0.0
 
-        # More lenient trend strength - only block very weak trends in non-trending
         if is_trending:
-            # Very lenient in trending - just check basic trend exists
-            if trend_strength < 0.0001:
-                blockers.append(f"Trend strength {trend_strength:.4f} too weak")
+            if trend_strength < settings.scalp_min_trend_strength:
+                blockers.append(f"Trend strength {trend_strength:.4f} below minimum")
+            if side == "long":
+                if not (price > ema21 and ema9 > ema21 > ema50):
+                    blockers.append("Long trend stack not aligned")
+                if price < ema100:
+                    blockers.append("Long blocked: price below EMA100")
+            if side == "short":
+                if not (price < ema21 and ema9 < ema21 < ema50):
+                    blockers.append("Short trend stack not aligned")
+                if price > ema100:
+                    blockers.append("Short blocked: price above EMA100")
         else:
-            # In non-trending, allow if trend strength is reasonable
-            if trend_strength < 0.0001:
+            if trend_strength < 0.0003:
                 blockers.append(f"Trend strength {trend_strength:.4f} too flat")
+            if regime is not None and regime.phase == "range_bound":
+                if side == "long" and price > ema50:
+                    blockers.append("Range long: price above EMA50")
+                if side == "short" and price < ema50:
+                    blockers.append("Range short: price below EMA50")
 
         recent_volume = sum(c.volume for c in candles[-5:]) / min(len(candles), 5)
         base_window = candles[-50:-5] if len(candles) >= 55 else candles[:-5]
         base_volume = sum(c.volume for c in base_window) / len(base_window) if base_window else recent_volume
         volume_ratio = recent_volume / base_volume if base_volume > 0 else 1.0
-        # Much more lenient volume thresholds
         if is_trending:
-            vol_threshold = 0.30  # Very lenient for trending
+            vol_threshold = 0.80
         elif is_consolidation:
-            vol_threshold = 0.20  # Very lenient for consolidation
+            vol_threshold = 0.40
         else:
-            vol_threshold = 0.25  # Very lenient default
+            vol_threshold = 0.50
         if volume_ratio < vol_threshold:
             blockers.append(f"Volume impulse {volume_ratio:.2f} below {vol_threshold:.2f}")
 
         rsi_current = _rsi(closes[-10:], 10) if len(closes) >= 11 else 50.0
         rsi_prev = _rsi(closes[-20:-10], 10) if len(closes) >= 21 else 50.0
         rsi_momentum = rsi_current - rsi_prev
-        # Very lenient RSI checks - only block in extreme cases
         if is_range_bound:
-            if side == "long" and rsi_current > 75:
+            if side == "long" and rsi_current > 60:
                 blockers.append(f"Range long: RSI {rsi_current:.0f} overbought")
-            if side == "short" and rsi_current < 25:
+            if side == "short" and rsi_current < 40:
                 blockers.append(f"Range short: RSI {rsi_current:.0f} oversold")
-        # Skip momentum checks in trending - momentum can reverse
+        else:
+            if side == "long" and rsi_momentum < -2:
+                blockers.append(f"RSI momentum negative ({rsi_momentum:.1f})")
+            if side == "short" and rsi_momentum > 2:
+                blockers.append(f"RSI momentum positive ({rsi_momentum:.1f})")
 
         return blockers[:6]
 
@@ -740,7 +735,7 @@ class UnifiedScalpEngine:
 
         # 13. Futures funding bias (weight: 0.06) — REPLACED options momentum
         fc_bias = self._context_value(fc, "funding_contrarian_bias", "neutral")
-        if fc_bias == "bullish" and self._cur_funding == 0.0:
+        if fc_bias == "bullish":
             score += 0.06; reasons.append("Futures funding bullish contrarian")
 
         # 14. Futures OI momentum (weight: 0.04) — REPLACED options contract
@@ -871,7 +866,7 @@ class UnifiedScalpEngine:
 
         # 13. Futures funding bias (weight: 0.06)
         fc_bias = self._context_value(fc, "funding_contrarian_bias", "neutral")
-        if fc_bias == "bearish" and self._cur_funding == 0.0:
+        if fc_bias == "bearish":
             score += 0.06; reasons.append("Futures funding bearish contrarian")
 
         # 14. Futures OI momentum (weight: 0.04)
@@ -888,53 +883,25 @@ class UnifiedScalpEngine:
 
         return _clamp(score, 0, 1), reasons
 
-    # ── Filter: Only trade with regime direction ──
-    def _regime_direction_filter(self, candles: list[Candle], side: str, regime: MarketRegime | None) -> str | None:
-        """Only allow trades that align with regime bias."""
-        if regime is None:
-            return "No regime detected"
-        
-        if regime.phase != "trending":
-            return f"Non-trending regime: {regime.phase}"
-        
-        if regime.bias == "bullish" and side == "sell":
-            return "Bearish trade in bullish regime"
-        if regime.bias == "bearish" and side == "buy":
-            return "Bullish trade in bearish regime"
-        
-        return None  # Passes filter
+    # ── Signal builder ──
 
     def _build_signal(self, signal_type: str, price: float, atr: float, score: float, reasons: list[str], now_ms: int, fr: ScalpFundingRate | None = None) -> ScalpSignal:
         is_long = "LONG" in signal_type
         entry = price
-        
-        # Dynamic risk management based on score
-        # Higher score = tighter stop (more leverage) + wider target (better R:R)
-        sl_multiplier = max(1.0, 2.5 - score * 2)  # 1.0 at score=0.75, 2.5 at score=0
-        tp1_multiplier = 2.0 + score * 3  # 2.0 at score=0, 5.0 at score=1.0
-        tp2_multiplier = 4.0 + score * 6  # 4.0 at score=0, 10.0 at score=1.0
-        
-        sl_dist = atr * sl_multiplier
+        sl_dist = atr * 1.5
         entry_dist = atr * 0.1
-        t2_dist = atr * tp2_multiplier
-        t1_dist = atr * tp1_multiplier
-        
+        t2_dist = atr * 7.5
+        t1_dist = atr * 3.0
         sl = entry - sl_dist if is_long else entry + sl_dist
         t1 = entry + t1_dist if is_long else entry - t1_dist
         t2 = entry + t2_dist if is_long else entry - t2_dist
-        
-        # Calculate R:R ratio
         rr = round(abs(t2 - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0.0
-        
-        # Leverage scales with score for high-quality signals
-        base_leverage = max(3, int(10 * score))
-        leverage = min(settings.scalp_max_leverage, base_leverage + 5)  # Bonus leverage for good signals
-        
-        confidence = "HIGH" if score >= 0.65 else ("MEDIUM" if score >= 0.50 else "LOW")
+        leverage = min(settings.scalp_max_leverage, max(3, int(8 * score)))
+        confidence = "HIGH" if score >= 0.50 else ("MEDIUM" if score >= 0.40 else "LOW")
         time_limit = now_ms + settings.scalp_max_hold_minutes * 60 * 1000
         funding_impact = (fr.current_rate * 3 * 100) if fr else 0.0
         if funding_impact != 0:
-            reasons.append(f"Funding: {funding_impact:.3f}% per 8h")
+            reasons.append(f"Funding cost ~{funding_impact:.3f}% per 8h")
 
         from backend.analysis.ids import stable_id
         return ScalpSignal(
@@ -942,7 +909,7 @@ class UnifiedScalpEngine:
             timestamp=now_ms, signal_type=signal_type,
             entry_zone_low=round(entry - entry_dist, 2), entry_zone_high=round(entry + entry_dist, 2),
             sl_level=round(sl, 2), target_1=round(t1, 2), target_2=round(t2, 2),
-            leverage=leverage, reason=" | ".join(reasons), score=round(score, 4), risk_reward=round(rr, 2),
+            leverage=leverage, reason=" | ".join(reasons), risk_reward=round(rr, 2),
             confidence=confidence, time_limit_ms=time_limit,
             max_hold_minutes=settings.scalp_max_hold_minutes,
             partial_exit_pct=settings.scalp_partial_exit_pct,

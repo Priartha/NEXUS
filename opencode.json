@@ -3,22 +3,22 @@
   "mcp": {
     "binance-crypto": {
       "type": "local",
-      "command": ["python", "backend/mcp/binance_server.py"],
+      "command": ["python", "D:\\Trading Setup\\NEXUS\\backend\\mcp\\binance_server.py"],
       "enabled": true,
       "env": {}
     },
     "coingecko": {
       "type": "local",
-      "command": ["python", "backend/mcp/coingecko_server.py"],
+      "command": ["python", "D:\\Trading Setup\\NEXUS\\backend\\mcp\\coingecko_server.py"],
       "enabled": true,
       "env": {}
     },
     "coinmarketcap": {
       "type": "local",
-      "command": ["python", "backend/mcp/coinmarketcap_server.py"],
+      "command": ["python", "D:\\Trading Setup\\NEXUS\\backend\\mcp\\coinmarketcap_server.py"],
       "enabled": true,
       "env": {
-        "CMC_API_KEY": ""
+        "CMC_API_KEY": "b871a7c1c24b45eeb789ca4d6297aa57"
       }
     }
   }

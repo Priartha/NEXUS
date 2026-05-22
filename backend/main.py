@@ -252,7 +252,6 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"Task {task.get_name()} failed during shutdown: {e}", exc_info=True)
         db_integrity.create_backup()
-        await manager.close_all()
         logger.info("Final database backup created on shutdown")
 
 
@@ -421,7 +420,7 @@ async def run_backtest(body: BacktestRequest) -> dict:
         result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
 
         if body.adaptive_learning and result.get("profit_factor", 0) < 1.0 and len(candles) >= 80:
-            recent_window = candles[-min(settings.max_candles, len(candles)):]
+            recent_window = candles[-min(500, len(candles)):]
             candidates: list[tuple[str, list, dict]] = [
                 (
                     "hold10_trailing_be05",
@@ -1156,8 +1155,15 @@ def _apply_scalp_accuracy_gates(payload: dict, timeframe: str) -> None:
 
     existing = [str(item) for item in scalp.get("trade_blocked_reasons", [])]
     scalp["trade_blocked_reasons"] = [*existing, *[item for item in blockers if item not in existing]][:8]
+    scalp["signals"] = []
+    if payload.get("signals"):
+        payload["signals"] = [
+            sig for sig in payload.get("signals", [])
+            if not (isinstance(sig, dict) and str(sig.get("model", "")).startswith("unified-scalp"))
+        ]
     stats = payload.get("stats")
     if isinstance(stats, dict):
+        stats["scalp_signals"] = 0
         stats["scalp_blocked"] = len(scalp["trade_blocked_reasons"])
 
 

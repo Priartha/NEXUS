@@ -81,28 +81,7 @@ function upsertCandle(candles: ChartCandle[], candle: ApiCandle): ChartCandle[] 
     .slice(-700)
 }
 
-const CACHE_KEY = 'nexus-chart-store'
-
-function loadCache(): Partial<ChartStore> {
-  try {
-    const raw = localStorage.getItem(CACHE_KEY)
-    if (raw) return JSON.parse(raw)
-  } catch {}
-  return {}
-}
-
-function saveCache(state: { signals: unknown; scalpContext: unknown; scalpRisk: unknown }) {
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify({
-      signals: state.signals,
-      scalpContext: state.scalpContext,
-      scalpRisk: state.scalpRisk,
-    }))
-  } catch {}
-}
-
 export const useChartStore = create<ChartStore>((set) => ({
-  ...loadCache(),
   candles: [],
   lastApiCandle: null,
   fvgs: [],
@@ -245,18 +224,6 @@ export const useChartStore = create<ChartStore>((set) => ({
       if (message.paper_trading) next.paperTrading = message.paper_trading
       if (message.scalp !== undefined) next.scalpContext = message.scalp
       if (message.scalp_risk !== undefined) next.scalpRisk = message.scalp_risk
-
-      // Persist signal state so it survives page refresh
-      const hasSignal = next.signals ?? state.signals
-      const hasScalp = next.scalpContext ?? state.scalpContext
-      const hasRisk = next.scalpRisk ?? state.scalpRisk
-      if (hasSignal || hasScalp || hasRisk) {
-        queueMicrotask(() => saveCache({
-          signals: hasSignal,
-          scalpContext: hasScalp,
-          scalpRisk: hasRisk,
-        }))
-      }
 
       return next
     }),

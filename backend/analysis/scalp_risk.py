@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from backend.config import settings
-from backend.models.types import ScalpSignal, TradeSignal
+from backend.models.types import ScalpSignal
 
 
 @dataclass
@@ -132,7 +132,7 @@ class ScalpRiskManager:
             "sl_distance_pct": round(sl_distance / entry_mid * 100, 3),
         }
 
-    def record_trade_open(self, signal: ScalpSignal | TradeSignal | dict[str, Any] | None = None) -> None:
+    def record_trade_open(self, signal: ScalpSignal) -> None:
         self._reset_if_new_day()
         self.state.daily_trades += 1
         self.state.open_futures_positions += 1

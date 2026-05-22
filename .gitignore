@@ -27,7 +27,7 @@ data/
 !package.json
 !package-lock.json
 !tsconfig*.json
-!opencode.example.json
+!opencode.json
 
 # Local environment
 .env
@@ -45,4 +45,3 @@ maverick-mcp/
 Thumbs.db
 .vscode/
 .idea/
-data/profitability_validation.json

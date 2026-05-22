@@ -15,7 +15,6 @@ import uuid
 from typing import Any
 
 from backend.analysis.risk_manager import RiskManager
-from backend.analysis.profitability_guard import can_trade_live
 from backend.models.types import Candle, TradeSignal
 from backend.storage import repository as repo
 
@@ -27,7 +26,7 @@ class PaperTradingEngine:
         self,
         initial_balance: float = 10_000.0,
         max_concurrent: int = 1,
-        min_confidence: float = 0.40,
+        min_confidence: float = 0.60,
         max_daily_trades: int = 5,
         max_daily_loss_pct: float = 0.03,
         cooldown_after_losses: int = 3,
@@ -72,15 +71,6 @@ class PaperTradingEngine:
 
         qualified = [s for s in signals if s.confidence >= self.min_confidence and s.status in ("open", "pending", "active")]
         if not qualified:
-            return events
-
-        allowed_by_validation, validation_blockers = can_trade_live()
-        if not allowed_by_validation:
-            events.append({
-                "type": "trade_blocked",
-                "reason": "profitability_validation",
-                "blockers": validation_blockers,
-            })
             return events
 
         open_count = len([t for t in open_trades if t["status"] == "open"])
@@ -191,7 +181,6 @@ class PaperTradingEngine:
 
             bars_held = trade.get("bars_held", 0) + 1
             trade["bars_held"] = bars_held
-            repo.update_paper_trade(trade["id"], {"bars_held": bars_held})
             funding_cost = bars_held * self.funding_rate_per_8h * entry * qty
 
             if side == "buy":

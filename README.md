@@ -44,6 +44,15 @@ Futures scalping signal panel with real-time confluence score, directional edge,
 ### Signals
 Primary trade signal display with grade (A+/A/B/C/NO_TRADE), readiness level, confidence gauge, and full ICT confluence breakdown. Shows entry price, stop loss, take profit targets, and invalidation conditions.
 
+### Pats (Patterns)
+ICT pattern intelligence dashboard showing:
+- Detected Fair Value Gaps (bullish/bearish)
+- Order Blocks with breaker status
+- Liquidity levels (equal highs/lows)
+- Pattern bias meter (bullish/neutral/bearish distribution)
+- Bull/Bear scores and average confidence
+- Context grid: session, regime, volatility, signal state
+
 ### Futures
 Real-time BTCUSD perpetual futures context:
 - Funding rate (current, annualized, cycle countdown)
@@ -52,18 +61,17 @@ Real-time BTCUSD perpetual futures context:
 - Estimated funding cost per 8h cycle
 - Leverage and margin mode display
 
+### Depth
+Orderbook depth analysis showing bid/ask imbalances, spread compression/expansion, depth saturation levels, and accumulation/distribution pattern detection.
+
+### Inst. (Institutional)
+Institutional flow metrics including volume profile (POC, VAH, VAL), volume imbalance, realized volatility, and smart money detection patterns.
+
 ### Risk
 Risk management dashboard with Kelly fraction, CVaR95 estimation, risk of ruin calculation, position sizing calculator, and enforced limits (daily loss, drawdown, max positions).
 
 ### Momentum
 Momentum indicators including RSI, displacement ratio, trend score, volatility score, and expected move calculations.
-
-### Log (Signal Log)
-Live scrollable feed of all scalp signals with:
-- Summary stats: total count, long/short split, avg RRR, open signals
-- Confidence distribution (HIGH/MEDIUM/LOW)
-- Per-signal entry: timestamp, direction, confidence, RRR, status, reasons
-- Auto-refreshes every 15 seconds from signal journal
 
 ### Alerts
 System alert center with audio notifications for:
@@ -88,6 +96,15 @@ Walk-forward backtesting engine with:
 - Verdict system: GOOD MODEL (PF >= 1.5), PROFITABLE (PF > 1.0), BAD MODEL (PF < 1.0)
 - Equity curve visualization
 - Full trade history with PnL analysis
+
+### Demo (Forward Test)
+Live forward testing with real-time signal evaluation and trade lifecycle tracking.
+
+### Config
+Strategy configuration panel for adjusting signal thresholds, risk parameters, and analysis settings.
+
+### Analytics
+Risk analytics dashboard with performance metrics, drawdown analysis, and statistical summaries.
 
 ---
 

@@ -830,26 +830,6 @@ export interface ScalpContext {
   futures_leverage: number
   estimated_funding_cost_8h: number
   wick_rejection: ScalpWickRejection | null
-  
-  // AI Brain properties
-  ai_brain_active?: boolean
-  ai_intelligence?: AIIntelligence | null
-}
-
-export interface AIIntelligence {
-  decisions: number
-  accuracy: number
-  memory_stats: {
-    total_trades: number
-    winning_trades: number
-    win_rate: number
-    total_pnl: number
-    avg_pnl_per_trade: number
-    patterns_learned: number
-    market_hours_learned: number
-  }
-  patterns_learned: number
-  market_hours_knowledge: number
 }
 
 export interface ScalpRiskSummary {

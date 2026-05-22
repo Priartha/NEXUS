@@ -15,7 +15,7 @@ from backend.analysis.order_block import detect_order_blocks, update_order_block
 from backend.analysis.orderbook import OrderbookAnalyzer
 from backend.analysis.paper_trading import PaperTradingEngine
 from backend.analysis.price_action_readability import assess_price_action_readability, ReadabilitySnapshot
-from backend.analysis.regime_v2 import detect_market_regime
+from backend.analysis.regime import detect_market_regime
 from backend.analysis.unified_scalp import UnifiedScalpEngine
 from backend.analysis.scalp_risk import ScalpRiskManager
 from backend.config import settings
@@ -72,7 +72,6 @@ class AnalysisPipeline:
         
         # BTC movement & investor behavior patterns
         self.btc_patterns: BtcPatternContext | None = None
-        self._btc_patterns_ts = 0
 
         # Market psychology & price action readability
         self.psychology: PsychologySnapshot | None = None
@@ -204,7 +203,6 @@ class AnalysisPipeline:
             metrics=self.metrics,
             regime=self.regime,
         )
-        self._btc_patterns_ts = candles[-1].timestamp
 
         # Orderbook analysis - always run
         self.ob_imbalances = self.orderbook_analyzer.detect_imbalances()
@@ -269,7 +267,6 @@ class AnalysisPipeline:
             metrics=self.metrics,
             regime=self.regime,
         )
-        self._btc_patterns_ts = latest.timestamp
 
         # Incremental orderbook analysis - always run
         self.ob_imbalances = self.orderbook_analyzer.detect_imbalances()
@@ -332,18 +329,16 @@ class AnalysisPipeline:
             self.metrics = compute_market_metrics(closed_candles, self.swings)
             self.regime = detect_market_regime(closed_candles, self.metrics, self.liquidity_events)
             self.projection = build_price_projection(closed_candles, self.metrics, self.liquidity_events)
-            if self._btc_patterns_ts != closed_candles[-1].timestamp:
-                self.btc_patterns = detect_btc_patterns(
-                    candles=closed_candles[-self.lookback:],
-                    swings=self.swings,
-                    fvgs=self.fvgs,
-                    order_blocks=self.order_blocks,
-                    liquidity=self.liquidity,
-                    liquidity_events=self.liquidity_events,
-                    metrics=self.metrics,
-                    regime=self.regime,
-                )
-                self._btc_patterns_ts = closed_candles[-1].timestamp
+            self.btc_patterns = detect_btc_patterns(
+                candles=closed_candles[-self.lookback:],
+                swings=self.swings,
+                fvgs=self.fvgs,
+                order_blocks=self.order_blocks,
+                liquidity=self.liquidity,
+                liquidity_events=self.liquidity_events,
+                metrics=self.metrics,
+                regime=self.regime,
+            )
         # Refresh accumulations status with latest candle data
         if self.quote_history:
             latest_candle = closed_candles[-1] if closed_candles else None
@@ -354,7 +349,7 @@ class AnalysisPipeline:
                 )
 
         from backend.analysis.mtf_confluence import compute_mtf_confluence
-        mtf = compute_mtf_confluence(store.timeframe, {store.timeframe: store}, {store.timeframe: self})
+        mtf = compute_mtf_confluence(store.timeframe, {"placeholder": store}, {store.timeframe: self})
 
         ob_imb_data = to_wire(self.ob_imbalances[-15:])
         ob_acc_data = to_wire([a for a in self.ob_accumulations if a.status == "active"][-10:])
@@ -485,10 +480,6 @@ class AnalysisPipeline:
                 mtf_confluence=mtf,
             )
             for ev in events:
-                if ev["type"] == "trade_opened":
-                    self.scalp_risk.record_trade_open(ev.get("trade"))
-                elif ev["type"] == "trade_closed":
-                    self.scalp_risk.record_trade_close(ev.get("pnl", 0))
                 self._on_alert(ev)
 
         for sig in signals:
@@ -634,6 +625,13 @@ class AnalysisPipeline:
             }
             for c in closed
         ]
+
+    def _get_closed_candles_for_state(self) -> list[Candle]:
+        """Get closed candles from the store (requires store reference)."""
+        # This is a placeholder - the store reference needs to be passed
+        # For now, return empty list. The recorder will need to be updated
+        # to pass the store reference or the pipeline needs to store it.
+        return []
 
     def set_store_reference(self, store: CandleStore) -> None:
         """Set reference to candle store for state extraction."""

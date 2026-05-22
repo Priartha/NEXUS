@@ -490,7 +490,6 @@ class ScalpSignal:
     target_2: float
     leverage: int = 0
     reason: str = ""
-    score: float = 0.0
     risk_reward: float = 0.0
     confidence: str = "MEDIUM"
     time_limit_ms: int = 0
@@ -539,10 +538,6 @@ class ScalpContext:
     futures_leverage: int = 10
     estimated_funding_cost_8h: float = 0.0
     wick_rejection: Optional[ScalpWickRejection] = None
-    
-    # AI Brain properties
-    ai_brain_active: bool = False
-    ai_intelligence: Optional[dict] = None
 
 
 @dataclass

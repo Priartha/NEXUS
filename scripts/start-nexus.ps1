@@ -97,20 +97,8 @@ New-Item -ItemType Directory -Force -Path $logDir, $runtimeDir | Out-Null
 Normalize-ProcessPathEnvironment
 
 Write-Step "Checking local toolchain"
-try {
-    $pyVer = python --version 2>&1
-    Write-Host "[OK] $pyVer"
-} catch {
-    Write-Host "[ERROR] Python not found. Install Python 3.11+ from python.org"
-    exit 1
-}
-try {
-    $nodeVer = node --version 2>&1
-    Write-Host "[OK] Node $nodeVer"
-} catch {
-    Write-Host "[ERROR] Node.js not found. Install from nodejs.org"
-    exit 1
-}
+Require-Command "python" "Install Python 3.12+ and reopen PowerShell."
+Require-Command "node" "Install Node.js 20+ and reopen PowerShell."
 Require-Command "npm.cmd" "Install Node.js 20+ and reopen PowerShell."
 
 if (-not (Test-Path $python)) {

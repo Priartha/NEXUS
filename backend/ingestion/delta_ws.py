@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
-import socket
 import time
 from dataclasses import dataclass
 
@@ -17,44 +15,6 @@ from backend.engine.candle_aggregator import normalize_timestamp_ms
 from backend.engine.candle_store import CandleStore
 from backend.ingestion.delta_rest import fetch_historical_candles
 from backend.models.types import MarketQuote, to_wire
-
-logger = logging.getLogger("backend")
-
-
-def _prefer_ipv4() -> None:
-    orig = socket.getaddrinfo
-
-    def _ipv4_first(host, port, family=0, type=0, proto=0, flags=0):
-        try:
-            return orig(host, port, socket.AF_INET, type, proto, flags)
-        except Exception:
-            return orig(host, port, family, type, proto, flags)
-
-    socket.getaddrinfo = _ipv4_first
-    # Log resolved IPs for diagnostics
-    try:
-        ips = {i[4][0] for i in orig("public-socket.india.delta.exchange", 443, socket.AF_INET)}
-        logger.info("Delta WS resolved to IPv4: %s", sorted(ips))
-    except Exception:
-        pass
-
-
-_prefer_ipv4()
-
-
-def _diagnose_connection(url: str) -> None:
-    """Log DNS and connectivity diagnostics for a WebSocket URL."""
-    try:
-        from urllib.parse import urlparse
-        host = urlparse(url).hostname or "public-socket.india.delta.exchange"
-        for fam, label in [(socket.AF_INET, "IPv4"), (socket.AF_INET6, "IPv6")]:
-            try:
-                ips = [i[4][0] for i in socket.getaddrinfo(host, 443, fam)]
-                logger.info("  %s for %s: %s", label, host, ips)
-            except Exception as e:
-                logger.info("  %s for %s: FAILED (%s)", label, host, e)
-    except Exception as exc:
-        logger.debug("Connection diagnostics failed: %s", exc)
 
 
 @dataclass(frozen=True)
@@ -110,7 +70,10 @@ async def start_delta_stream(
     pipelines: dict[str, AnalysisPipeline],
     config: Settings,
 ) -> None:
-    logger.info("Starting Delta stream for %s", config.symbol)
+    import logging
+    logger = logging.getLogger("backend")
+    
+    logger.info(f"Starting Delta stream for {config.symbol}")
     await seed_all_historical(stores, pipelines, manager, config)
 
     backoff = config.ws_reconnect_initial_seconds
@@ -120,7 +83,6 @@ async def start_delta_stream(
             logger.info(f"Connecting to Delta WebSocket: {config.ws_url}")
             async with websockets.connect(
                 config.ws_url,
-                open_timeout=15,
                 ping_interval=20,
                 ping_timeout=10,
                 close_timeout=5,
@@ -196,21 +158,6 @@ async def start_delta_stream(
                             }
                         )
 
-                    ts_raw = message.get("ts") or message.get("timestamp") or message.get("t")
-                    ts = normalize_timestamp_ms(ts_raw) if ts_raw is not None else int(time.time() * 1000)
-                    if message_type == "funding_rate":
-                        rate = _optional_float(message.get("funding_rate") or message.get("rate"))
-                        if rate is not None and math.isfinite(rate):
-                            for pipeline in pipelines.values():
-                                pipeline.scalp_engine.ingest_funding(rate, ts)
-                        continue
-                    if message_type == "open_interest":
-                        oi = _optional_float(message.get("open_interest") or message.get("oi_value"))
-                        if oi is not None and math.isfinite(oi):
-                            for pipeline in pipelines.values():
-                                pipeline.scalp_engine.ingest_oi(oi, ts)
-                        continue
-
                     tick = parse_trade_message(message, config.symbol)
                     if tick is None:
                         continue
@@ -239,11 +186,11 @@ async def start_delta_stream(
                         candle_closed = store.update_tick(tick.price, tick.qty, tick.timestamp_ms)
                         if candle_closed:
                             pipeline = pipelines[timeframe]
-                            analysis_task = asyncio.create_task(pipeline.run_async(store))
-                            analysis_task.add_done_callback(
-                                lambda t, tf=timeframe: asyncio.create_task(
-                                    manager.broadcast(t.result(), timeframe=tf)
-                                ) if not t.cancelled() and t.exception() is None else None
+                            result = await pipeline.run_async(store)
+                            timeframe_updates.append(
+                                asyncio.create_task(
+                                    manager.broadcast(result, timeframe=timeframe)
+                                )
                             )
                         elif store.live_candle is not None:
                             timeframe_updates.append(
@@ -264,27 +211,17 @@ async def start_delta_stream(
         except asyncio.CancelledError:
             logger.info("Delta stream cancelled")
             raise
-        except TimeoutError:
-            logger.warning("Delta WebSocket handshake timed out (IPv6 may be unreachable, forcing IPv4)")
-            _diagnose_connection(config.ws_url)
-            await manager.broadcast({
-                "update_type": "status",
-                "status": "stream_disconnected",
-                "message": "WebSocket handshake timed out (IPv6 unreachable, retry with IPv4)",
-                "retry_in_seconds": backoff,
-                "symbol": config.symbol,
-            })
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 1.8, config.ws_reconnect_max_seconds)
         except Exception as exc:
             logger.warning("Delta WebSocket disconnected: %s", exc)
-            await manager.broadcast({
-                "update_type": "status",
-                "status": "stream_disconnected",
-                "message": str(exc),
-                "retry_in_seconds": backoff,
-                "symbol": config.symbol,
-            })
+            await manager.broadcast(
+                            {
+                                "update_type": "status",
+                                "status": "stream_disconnected",
+                                "message": str(exc),
+                                "retry_in_seconds": backoff,
+                                "symbol": config.symbol,
+                            }
+                        )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 1.8, config.ws_reconnect_max_seconds)
 
@@ -327,7 +264,7 @@ def parse_trade_message(message: dict, symbol: str) -> TradeTick | None:
 def parse_quote_message(message: dict, symbol: str) -> MarketQuote | None:
     message_type = message.get("type")
     message_symbol = message.get("sy") or message.get("symbol") or message.get("product_symbol")
-    if not message_symbol or message_symbol != symbol:
+    if message_symbol and message_symbol != symbol:
         return None
 
     now_ms = int(time.time() * 1000)
