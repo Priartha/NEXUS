@@ -591,11 +591,11 @@ class UnifiedScalpEngine:
         base_volume = sum(c.volume for c in base_window) / len(base_window) if base_window else recent_volume
         volume_ratio = recent_volume / base_volume if base_volume > 0 else 1.0
         if is_trending:
-            vol_threshold = 0.80
+            vol_threshold = settings.scalp_min_volume_impulse  # Use config value (0.55)
         elif is_consolidation:
-            vol_threshold = 0.40
+            vol_threshold = settings.scalp_min_volume_impulse * 0.7  # Lower in consolidation
         else:
-            vol_threshold = 0.50
+            vol_threshold = settings.scalp_min_volume_impulse * 0.9
         if volume_ratio < vol_threshold:
             blockers.append(f"Volume impulse {volume_ratio:.2f} below {vol_threshold:.2f}")
 
@@ -881,25 +881,53 @@ class UnifiedScalpEngine:
 
         return _clamp(score, 0, 1), reasons
 
-    # ── Signal builder ──
+    # ── Filter: Only trade with regime direction ──
+    def _regime_direction_filter(self, candles: list[Candle], side: str, regime: MarketRegime | None) -> str | None:
+        """Only allow trades that align with regime bias."""
+        if regime is None:
+            return "No regime detected"
+        
+        if regime.phase != "trending":
+            return f"Non-trending regime: {regime.phase}"
+        
+        if regime.bias == "bullish" and side == "sell":
+            return "Bearish trade in bullish regime"
+        if regime.bias == "bearish" and side == "buy":
+            return "Bullish trade in bearish regime"
+        
+        return None  # Passes filter
 
     def _build_signal(self, signal_type: str, price: float, atr: float, score: float, reasons: list[str], now_ms: int, fr: ScalpFundingRate | None = None) -> ScalpSignal:
         is_long = "LONG" in signal_type
         entry = price
-        sl_dist = atr * 1.5
+        
+        # Dynamic risk management based on score
+        # Higher score = tighter stop (more leverage) + wider target (better R:R)
+        sl_multiplier = max(1.0, 2.5 - score * 2)  # 1.0 at score=0.75, 2.5 at score=0
+        tp1_multiplier = 2.0 + score * 3  # 2.0 at score=0, 5.0 at score=1.0
+        tp2_multiplier = 4.0 + score * 6  # 4.0 at score=0, 10.0 at score=1.0
+        
+        sl_dist = atr * sl_multiplier
         entry_dist = atr * 0.1
-        t2_dist = atr * 7.5
-        t1_dist = atr * 3.0
+        t2_dist = atr * tp2_multiplier
+        t1_dist = atr * tp1_multiplier
+        
         sl = entry - sl_dist if is_long else entry + sl_dist
         t1 = entry + t1_dist if is_long else entry - t1_dist
         t2 = entry + t2_dist if is_long else entry - t2_dist
+        
+        # Calculate R:R ratio
         rr = round(abs(t2 - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0.0
-        leverage = min(settings.scalp_max_leverage, max(3, int(8 * score)))
+        
+        # Leverage scales with score for high-quality signals
+        base_leverage = max(3, int(10 * score))
+        leverage = min(settings.scalp_max_leverage, base_leverage + 5)  # Bonus leverage for good signals
+        
         confidence = "HIGH" if score >= 0.65 else ("MEDIUM" if score >= 0.50 else "LOW")
         time_limit = now_ms + settings.scalp_max_hold_minutes * 60 * 1000
         funding_impact = (fr.current_rate * 3 * 100) if fr else 0.0
         if funding_impact != 0:
-            reasons.append(f"Funding cost ~{funding_impact:.3f}% per 8h")
+            reasons.append(f"Funding: {funding_impact:.3f}% per 8h")
 
         from backend.analysis.ids import stable_id
         return ScalpSignal(

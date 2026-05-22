@@ -337,6 +337,7 @@ class BacktestEngine:
         liq_evt_engine: list[Any] = []
         metrics_engine = None
 
+        from backend.config import settings
         scalp = UnifiedScalpEngine()
         scalp._use_candle_timestamp_for_cooldown = True  # Use candle time for backtest
         lookback = 80
@@ -344,13 +345,17 @@ class BacktestEngine:
         last_signal_ts = 0
 
         # Seed OI and funding with realistic defaults for backtest
-        scalp._cur_funding = 0.0001  # Typical BTC funding rate (0.01%)
+        # Use settings default funding (negative means we get paid to hold)
+        scalp._cur_funding = settings.futures_default_funding  # Typical: -0.0001 (we earn funding)
         base_oi = 500_000_000.0  # $500M base OI
         for i in range(min_candles):
             ts = candles[i].timestamp
             oi_variation = base_oi * (1 + (i % 20 - 10) * 0.001)  # Small oscillation
             scalp._oi_hist.append((ts, oi_variation))
             scalp._cur_oi = base_oi
+
+        # Use settings leverage (20x default for better profit)
+        leverage = settings.futures_leverage
 
         for i in range(min_candles, len(candles)):
             window = candles[max(0, i + 1 - 500):i + 1]

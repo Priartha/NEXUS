@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, Clock, TrendingUp, TrendingDown, Target, Crosshair, Zap, Shield } from 'lucide-react'
+import { Activity, Crosshair, Shield } from 'lucide-react'
 
 interface SignalLogEntry {
   id: string
