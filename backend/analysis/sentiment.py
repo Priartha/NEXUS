@@ -65,7 +65,7 @@ class SentimentService:
         self,
         symbol: str,
         provider: str = "auto",
-        openai_model: str = "gpt-5.4-mini",
+        openai_model: str = "gpt-4o-mini",
         openai_api_key: str = "",
         openai_base_url: str = "https://api.openai.com/v1",
         gemini_model: str = "gemini-2.5-flash",

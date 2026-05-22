@@ -158,6 +158,21 @@ async def start_delta_stream(
                             }
                         )
 
+                    ts_raw = message.get("ts") or message.get("timestamp") or message.get("t")
+                    ts = normalize_timestamp_ms(ts_raw) if ts_raw is not None else int(time.time() * 1000)
+                    if message_type == "funding_rate":
+                        rate = _optional_float(message.get("funding_rate") or message.get("rate"))
+                        if rate is not None and math.isfinite(rate):
+                            for pipeline in pipelines.values():
+                                pipeline.scalp_engine.ingest_funding(rate, ts)
+                        continue
+                    if message_type == "open_interest":
+                        oi = _optional_float(message.get("open_interest") or message.get("oi_value"))
+                        if oi is not None and math.isfinite(oi):
+                            for pipeline in pipelines.values():
+                                pipeline.scalp_engine.ingest_oi(oi, ts)
+                        continue
+
                     tick = parse_trade_message(message, config.symbol)
                     if tick is None:
                         continue
@@ -186,11 +201,11 @@ async def start_delta_stream(
                         candle_closed = store.update_tick(tick.price, tick.qty, tick.timestamp_ms)
                         if candle_closed:
                             pipeline = pipelines[timeframe]
-                            result = await pipeline.run_async(store)
-                            timeframe_updates.append(
-                                asyncio.create_task(
-                                    manager.broadcast(result, timeframe=timeframe)
-                                )
+                            analysis_task = asyncio.create_task(pipeline.run_async(store))
+                            analysis_task.add_done_callback(
+                                lambda t, tf=timeframe: asyncio.create_task(
+                                    manager.broadcast(t.result(), timeframe=tf)
+                                ) if not t.cancelled() and t.exception() is None else None
                             )
                         elif store.live_candle is not None:
                             timeframe_updates.append(
@@ -264,7 +279,7 @@ def parse_trade_message(message: dict, symbol: str) -> TradeTick | None:
 def parse_quote_message(message: dict, symbol: str) -> MarketQuote | None:
     message_type = message.get("type")
     message_symbol = message.get("sy") or message.get("symbol") or message.get("product_symbol")
-    if message_symbol and message_symbol != symbol:
+    if not message_symbol or message_symbol != symbol:
         return None
 
     now_ms = int(time.time() * 1000)

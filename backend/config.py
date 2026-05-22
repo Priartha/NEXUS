@@ -36,7 +36,7 @@ class Settings:
     ai_ict_provider: str = os.getenv("ICT_AI_ICT_PROVIDER", "auto")
     sentiment_refresh_seconds: float = float(os.getenv("ICT_SENTIMENT_REFRESH_SECONDS", "300"))
     sentiment_provider: str = os.getenv("ICT_SENTIMENT_PROVIDER", "auto")
-    sentiment_model: str = os.getenv("ICT_SENTIMENT_MODEL", "gpt-5.4-mini")
+    sentiment_model: str = os.getenv("ICT_SENTIMENT_MODEL", "gpt-4o-mini")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_base_url: str = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
@@ -65,7 +65,7 @@ class Settings:
     scalp_min_spot_volume_ratio: float = float(os.getenv("NEXUS_SCALP_MIN_VOL_RATIO", "0.70"))
     scalp_vwap_band_sd: float = float(os.getenv("NEXUS_SCALP_VWAP_SD", "1.0"))
     scalp_rsi_exhaustion: float = float(os.getenv("NEXUS_SCALP_RSI_EXHAUSTION", "3"))
-    scalp_partial_exit_pct: float = float(os.getenv("NEXUS_SCALP_PARTIAL_EXIT", "0.70"))
+    scalp_partial_exit_pct: float = float(os.getenv("NEXUS_SCALP_PARTIAL_EXIT", "0.60"))
     scalp_breakeven_premium_pct: float = float(os.getenv("NEXUS_SCALP_BE_PREMIUM_PCT", "0.20"))
     scalp_min_confluence_score: float = float(os.getenv("NEXUS_SCALP_MIN_CONFLUENCE", "0.45"))
     scalp_min_directional_edge: float = float(os.getenv("NEXUS_SCALP_MIN_DIRECTIONAL_EDGE", "0.08"))
@@ -79,6 +79,14 @@ class Settings:
     scalp_wick_lookback: int = int(os.getenv("NEXUS_SCALP_WICK_LOOKBACK", "5"))
     scalp_wick_min_ratio: float = float(os.getenv("NEXUS_SCALP_WICK_MIN_RATIO", "2.0"))
     scalp_wick_max_lookback: int = int(os.getenv("NEXUS_SCALP_WICK_MAX_LOOKBACK", "8"))
+
+    # Production readiness gate
+    require_profitability_validation: bool = os.getenv("NEXUS_REQUIRE_PROFITABILITY_VALIDATION", "true").lower() == "true"
+    profitability_validation_path: str = os.getenv("NEXUS_PROFITABILITY_VALIDATION_PATH", "data/profitability_validation.json")
+    profitability_min_trades: int = int(os.getenv("NEXUS_PROFITABILITY_MIN_TRADES", "100"))
+    profitability_min_win_rate: float = float(os.getenv("NEXUS_PROFITABILITY_MIN_WIN_RATE", "0.50"))
+    profitability_min_profit_factor: float = float(os.getenv("NEXUS_PROFITABILITY_MIN_PF", "1.50"))
+    profitability_max_drawdown_pct: float = float(os.getenv("NEXUS_PROFITABILITY_MAX_DD_PCT", "15.0"))
 
 
 settings = Settings()

@@ -80,8 +80,8 @@ def save_paper_trade(trade: dict) -> None:
             INSERT OR REPLACE INTO paper_trades
             (id, signal_id, symbol, timeframe, side, entry_price, stop_loss,
              take_profit, quantity, status, opened_at, closed_at, exit_price,
-             pnl, pnl_pct, risk_reward, confidence, reason, close_reason)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             pnl, pnl_pct, risk_reward, confidence, reason, close_reason, bars_held)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             trade["id"], trade.get("signal_id"), trade["symbol"],
             trade.get("timeframe", "5m"), trade["side"], trade["entry_price"],
@@ -90,6 +90,7 @@ def save_paper_trade(trade: dict) -> None:
             trade.get("closed_at"), trade.get("exit_price"),
             trade.get("pnl"), trade.get("pnl_pct"), trade.get("risk_reward"),
             trade.get("confidence"), trade.get("reason"), trade.get("close_reason"),
+            trade.get("bars_held", 0),
         ))
         conn.commit()
     finally:
@@ -105,6 +106,26 @@ def close_paper_trade(trade_id: str, exit_price: float, pnl: float,
             exit_price=?, pnl=?, pnl_pct=?, close_reason=?
             WHERE id=?
         """, (int(time.time() * 1000), exit_price, pnl, pnl_pct, close_reason, trade_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_paper_trade(trade_id: str, updates: dict) -> None:
+    allowed = {
+        "stop_loss", "take_profit", "quantity", "status", "closed_at",
+        "exit_price", "pnl", "pnl_pct", "risk_reward", "confidence",
+        "reason", "close_reason", "bars_held",
+    }
+    fields = [key for key in updates if key in allowed]
+    if not fields:
+        return
+    conn = get_conn()
+    try:
+        assignments = ", ".join(f"{field}=?" for field in fields)
+        values = [updates[field] for field in fields]
+        values.append(trade_id)
+        conn.execute(f"UPDATE paper_trades SET {assignments} WHERE id=?", values)
         conn.commit()
     finally:
         conn.close()

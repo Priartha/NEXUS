@@ -490,6 +490,7 @@ class ScalpSignal:
     target_2: float
     leverage: int = 0
     reason: str = ""
+    score: float = 0.0
     risk_reward: float = 0.0
     confidence: str = "MEDIUM"
     time_limit_ms: int = 0

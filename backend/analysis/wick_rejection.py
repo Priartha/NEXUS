@@ -39,8 +39,8 @@ def analyze_wick_rejection(candles: list[Candle]) -> ScalpWickRejection:
     consecutive_upper = _consecutive(recent, min_ratio, side="upper")
     consecutive_lower = _consecutive(recent, min_ratio, side="lower")
 
-    bearish_active = consecutive_upper >= 1
-    bullish_active = consecutive_lower >= 1
+    bearish_active = consecutive_upper >= 2 or (consecutive_upper == 1 and max_upper > 3.0)
+    bullish_active = consecutive_lower >= 2 or (consecutive_lower == 1 and max_lower > 3.0)
 
     net_strength = 0.0
     if bearish_active and not bullish_active:

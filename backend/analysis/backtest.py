@@ -26,7 +26,7 @@ from backend.analysis.liquidity import check_liquidity_sweeps, detect_equal_leve
 from backend.analysis.liquidity_engineering import detect_liquidity_events
 from backend.analysis.market_structure import detect_structure
 from backend.analysis.order_block import detect_order_blocks, update_order_block_breakers
-from backend.analysis.regime import detect_market_regime
+from backend.analysis.regime_v2 import detect_market_regime
 from backend.analysis.unified_scalp import UnifiedScalpEngine
 from backend.analysis.statistical_tests import compute_full_statistics, compute_sharpe_ratio
 from backend.analysis.swing_detector import detect_swings
@@ -98,11 +98,22 @@ class BacktestEngine:
         symbol: str,
         timeframe: str,
     ) -> dict:
+        return self._run_single_with_balance(candles, symbol, timeframe, self.initial_balance)
+
+    def _run_single_with_balance(
+        self,
+        candles: list[Candle],
+        symbol: str,
+        timeframe: str,
+        start_balance: float,
+    ) -> dict:
         try:
-            results, equity, balance, peak, open_trades, returns_series = self._execute_trades(candles, timeframe)
+            results, equity, balance, peak, open_trades, returns_series, regime_map = self._execute_trades(
+                candles, timeframe, start_balance=start_balance
+            )
         except Exception as e:
             logger.error(f"_execute_trades failed: {e}")
-            return self._fallback_result(candles, symbol, timeframe)
+            return self._fallback_result(candles, symbol, timeframe, start_balance=start_balance)
 
         try:
             benchmark_returns = self._compute_benchmark_returns(candles)
@@ -111,7 +122,7 @@ class BacktestEngine:
             benchmark_returns = []
             sma_returns = []
 
-        stats = self._compute_stats(results, equity, balance, candles, symbol, timeframe)
+        stats = self._compute_stats(results, equity, balance, candles, symbol, timeframe, start_balance=start_balance)
         try:
             stats.update(self._compute_benchmark_stats(candles, benchmark_returns, sma_returns))
         except Exception:
@@ -146,7 +157,7 @@ class BacktestEngine:
             }
 
         try:
-            regime_perf = self._compute_regime_performance(candles, results)
+            regime_perf = self._compute_regime_performance(candles, results, regime_map)
             stats["regime_performance"] = regime_perf
         except Exception as e:
             logger.warning(f"Regime performance computation failed: {e}")
@@ -156,9 +167,10 @@ class BacktestEngine:
         stats["equity_curve"] = equity
         return stats
 
-    def _fallback_result(self, candles: list[Candle], symbol: str, timeframe: str) -> dict:
+    def _fallback_result(self, candles: list[Candle], symbol: str, timeframe: str, start_balance: float | None = None) -> dict:
         """Return a minimal valid result when the full backtest fails."""
-        balance = self.initial_balance
+        initial_balance = self.initial_balance if start_balance is None else float(start_balance)
+        balance = initial_balance
         return {
             "id": str(uuid.uuid4()),
             "symbol": symbol,
@@ -166,7 +178,7 @@ class BacktestEngine:
             "start_date": candles[0].timestamp if candles else 0,
             "end_date": candles[-1].timestamp if candles else 0,
             "candle_count": len(candles),
-            "initial_balance": self.initial_balance,
+            "initial_balance": initial_balance,
             "final_balance": round(balance, 2),
             "total_pnl": 0.0,
             "total_pnl_pct": 0.0,
@@ -214,10 +226,29 @@ class BacktestEngine:
         test_candles = candles[train_size:]
 
         train_result = self._run_single(train_candles, symbol, timeframe)
-        test_result = self._run_single(test_candles, symbol, timeframe)
+        test_result = self._run_single_with_balance(
+            test_candles, symbol, timeframe, start_balance=train_result["final_balance"]
+        )
 
-        combined_balance = train_result["final_balance"] + (test_result["final_balance"] - self.initial_balance)
+        combined_balance = test_result["final_balance"]
         combined_pnl = combined_balance - self.initial_balance
+        combined_trades = train_result.get("trades", []) + test_result.get("trades", [])
+        wins = [t for t in combined_trades if t.get("pnl", 0) > 0]
+        losses = [t for t in combined_trades if t.get("pnl", 0) <= 0]
+        gross_profit = sum(t.get("pnl", 0) for t in wins)
+        gross_loss = abs(sum(t.get("pnl", 0) for t in losses))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (999.99 if wins else 0.0)
+        combined_equity = train_result.get("equity_curve", []) + test_result.get("equity_curve", [])
+        max_drawdown_pct = max((e.get("drawdown_pct", 0) for e in combined_equity), default=0)
+        regime_performance = self._merge_regime_performance(
+            train_result.get("regime_performance", {}),
+            test_result.get("regime_performance", {}),
+        )
+        benchmark_buy_hold = self._compute_benchmark_stats(
+            candles,
+            self._compute_benchmark_returns(candles),
+            self._compute_sma_benchmark_returns(candles),
+        ).get("benchmark_buy_hold", {})
 
         return {
             "id": str(uuid.uuid4()),
@@ -248,26 +279,51 @@ class BacktestEngine:
                 "total_pnl": round(combined_pnl, 2),
                 "total_pnl_pct": round((combined_pnl / self.initial_balance) * 100, 4),
                 "total_trades": train_result["total_trades"] + test_result["total_trades"],
+                "winning_trades": len(wins),
+                "losing_trades": len(losses),
                 "win_rate": round(
                     (train_result["winning_trades"] + test_result["winning_trades"]) /
                     max(train_result["total_trades"] + test_result["total_trades"], 1), 4
                 ),
+                "profit_factor": round(profit_factor, 4),
+                "max_drawdown_pct": round(max_drawdown_pct, 4),
                 "degradation": round(
                     test_result["sharpe_ratio"] - train_result["sharpe_ratio"], 4
                 ) if test_result["total_trades"] > 0 else 0,
             },
             "is_robust": test_result["total_trades"] > 5 and test_result["sharpe_ratio"] > 0,
-            "trades": train_result.get("trades", []) + test_result.get("trades", []),
-            "equity_curve": train_result.get("equity_curve", []) + test_result.get("equity_curve", []),
+            "benchmark_buy_hold": benchmark_buy_hold,
+            "regime_performance": regime_performance,
+            "trades": combined_trades,
+            "equity_curve": combined_equity,
         }
 
-    def _execute_trades(self, candles: list[Candle], timeframe: str = "5m"):
+    def _merge_regime_performance(self, first: dict, second: dict) -> dict:
+        phases = set(first) | set(second)
+        merged = {}
+        for phase in phases:
+            a = first.get(phase, {})
+            b = second.get(phase, {})
+            trade_count = a.get("trade_count", 0) + b.get("trade_count", 0)
+            total_pnl = a.get("total_pnl", 0) + b.get("total_pnl", 0)
+            wins = round(a.get("win_rate", 0) * a.get("trade_count", 0)) + round(b.get("win_rate", 0) * b.get("trade_count", 0))
+            merged[phase] = {
+                "trade_count": trade_count,
+                "total_pnl": round(total_pnl, 2),
+                "avg_pnl": round(total_pnl / trade_count, 2) if trade_count else 0,
+                "win_rate": round(wins / trade_count, 4) if trade_count else 0,
+            }
+        return merged
+
+    def _execute_trades(self, candles: list[Candle], timeframe: str = "5m", start_balance: float | None = None):
         results: list[dict] = []
         equity: list[dict] = []
-        balance = self.initial_balance
+        initial_balance = self.initial_balance if start_balance is None else float(start_balance)
+        balance = initial_balance
         peak = balance
         open_trades: list[dict] = []
         returns_series: list[float] = []
+        regime_map: dict[int, str] = {}
 
         # Normalize funding rate to per-bar (was incorrectly using full 8h rate per bar)
         bar_ms = timeframe_to_ms(timeframe)
@@ -297,7 +353,7 @@ class BacktestEngine:
             scalp._cur_oi = base_oi
 
         for i in range(min_candles, len(candles)):
-            window = candles[:i + 1]
+            window = candles[max(0, i + 1 - 500):i + 1]
             recent = window[-lookback:]
             current = candles[i]
 
@@ -316,6 +372,8 @@ class BacktestEngine:
             liq_evt_engine = detect_liquidity_events(recent, liq_engine, atr)[-80:]
             structure = detect_structure(swing_engine, window)
             regime = detect_market_regime(window, metrics_engine, liq_evt_engine)
+            if regime:
+                regime_map[current.timestamp] = regime.phase
 
             # Update OI with slight trend to enable momentum detection
             prev_oi = scalp._cur_oi
@@ -465,7 +523,7 @@ class BacktestEngine:
                     trade["close_reason"] = "time_exit"
                     trade["funding_cost"] = round(funding_cost, 2)
                     balance += pnl
-                    returns_series.append(pnl / self.initial_balance)
+                    returns_series.append(pnl / initial_balance)
                     results.append(dict(trade))
                     continue
 
@@ -489,7 +547,7 @@ class BacktestEngine:
                     trade["close_reason"] = "stop_loss"
                     trade["funding_cost"] = round(funding_cost, 2)
                     balance += pnl
-                    returns_series.append(pnl / self.initial_balance)
+                    returns_series.append(pnl / initial_balance)
                     results.append(dict(trade))
                 elif hit_target:
                     exit_price = tp
@@ -504,7 +562,7 @@ class BacktestEngine:
                     trade["close_reason"] = "target_hit"
                     trade["funding_cost"] = round(funding_cost, 2)
                     balance += pnl
-                    returns_series.append(pnl / self.initial_balance)
+                    returns_series.append(pnl / initial_balance)
                     results.append(dict(trade))
 
             if balance > peak:
@@ -521,11 +579,12 @@ class BacktestEngine:
                     "drawdown_pct": round(dd_pct, 4),
                 })
 
-        return results, equity, balance, peak, open_trades, returns_series
+        return results, equity, balance, peak, open_trades, returns_series, regime_map
 
-    def _compute_stats(self, results, equity, balance, candles, symbol="", timeframe=""):
-        total_pnl = balance - self.initial_balance
-        total_pnl_pct = (total_pnl / self.initial_balance) * 100
+    def _compute_stats(self, results, equity, balance, candles, symbol="", timeframe="", start_balance: float | None = None):
+        initial_balance = self.initial_balance if start_balance is None else float(start_balance)
+        total_pnl = balance - initial_balance
+        total_pnl_pct = (total_pnl / initial_balance) * 100 if initial_balance > 0 else 0.0
         closed = [r for r in results if r.get("exit_price") is not None]
         wins = [r for r in closed if r.get("pnl", 0) > 0]
         losses = [r for r in closed if r.get("pnl", 0) <= 0]
@@ -542,7 +601,7 @@ class BacktestEngine:
         elif wins:
             profit_factor = float("inf")
 
-        returns = [e["account_balance"] / self.initial_balance - 1 for e in equity]
+        returns = [e["account_balance"] / initial_balance - 1 for e in equity]
         avg_return = sum(returns) / len(returns) if returns else 0
         std_returns = (sum((r - avg_return) ** 2 for r in returns) / len(returns)) ** 0.5 if len(returns) > 1 else 0
         sharpe = (avg_return / std_returns * math.sqrt(365)) if std_returns > 0 else 0
@@ -565,7 +624,7 @@ class BacktestEngine:
             "start_date": candles[0].timestamp if candles else 0,
             "end_date": candles[-1].timestamp if candles else 0,
             "candle_count": len(candles),
-            "initial_balance": self.initial_balance,
+            "initial_balance": initial_balance,
             "final_balance": round(balance, 2),
             "total_pnl": round(total_pnl, 2),
             "total_pnl_pct": round(total_pnl_pct, 4),
@@ -613,8 +672,8 @@ class BacktestEngine:
         returns = []
         in_position = False
         for i in range(50, len(closes)):
-            s20 = sma20[i - 30] if i - 30 < len(sma20) else None
-            s50 = sma50[i - 50] if i - 50 < len(sma50) else None
+            s20 = sma20[i - 19] if (i - 19) < len(sma20) else None
+            s50 = sma50[i - 49] if (i - 49) < len(sma50) else None
             if s20 and s50:
                 if s20 > s50 and not in_position:
                     in_position = True
@@ -643,34 +702,30 @@ class BacktestEngine:
             },
         }
 
-    def _compute_regime_performance(self, candles, trades):
+    def _compute_regime_performance(self, candles, trades, regime_map: dict[int, str] | None = None):
         """Regime-specific performance attribution."""
         if not candles or not trades:
             return {}
 
-        regime_map = {}
-        window_size = 80
-        for i in range(window_size, len(candles)):
-            window = candles[i-window_size:i+1]
-            metrics = compute_market_metrics(window, [])
-            swings = detect_swings(window)[-50:]
-            liq_events = detect_liquidity_events(window[-20:], [], metrics.atr14 if metrics else 0)[-20:]
-            regime = detect_market_regime(window, metrics, liq_events)
-            if regime:
-                regime_map[candles[i].timestamp] = regime.phase
+        if regime_map is None:
+            regime_map = {}
+            window_size = 80
+            for i in range(window_size, len(candles)):
+                window = candles[i-window_size:i+1]
+                metrics = compute_market_metrics(window, [])
+                swings = detect_swings(window)[-50:]
+                liq_events = detect_liquidity_events(window[-20:], [], metrics.atr14 if metrics else 0)[-20:]
+                regime = detect_market_regime(window, metrics, liq_events)
+                if regime:
+                    regime_map[candles[i].timestamp] = regime.phase
+        if not regime_map:
+            return {}
 
         regime_pnl: dict[str, list[float]] = {}
         for trade in trades:
             ts = trade.get("timestamp", 0)
-            closest_regime = None
-            closest_diff = float("inf")
-            for reg_ts, phase in regime_map.items():
-                diff = abs(reg_ts - ts)
-                if diff < closest_diff:
-                    closest_diff = diff
-                    closest_regime = phase
-            if closest_regime:
-                regime_pnl.setdefault(closest_regime, []).append(trade.get("pnl", 0))
+            closest = min(regime_map, key=lambda k: abs(k - ts))
+            regime_pnl.setdefault(regime_map[closest], []).append(trade.get("pnl", 0))
 
         result = {}
         for phase, pnls in regime_pnl.items():

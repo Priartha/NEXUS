@@ -274,23 +274,24 @@ class UnifiedScalpEngine:
             ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
             return ctx
 
-        last_candle = ordered[-2]
-        candle_range = last_candle.high - last_candle.low
-        is_range_candle = regime is not None and regime.phase == "range_bound"
-        if candle_range > 0:
-            close_position = (last_candle.close - last_candle.low) / candle_range
-            if is_range_candle:
-                if winning_side == "long" and close_position >= 0.40:
-                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: long needs discount close (<40%)"])
-                if winning_side == "short" and close_position <= 0.60:
-                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: short needs premium close (>60%)"])
-            else:
-                if winning_side == "long" and close_position < 0.60:
-                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bullish candle close"])
-                if winning_side == "short" and close_position > 0.40:
-                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bearish candle close"])
+        if settings.scalp_require_candle_confirmation:
+            last_candle = ordered[-1]
+            candle_range = last_candle.high - last_candle.low
+            is_range_candle = regime is not None and regime.phase == "range_bound"
+            if candle_range > 0:
+                close_position = (last_candle.close - last_candle.low) / candle_range
+                if is_range_candle:
+                    if winning_side == "long" and close_position >= 0.40:
+                        return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: long needs discount close (<40%)"])
+                    if winning_side == "short" and close_position <= 0.60:
+                        return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Range: short needs premium close (>60%)"])
+                else:
+                    if winning_side == "long" and close_position < 0.60:
+                        return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bullish candle close"])
+                    if winning_side == "short" and close_position > 0.40:
+                        return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bearish candle close"])
 
-        if regime and regime.phase == "trending":
+        if settings.scalp_require_mtf_alignment and regime and regime.phase == "trending":
             if regime.bias == "bullish" and winning_side == "short":
                 return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: short signal in bullish trend"])
             if regime.bias == "bearish" and winning_side == "long":
@@ -345,13 +346,10 @@ class UnifiedScalpEngine:
     def _order_flow(self, candles: list[Candle]) -> ScalpOrderFlow:
         deltas: list[float] = []
         for i in range(1, len(candles)):
-            mid = (candles[i - 1].close + candles[i].close) / 2.0
-            if candles[i].close > mid:
+            if candles[i].close >= candles[i].open:
                 deltas.append(candles[i].volume)
-            elif candles[i].close < mid:
-                deltas.append(-candles[i].volume)
             else:
-                deltas.append(0.0)
+                deltas.append(-candles[i].volume)
         cvd = sum(deltas)
         recent = deltas[-10:] if len(deltas) >= 10 else deltas
         slope = (sum(recent[-3:]) - sum(recent[:3])) / max(len(recent), 1)
@@ -735,7 +733,7 @@ class UnifiedScalpEngine:
 
         # 13. Futures funding bias (weight: 0.06) — REPLACED options momentum
         fc_bias = self._context_value(fc, "funding_contrarian_bias", "neutral")
-        if fc_bias == "bullish":
+        if fc_bias == "bullish" and self._cur_funding == 0.0:
             score += 0.06; reasons.append("Futures funding bullish contrarian")
 
         # 14. Futures OI momentum (weight: 0.04) — REPLACED options contract
@@ -866,7 +864,7 @@ class UnifiedScalpEngine:
 
         # 13. Futures funding bias (weight: 0.06)
         fc_bias = self._context_value(fc, "funding_contrarian_bias", "neutral")
-        if fc_bias == "bearish":
+        if fc_bias == "bearish" and self._cur_funding == 0.0:
             score += 0.06; reasons.append("Futures funding bearish contrarian")
 
         # 14. Futures OI momentum (weight: 0.04)
@@ -897,7 +895,7 @@ class UnifiedScalpEngine:
         t2 = entry + t2_dist if is_long else entry - t2_dist
         rr = round(abs(t2 - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0.0
         leverage = min(settings.scalp_max_leverage, max(3, int(8 * score)))
-        confidence = "HIGH" if score >= 0.50 else ("MEDIUM" if score >= 0.40 else "LOW")
+        confidence = "HIGH" if score >= 0.65 else ("MEDIUM" if score >= 0.50 else "LOW")
         time_limit = now_ms + settings.scalp_max_hold_minutes * 60 * 1000
         funding_impact = (fr.current_rate * 3 * 100) if fr else 0.0
         if funding_impact != 0:
@@ -909,7 +907,7 @@ class UnifiedScalpEngine:
             timestamp=now_ms, signal_type=signal_type,
             entry_zone_low=round(entry - entry_dist, 2), entry_zone_high=round(entry + entry_dist, 2),
             sl_level=round(sl, 2), target_1=round(t1, 2), target_2=round(t2, 2),
-            leverage=leverage, reason=" | ".join(reasons), risk_reward=round(rr, 2),
+            leverage=leverage, reason=" | ".join(reasons), score=round(score, 4), risk_reward=round(rr, 2),
             confidence=confidence, time_limit_ms=time_limit,
             max_hold_minutes=settings.scalp_max_hold_minutes,
             partial_exit_pct=settings.scalp_partial_exit_pct,

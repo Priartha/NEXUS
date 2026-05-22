@@ -80,7 +80,8 @@ def init_db() -> None:
             risk_reward REAL,
             confidence REAL,
             reason TEXT,
-            close_reason TEXT
+            close_reason TEXT,
+            bars_held INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -406,6 +407,13 @@ def init_db() -> None:
 
         CREATE INDEX IF NOT EXISTS idx_daily_reports_date ON daily_reports(date);
         """)
+        _ensure_column(conn, "paper_trades", "bars_held", "INTEGER DEFAULT 0")
         conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

@@ -92,9 +92,17 @@ class MultiExchangeAggregator:
 
     def _normalize_symbol_for(self, exchange: str) -> str:
         sym = self.symbol.upper()
+        coinbase_pairs = {
+            "BTCUSDT": "BTC-USD",
+            "BTCUSD": "BTC-USD",
+            "ETHUSDT": "ETH-USD",
+            "ETHUSD": "ETH-USD",
+            "SOLUSDT": "SOL-USD",
+            "SOLUSD": "SOL-USD",
+        }
         mapping = {
             "binance": sym,
-            "coinbase": sym.replace("USDT", "USD").replace("-", ""),
+            "coinbase": coinbase_pairs.get(sym, sym.replace("USDT", "-USD") if sym.endswith("USDT") else sym),
             "kraken": sym.replace("USDT", "USD").replace("BTC", "XBT"),
             "okx": sym,
             "bybit": sym,
@@ -125,11 +133,15 @@ class MultiExchangeAggregator:
         norm_sym = self._normalize_symbol_for(exchange)
 
         async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": "NEXUS/1.0"}) as client:
+            volume_24h = None
             if exchange == "binance":
                 resp = await client.get(f"{base}{config['ticker_path']}", params={"symbol": norm_sym})
                 resp.raise_for_status()
                 data = resp.json()
                 price = float(data["price"])
+                vol_resp = await client.get(f"{base}/api/v3/ticker/24hr", params={"symbol": norm_sym})
+                vol_resp.raise_for_status()
+                volume_24h = float(vol_resp.json().get("volume", 0))
             elif exchange == "coinbase":
                 path = config["ticker_path"].format(symbol=norm_sym)
                 resp = await client.get(f"{base}{path}")
@@ -137,7 +149,7 @@ class MultiExchangeAggregator:
                 data = resp.json()
                 price = float(data["price"])
             elif exchange == "kraken":
-                resp = await client.post(f"{base}{config['ticker_path']}", data={"pair": norm_sym})
+                resp = await client.get(f"{base}{config['ticker_path']}", params={"pair": norm_sym})
                 resp.raise_for_status()
                 data = resp.json()
                 result_key = next((k for k in data["result"] if k != "last"), None)
@@ -169,6 +181,7 @@ class MultiExchangeAggregator:
             exchange=exchange,
             symbol=self.symbol,
             price=price,
+            volume_24h=volume_24h,
             timestamp_ms=ts,
             latency_ms=latency,
         )
@@ -276,7 +289,7 @@ class MultiExchangeAggregator:
                 ]
             elif exchange == "kraken":
                 interval_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "1440"}
-                resp = await client.post(f"{base}{config['klines_path']}", data={
+                resp = await client.get(f"{base}{config['klines_path']}", params={
                     "pair": norm_sym, "interval": interval_map.get(interval, "5"),
                 })
                 resp.raise_for_status()
