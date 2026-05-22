@@ -1155,15 +1155,8 @@ def _apply_scalp_accuracy_gates(payload: dict, timeframe: str) -> None:
 
     existing = [str(item) for item in scalp.get("trade_blocked_reasons", [])]
     scalp["trade_blocked_reasons"] = [*existing, *[item for item in blockers if item not in existing]][:8]
-    scalp["signals"] = []
-    if payload.get("signals"):
-        payload["signals"] = [
-            sig for sig in payload.get("signals", [])
-            if not (isinstance(sig, dict) and str(sig.get("model", "")).startswith("unified-scalp"))
-        ]
     stats = payload.get("stats")
     if isinstance(stats, dict):
-        stats["scalp_signals"] = 0
         stats["scalp_blocked"] = len(scalp["trade_blocked_reasons"])
 
 
