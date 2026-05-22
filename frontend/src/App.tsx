@@ -47,6 +47,7 @@ import { DbStatusPanel } from './components/DbStatusPanel'
 import { AlertConfigPanel } from './components/AlertConfigPanel'
 import { PsychologyPanel } from './components/PsychologyPanel'
 import { ScalpingPanel } from './components/ScalpingPanel'
+import SignalLogPanel from './components/SignalLogPanel'
 
 import AlertsPanel from './components/AlertsPanel'
 import BacktestPanel from './components/BacktestPanel'
@@ -60,8 +61,8 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp'
-const PRIMARY_PANEL_VIEWS: readonly PanelView[] = ['signals', 'scalp', 'risk', 'trades', 'backtest', 'alerts']
+type PanelView = 'signals' | 'patterns' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log'
+const PRIMARY_PANEL_VIEWS: readonly PanelView[] = ['signals', 'scalp', 'risk', 'trades', 'backtest', 'log', 'alerts']
 
 const SESSION_COLORS: Record<string, string> = {
   asian: '#8ab4f8',
@@ -436,6 +437,12 @@ function App() {
                   <>
                     <Timer size={11} />
                     BT
+                  </>
+                )}
+                {view === 'log' && (
+                  <>
+                    <Activity size={11} />
+                    Log
                   </>
                 )}
                 {view === 'forward' && (
@@ -1134,6 +1141,11 @@ function App() {
           {panelView === 'alert-config' && (
             <div className="panel-content">
               <AlertConfigPanel />
+            </div>
+          )}
+          {panelView === 'log' && (
+            <div className="panel-content">
+              <SignalLogPanel />
             </div>
           )}
           </div>
