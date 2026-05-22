@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import socket
 import time
 from dataclasses import dataclass
 
@@ -64,6 +65,24 @@ async def seed_all_historical(
             )
 
 
+def _prefer_ipv4() -> None:
+    """Monkey-patch socket.getaddrinfo to prefer IPv4 over IPv6.
+    
+    Delta Exchange's WebSocket endpoint has unreachable IPv6 routes on some
+    networks. This forces IPv4 resolution to avoid 'timed out during opening
+    handshake' errors.
+    """
+    orig = socket.getaddrinfo
+
+    def _ipv4_first(host, port, family=0, type=0, proto=0, flags=0):
+        try:
+            return orig(host, port, socket.AF_INET, type, proto, flags)
+        except Exception:
+            return orig(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = _ipv4_first
+
+
 async def start_delta_stream(
     manager: ConnectionManager,
     stores: dict[str, CandleStore],
@@ -76,6 +95,7 @@ async def start_delta_stream(
     logger.info(f"Starting Delta stream for {config.symbol}")
     await seed_all_historical(stores, pipelines, manager, config)
 
+    _prefer_ipv4()
     backoff = config.ws_reconnect_initial_seconds
     last_quote_key: tuple[float | None, ...] | None = None
     while True:
@@ -83,6 +103,7 @@ async def start_delta_stream(
             logger.info(f"Connecting to Delta WebSocket: {config.ws_url}")
             async with websockets.connect(
                 config.ws_url,
+                open_timeout=15,
                 ping_interval=20,
                 ping_timeout=10,
                 close_timeout=5,
