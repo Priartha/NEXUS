@@ -539,6 +539,10 @@ class ScalpContext:
     futures_leverage: int = 10
     estimated_funding_cost_8h: float = 0.0
     wick_rejection: Optional[ScalpWickRejection] = None
+    
+    # AI Brain properties
+    ai_brain_active: bool = False
+    ai_intelligence: Optional[dict] = None
 
 
 @dataclass
