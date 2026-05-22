@@ -1,6 +1,6 @@
 # NEXUS Trading System
 
-Professional-grade BTC/USDT trading workstation implementing ICT (Inner Circle Trader) concepts with AI-assisted decision making, real-time market analysis, and comprehensive backtesting.
+Professional-grade BTCUSD perpetual futures scalping workstation implementing ICT (Inner Circle Trader) concepts with AI-assisted decision making, real-time market analysis, and comprehensive backtesting.
 
 ## Quick Start
 
@@ -157,9 +157,9 @@ Phases: trending, range_bound, consolidation, accumulation, distribution.
 - Tighter thresholds to prevent false trending classification
 - Default phase: range_bound (was trending — 96.5% false positive)
 
-### Multi-Timeframe Confluence
+### Multi-Timeframe Context
 
-Analyzes alignment across 1m, 5m, 15m, 1h, 4h timeframes. Applies confluence multiplier (0.85-1.15) based on higher timeframe bias agreement.
+Analyzes alignment across 1m, 5m, 15m, 1h, 4h timeframes. Used for AI decision context and display only — scalp engine does not block on MTF misalignment.
 
 ### Unified Scalping Engine v3.0 — Futures Only
 
@@ -281,10 +281,8 @@ Total PnL (%), Win Rate, Profit Factor, Sharpe Ratio, Max Drawdown ($/%), Averag
 | Max Daily Loss | 3% |
 | Max Drawdown | 10% |
 | Max Position Size | 2% |
-| Max Open Positions | 1 |
-| Max Consecutive Losses | 3 |
-| Cooldown After Loss | 90 minutes |
-| Minimum Confidence | 55% |
+| Max Open Positions | 2 |
+| Max Leverage | 10x cross |
 
 ### Risk Metrics
 
@@ -429,7 +427,7 @@ SQLite database (`data/nexus.db`) with 17 tables:
 
 Scanner monitors 12 pairs: BTC, ETH, SOL, BNB, XRP, DOGE, ADA, AVAX, LINK, DOT, MATIC, LTC.
 
-Primary analysis: BTCUSDT (full feature set).
+Primary analysis: BTCUSD perpetual (full feature set).
 
 ---
 
