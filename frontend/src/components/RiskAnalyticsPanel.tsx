@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useMemo } from 'react'
 import { useChartStore } from '../store/chartStore'
 import {
   Shield,
@@ -7,56 +7,25 @@ import {
   AlertTriangle,
   Target,
   Calculator,
-  RefreshCw,
   Info,
   Activity,
   DollarSign,
 } from 'lucide-react'
 
-interface RiskData {
-  max_position_size_pct: number
-  max_portfolio_risk_pct: number
-  daily_loss_limit_pct: number
-  max_drawdown_limit_pct: number
-  current_drawdown_pct: number
-  daily_pnl: number
-  total_exposure: number
-  available_capital: number
-  risk_level: string
-  active_positions: number
-  max_positions: number
-  margin_used_pct: number
-  warnings: string[]
-}
-
 export function RiskAnalyticsPanel() {
   const signals = useChartStore((state) => state.signals)
   const metrics = useChartStore((state) => state.metrics)
-  const [riskData, setRiskData] = useState<RiskData | null>(null)
-  const [loading, setLoading] = useState(true)
+  const scalpRisk = useChartStore((state) => state.scalpRisk)
+  const scalp = useChartStore((state) => state.scalpContext)
 
-  const fetchRiskData = useCallback(async () => {
-    try {
-      const res = await fetch('/risk')
-      if (res.ok) {
-        const contentType = res.headers.get('content-type')
-        if (contentType && contentType.includes('application/json')) {
-          const data = await res.json()
-          setRiskData(data)
-        }
-      }
-    } catch (e) {
-      console.error('Failed to fetch risk data:', e)
-    } finally {
-      setLoading(false)
+  const blockers = useMemo(() => {
+    if (!scalp) return null
+    return {
+      trade_blocked_reasons: scalp.trade_blocked_reasons ?? [],
+      blockedCount: (scalp.trade_blocked_reasons ?? []).length,
+      hasBlockers: (scalp.trade_blocked_reasons ?? []).length > 0,
     }
-  }, [])
-
-  useEffect(() => {
-    fetchRiskData()
-    const interval = setInterval(fetchRiskData, 30000)
-    return () => clearInterval(interval)
-  }, [fetchRiskData])
+  }, [scalp])
 
   const analytics = useMemo(() => {
     if (!signals || signals.length === 0 || !metrics) return null
@@ -114,21 +83,17 @@ export function RiskAnalyticsPanel() {
     }
   }
 
-  if (loading) {
-    return (
-      <div className="risk-panel">
-        <div className="risk-loading">
-          <RefreshCw size={16} className="risk-loading-spinner" />
-          <span>Loading risk data...</span>
-        </div>
-      </div>
-    )
-  }
+  const riskLevel = scalpRisk?.daily_loss_hit ? 'high' : scalpRisk && scalpRisk.daily_pnl < 0 ? 'medium' : 'low'
+
+  const allWarnings = [
+    ...(blockers?.trade_blocked_reasons ?? []),
+    ...(scalpRisk?.daily_loss_hit ? ['Daily loss limit reached — trading halted'] : []),
+  ]
 
   return (
     <div className="risk-panel">
       {/* Risk Overview */}
-      {riskData && (
+      {scalpRisk && (
         <div className="risk-section risk-overview-section">
           <h3 className="risk-section-title">
             <Shield size={14} /> Risk Overview
@@ -142,9 +107,9 @@ export function RiskAnalyticsPanel() {
                 <span className="risk-ov-label">Risk Level</span>
                 <span
                   className="risk-ov-value"
-                  style={{ color: getRiskLevelColor(riskData.risk_level || 'medium') }}
+                  style={{ color: getRiskLevelColor(riskLevel) }}
                 >
-                  {(riskData.risk_level || 'MEDIUM').toUpperCase()}
+                  {riskLevel.toUpperCase()}
                 </span>
               </div>
             </div>
@@ -155,9 +120,9 @@ export function RiskAnalyticsPanel() {
               <div className="risk-ov-info">
                 <span className="risk-ov-label">Daily P&L</span>
                 <span
-                  className={`risk-ov-value ${(riskData.daily_pnl || 0) >= 0 ? 'positive' : 'negative'}`}
+                  className={`risk-ov-value ${(scalpRisk.daily_pnl || 0) >= 0 ? 'positive' : 'negative'}`}
                 >
-                  {(riskData.daily_pnl || 0) >= 0 ? '+' : ''}${(riskData.daily_pnl || 0).toFixed(2)}
+                  {(scalpRisk.daily_pnl || 0) >= 0 ? '+' : ''}${(scalpRisk.daily_pnl || 0).toFixed(2)}
                 </span>
               </div>
             </div>
@@ -168,7 +133,7 @@ export function RiskAnalyticsPanel() {
               <div className="risk-ov-info">
                 <span className="risk-ov-label">Positions</span>
                 <span className="risk-ov-value">
-                  {riskData.active_positions || 0}/{riskData.max_positions || 5}
+                  {scalpRisk.open_futures}/{scalpRisk.max_positions}
                 </span>
               </div>
             </div>
@@ -178,17 +143,17 @@ export function RiskAnalyticsPanel() {
               </div>
               <div className="risk-ov-info">
                 <span className="risk-ov-label">Drawdown</span>
-                <span className="risk-ov-value">{(riskData.current_drawdown_pct || 0).toFixed(2)}%</span>
+                <span className="risk-ov-value">{scalpRisk.daily_loss_pct.toFixed(2)}%</span>
               </div>
             </div>
           </div>
 
           {/* Warnings */}
-          {riskData.warnings && riskData.warnings.length > 0 && (
+          {allWarnings.length > 0 && (
             <div className="risk-warnings">
               <AlertTriangle size={12} />
               <div className="risk-warnings-list">
-                {riskData.warnings.map((w, i) => (
+                {allWarnings.map((w, i) => (
                   <span key={i} className="risk-warning">
                     {w}
                   </span>
@@ -446,7 +411,7 @@ export function RiskAnalyticsPanel() {
       )}
 
       {/* Empty State */}
-      {!analytics && !riskData && (
+      {!analytics && !scalpRisk && (
         <div className="risk-empty">
           <Shield size={24} className="risk-empty-icon" />
           <p>Waiting for signal and metrics data...</p>

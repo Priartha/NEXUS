@@ -485,6 +485,10 @@ class AnalysisPipeline:
                 mtf_confluence=mtf,
             )
             for ev in events:
+                if ev["type"] == "trade_opened":
+                    self.scalp_risk.record_trade_open(ev.get("trade"))
+                elif ev["type"] == "trade_closed":
+                    self.scalp_risk.record_trade_close(ev.get("pnl", 0))
                 self._on_alert(ev)
 
         for sig in signals:
