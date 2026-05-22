@@ -8,7 +8,7 @@ from backend.models.types import Candle
 
 
 class CandleStore:
-    def __init__(self, symbol: str, timeframe: str, max_candles: int = 500):
+    def __init__(self, symbol: str, timeframe: str, max_candles: int = 700):
         self.symbol = symbol
         self.timeframe = timeframe
         self.candles: deque[Candle] = deque(maxlen=max_candles)

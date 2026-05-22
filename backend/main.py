@@ -252,6 +252,7 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.error(f"Task {task.get_name()} failed during shutdown: {e}", exc_info=True)
         db_integrity.create_backup()
+        await manager.close_all()
         logger.info("Final database backup created on shutdown")
 
 
@@ -420,7 +421,7 @@ async def run_backtest(body: BacktestRequest) -> dict:
         result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
 
         if body.adaptive_learning and result.get("profit_factor", 0) < 1.0 and len(candles) >= 80:
-            recent_window = candles[-min(500, len(candles)):]
+            recent_window = candles[-min(settings.max_candles, len(candles)):]
             candidates: list[tuple[str, list, dict]] = [
                 (
                     "hold10_trailing_be05",

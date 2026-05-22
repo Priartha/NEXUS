@@ -24,7 +24,6 @@ def main():
 
     # Set up environment
     os.environ["NEXUS_ROOT"] = str(base_path)
-    os.environ["PYTHONPATH"] = str(base_path)
 
     # Ensure data and logs directories exist
     (base_path / "data").mkdir(exist_ok=True)
@@ -33,8 +32,14 @@ def main():
     # Load .env if present
     env_file = base_path / ".env"
     if env_file.exists():
-        from dotenv import load_dotenv
-        load_dotenv(env_file)
+        try:
+            from dotenv import load_dotenv
+            load_dotenv(env_file)
+            print(f"[INFO] Loaded environment from {env_file}")
+        except ImportError:
+            print("[WARN] python-dotenv not available — .env not loaded. Install it with: pip install python-dotenv")
+        except Exception as e:
+            print(f"[WARN] Failed to load .env: {e}")
 
     # Add project root to sys.path
     if str(base_path) not in sys.path:
@@ -44,9 +49,11 @@ def main():
     import uvicorn
     from backend.main import app
 
+    VERSION = os.environ.get("NEXUS_VERSION", "1.0.0")
+
     print("=" * 60)
-    print("  NEXUS Trading System v1.0.0")
-    print("  Professional Cryptocurrency Trading Workstation")
+    print(f" NEXUS Trading System v{VERSION}")
+    print(" Professional Cryptocurrency Trading Workstation")
     print("=" * 60)
     print()
     print("  Application: http://127.0.0.1:8000")

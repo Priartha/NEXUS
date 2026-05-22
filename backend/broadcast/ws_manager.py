@@ -52,6 +52,16 @@ class ConnectionManager:
                 for ws in dead:
                     self._active.pop(ws, None)
 
+    async def close_all(self) -> None:
+        async with self._lock:
+            sockets = list(self._active.keys())
+            self._active.clear()
+        for ws in sockets:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
     @property
     def count(self) -> int:
         return len(self._active)

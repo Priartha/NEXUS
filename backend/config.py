@@ -13,8 +13,8 @@ class Settings:
         for timeframe in os.getenv("ICT_TIMEFRAMES", "1m,5m,15m,1h").split(",")
         if timeframe.strip()
     )
-    max_candles: int = int(os.getenv("ICT_MAX_CANDLES", "500"))
-    history_seed_candles: int = int(os.getenv("ICT_HISTORY_SEED_CANDLES", "500"))
+    max_candles: int = int(os.getenv("ICT_MAX_CANDLES", "700"))
+    history_seed_candles: int = int(os.getenv("ICT_HISTORY_SEED_CANDLES", "700"))
     market_data_provider: str = os.getenv("ICT_MARKET_DATA_PROVIDER", "delta")
     rest_base_url: str = os.getenv("DELTA_REST_BASE_URL", "https://api.india.delta.exchange")
     ws_url: str = os.getenv("DELTA_WS_URL", "wss://public-socket.india.delta.exchange")
@@ -60,7 +60,7 @@ class Settings:
     scalp_enabled: bool = os.getenv("NEXUS_SCALP_ENABLED", "true").lower() == "true"
     scalp_max_risk_pct: float = float(os.getenv("NEXUS_SCALP_MAX_RISK_PCT", "0.02"))  # 2% risk per trade
     scalp_max_leverage: int = int(os.getenv("NEXUS_SCALP_MAX_LEVERAGE", "25"))  # 25x for futures profitability
-    scalp_max_positions: int = int(os.getenv("NEXUS_SCALP_MAX_POSITIONS", "3"))
+    scalp_max_positions: int = int(os.getenv("NEXUS_SCALP_MAX_POSITIONS", "1"))
     scalp_daily_loss_limit_pct: float = float(os.getenv("NEXUS_SCALP_DAILY_LOSS_PCT", "0.05"))
     scalp_min_rrr: float = float(os.getenv("NEXUS_SCALP_MIN_RRR", "2.0"))
     scalp_max_hold_minutes: int = int(os.getenv("NEXUS_SCALP_MAX_HOLD_MINUTES", "25"))
@@ -69,9 +69,9 @@ class Settings:
     scalp_vwap_band_sd: float = float(os.getenv("NEXUS_SCALP_VWAP_SD", "1.0"))
     scalp_rsi_exhaustion: float = float(os.getenv("NEXUS_SCALP_RSI_EXHAUSTION", "3"))
     scalp_partial_exit_pct: float = float(os.getenv("NEXUS_SCALP_PARTIAL_EXIT", "0.50"))
-    scalp_breakeven_premium_pct: float = float(os.getenv("NEXUS_SCALP_BE_PREMIUM_PCT", "0.15"))
+    scalp_breakeven_premium_pct: float = float(os.getenv("NEXUS_SCALP_BE_PREMIUM_PCT", "0.50"))
     # Relaxed thresholds for more trading opportunities while maintaining quality
-    scalp_min_confluence_score: float = float(os.getenv("NEXUS_SCALP_MIN_CONFLUENCE", "0.35"))
+    scalp_min_confluence_score: float = float(os.getenv("NEXUS_SCALP_MIN_CONFLUENCE", "0.60"))
     scalp_min_directional_edge: float = float(os.getenv("NEXUS_SCALP_MIN_DIRECTIONAL_EDGE", "0.04"))
     scalp_min_trend_strength: float = float(os.getenv("NEXUS_SCALP_MIN_TREND_STRENGTH", "0.0005"))
     scalp_min_volume_impulse: float = float(os.getenv("NEXUS_SCALP_MIN_VOLUME_IMPULSE", "0.55"))

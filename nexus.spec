@@ -4,9 +4,8 @@ PyInstaller spec file for NEXUS Trading System
 Build: pyinstaller nexus.spec
 """
 import os
+import sys as _sys
 from pathlib import Path
-
-block_cipher = None
 
 ROOT = Path(os.getcwd())
 
@@ -19,6 +18,8 @@ for py_file in backend_dir.rglob("*.py"):
     backend_modules.append(module_path)
 
 # Hidden imports for packages that PyInstaller may not detect
+_platform_imports = ["uvloop"] if _sys.platform != "win32" else []
+
 hidden_imports = [
     "fastapi",
     "uvicorn",
@@ -75,7 +76,7 @@ hidden_imports = [
     "click",
     "h11",
     "httptools",
-    "uvloop",
+    *_platform_imports,
     "watchfiles",
     "wsproto",
     "jinja2",
@@ -91,14 +92,14 @@ hidden_imports = [
 # Data files to bundle
 datas = [
     (str(ROOT / "frontend" / "dist"), "frontend/dist"),
-    (str(ROOT / ".env"), "."),
     (str(ROOT / ".env.example"), "."),
+    # Do NOT include .env — keys must be loaded from disk at runtime
 ]
 
 # Include the entire backend source tree
 datas.append((str(backend_dir), "backend"))
 
-# Include data directory if it exists
+# Include data directory only if it exists
 data_dir = ROOT / "data"
 if data_dir.exists():
     datas.append((str(data_dir), "data"))
@@ -130,11 +131,10 @@ a = Analysis(
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,

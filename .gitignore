@@ -27,7 +27,7 @@ data/
 !package.json
 !package-lock.json
 !tsconfig*.json
-!opencode.json
+!opencode.example.json
 
 # Local environment
 .env
