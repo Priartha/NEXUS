@@ -27,7 +27,7 @@ class PaperTradingEngine:
         self,
         initial_balance: float = 10_000.0,
         max_concurrent: int = 1,
-        min_confidence: float = 0.60,
+        min_confidence: float = 0.40,
         max_daily_trades: int = 5,
         max_daily_loss_pct: float = 0.03,
         cooldown_after_losses: int = 3,
