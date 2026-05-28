@@ -1,6 +1,8 @@
-# NEXUS — A professional-grade BTCUSD perpetual futures scalping system that blends ICT (Inner Circle Trader) concepts with AI-assisted decision making, 12-source confluence signal fusion, and institutional-grade statistical modeling. Built for traders who demand real-time edge detection, rigorous backtesting, and autonomous market analysis.
+# NEXUS: 
+A professional-grade BTCUSD perpetual futures scalping system that blends ICT (Inner Circle Trader) concepts with AI-assisted decision making, 12-source confluence signal fusion, and institutional-grade statistical modeling. Built for traders who demand real-time edge detection, rigorous backtesting, and autonomous market analysis.
 
-# Key Features
+# Key Features:
+
 Feature	Detail
 Unified Scalping Engine v3.0	Fuses 12 data sources (orderflow, orderbook, volume profile, regime, patterns, funding, OI, VWAP, wick rejection, liquidity sweeps, liquidations, self-aware agent) into a single confluence-weighted signal with dynamic leverage (1.5x–3.5x)
 Self-Aware Trading Agent	Autonomous AI brain with persistent market memory, Bayesian outcome learning, hourly/daily pattern recognition, and pattern reliability scoring — no external API required
