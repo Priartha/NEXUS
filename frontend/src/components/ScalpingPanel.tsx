@@ -12,8 +12,6 @@ import {
   Zap,
   BarChart3,
   Layers,
-  Sparkles,
-  BrainCircuit,
 } from 'lucide-react'
 
 export function ScalpingPanel() {
@@ -38,19 +36,13 @@ export function ScalpingPanel() {
       spotVolumeOk: scalp.spot_volume_ok,
       macroBlocked: scalp.macro_event_block,
       risk: scalpRisk,
-      aiBrainActive: scalp.ai_brain_active ?? false,
-      aiIntelligence: scalp.ai_intelligence ?? null,
     }
   }, [scalp, scalpRisk])
 
   if (!data) {
     return (
       <div className="scalping-panel">
-        <div className="scalping-empty">
-          <Crosshair size={24} style={{ marginBottom: 8, opacity: 0.5 }} />
-          <div>Waiting for scalping data...</div>
-          <div style={{ fontSize: 9, marginTop: 8, color: 'var(--text-muted)' }}>Analyzing order flow, funding, and market structure</div>
-        </div>
+        <div className="scalping-empty">Waiting for scalping data...</div>
       </div>
     )
   }
@@ -69,38 +61,6 @@ export function ScalpingPanel() {
 
   return (
     <div className="scalping-panel">
-      {/* AI Brain Status */}
-      {data.aiBrainActive && (
-        <div className="scalping-section ai-brain-status">
-          <h3 className="scalping-section-title">
-            <Sparkles size={14} /> AI TRADING BRAIN
-          </h3>
-          <div className="ai-status-grid">
-            <div className="ai-status-item">
-              <BrainCircuit size={12} />
-              <span>Status</span>
-              <span className="ai-status-value active">ACTIVE</span>
-            </div>
-            {data.aiIntelligence && (
-              <>
-                <div className="ai-status-item">
-                  <Target size={12} />
-                  <span>Decisions</span>
-                  <span className="ai-status-value">{data.aiIntelligence.decisions || 0}</span>
-                </div>
-                <div className="ai-status-item">
-                  <Activity size={12} />
-                  <span>Accuracy</span>
-                  <span className={`ai-status-value ${(data.aiIntelligence.accuracy || 0) >= 0.5 ? 'positive' : 'negative'}`}>
-                    {((data.aiIntelligence.accuracy || 0) * 100).toFixed(0)}%
-                  </span>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Trade Blockers */}
       {data.blockers.length > 0 && (
         <div className="scalping-section scalping-blockers">

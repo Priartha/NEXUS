@@ -50,12 +50,12 @@ def detect_market_regime(
     emas_aligned_bearish = ema9 < ema21 < ema50
 
     # Price direction over lookback period
-    price_change_pct = (latest.close - window[0].close) / window[0].close * 100
+    price_change_pct = (latest.close - window[0].open) / window[0].open * 100
     is_price_rising = price_change_pct > 0.5
     is_price_falling = price_change_pct < -0.5
 
     # ── Efficiency Ratio ──
-    net_move = abs(latest.close - window[0].close)
+    net_move = abs(latest.close - window[0].open)
     total_move = sum(abs(closes[i] - closes[i-1]) for i in range(1, len(closes)))
     efficiency = _safe_div(net_move, total_move) if total_move > 0 else 0
 
@@ -91,16 +91,7 @@ def detect_market_regime(
     has_ema_spread = ema_spread_pct > 0.20
 
     # Require stronger evidence for trending
-    if width_pct < 1.5 and atr_compression < 0.15 and volume_state == "compressed":
-        phase = "consolidation"
-        bias = "neutral"
-        confidence = 0.55
-        reasons = [
-            f"Tight range: {width_pct:.2f}%",
-            f"ATR compressed: {atr_compression:.2f}",
-            f"Volume: {volume_state}",
-        ]
-    elif is_structured_trend and is_ema_aligned and is_efficient and price_direction_matches and has_ema_spread:
+    if is_structured_trend and is_ema_aligned and is_efficient and price_direction_matches and has_ema_spread:
         phase = "trending"
         bias = structure["direction"]
         confidence = min(0.92, 0.55 + efficiency * 0.25 + (0.10 if is_ema_aligned else 0))
@@ -152,7 +143,7 @@ def detect_market_regime(
         reasons.append("Sell-side sweep reclaimed above mid")
 
     # 5. DISTRIBUTION: buy-side sweep + rejection + price below mid
-    elif buy_side_sweep and latest.close <= range_mid and phase in {"range_bound", "consolidation"}:
+    if buy_side_sweep and latest.close <= range_mid and phase in {"range_bound", "consolidation"}:
         phase = "distribution"
         bias = "bearish"
         confidence = min(0.85, confidence + 0.15)

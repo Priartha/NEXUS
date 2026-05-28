@@ -1,164 +1,94 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Activity, Crosshair, Shield } from 'lucide-react'
-
-interface SignalLogEntry {
-  id: string
-  timestamp: number
-  symbol: string
-  timeframe: string
-  side: string
-  entry: number
-  stop_loss: number
-  exit_price: number | null
-  risk_reward: number
-  confidence: string
-  reason: string
-  status: string
-  exit_timestamp: number | null
-}
+import { useCallback, useEffect, useState } from 'react'
+import { Activity, TrendingUp, TrendingDown, Target, Shield, Zap, Clock } from 'lucide-react'
+import type { TradeSignal } from '../types/market'
 
 export default function SignalLogPanel() {
-  const [signals, setSignals] = useState<SignalLogEntry[]>([])
+  const [signals, setSignals] = useState<TradeSignal[]>([])
   const [loading, setLoading] = useState(true)
 
   const fetchSignals = useCallback(async () => {
     try {
-      const res = await fetch('/signals/journal?limit=200')
-      setSignals(await res.json())
-    } catch { } finally { setLoading(false) }
+      const res = await fetch('/signals/journal?limit=100')
+      if (res.ok) setSignals(await res.json())
+    } catch { /* ignore */ } finally { setLoading(false) }
   }, [])
 
   useEffect(() => {
-    fetchSignals()
+    const initial = setTimeout(() => void fetchSignals(), 0)
     const interval = setInterval(fetchSignals, 15000)
-    return () => clearInterval(interval)
+    return () => { clearTimeout(initial); clearInterval(interval) }
   }, [fetchSignals])
 
-  const stats = useMemo(() => {
-    const total = signals.length
-    const longs = signals.filter(s => s.side?.toLowerCase().includes('long')).length
-    const shorts = signals.filter(s => s.side?.toLowerCase().includes('short')).length
-    const highConf = signals.filter(s => s.confidence === 'HIGH').length
-    const medConf = signals.filter(s => s.confidence === 'MEDIUM').length
-    const lowConf = signals.filter(s => s.confidence === 'LOW').length
-    const open = signals.filter(s => s.status === 'open').length
-    const closed = signals.filter(s => s.status === 'closed' || s.status === 'filled').length
-    const avgRR = signals.length > 0 ? signals.reduce((s, sig) => s + sig.risk_reward, 0) / signals.length : 0
-    return { total, longs, shorts, highConf, medConf, lowConf, open, closed, avgRR }
-  }, [signals])
+  if (loading) return <p className="empty-state">Loading signals...</p>
 
-  const getSideColor = (side: string) => {
-    if (side?.toLowerCase().includes('long')) return '#22c55e'
-    if (side?.toLowerCase().includes('short')) return '#ef4444'
-    return '#94a3b8'
-  }
-
-  const getConfColor = (conf: string) =>
-    conf === 'HIGH' ? '#22c55e' : conf === 'MEDIUM' ? '#f59e0b' : '#94a3b8'
-
-  const getStatusColor = (status: string) =>
-    status === 'open' ? '#3b82f6' : status === 'closed' || status === 'filled' ? '#22c55e' : status === 'canceled' ? '#ef4444' : '#94a3b8'
-
-  const formatTime = (ts: number) => {
-    const d = new Date(ts)
-    return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' })
-  }
-
-  if (loading) {
-    return (
-      <div className="scalping-panel">
-        <div className="scalping-empty">Loading signal log...</div>
-      </div>
-    )
-  }
+  const open = signals.filter((s) => s.status === 'open' || s.status === 'pending')
+  const closed = signals.filter((s) => s.status !== 'open' && s.status !== 'pending')
 
   return (
-    <div className="scalping-panel">
-      {/* Summary Stats */}
-      <div className="scalping-section">
-        <h3 className="scalping-section-title">
-          <Activity size={14} /> Signal Summary
-        </h3>
-        <div className="scalping-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
-          <div className="scalping-metric">
-            <span className="scalping-label">Total</span>
-            <span className="scalping-value">{stats.total}</span>
-          </div>
-          <div className="scalping-metric">
-            <span className="scalping-label">L/S</span>
-            <span className="scalping-value">
-              <span style={{ color: '#22c55e' }}>{stats.longs}</span>/
-              <span style={{ color: '#ef4444' }}>{stats.shorts}</span>
+    <div className="signal-log-panel">
+      <div className="signal-log-hdr">
+        <Activity size={13} />
+        <span>Signal Log</span>
+        {open.length > 0 && <span className="signal-log-count">{open.length} active</span>}
+      </div>
+
+      {signals.length === 0 && (
+        <div className="signal-log-empty">
+          <Shield size={20} className="signal-log-empty-icon" />
+          <p>No signals generated yet.</p>
+        </div>
+      )}
+
+      {open.length > 0 && (
+        <div className="signal-log-section">
+          <div className="signal-log-section-hdr">Active / Pending</div>
+          {open.map((s) => <SignalRow key={s.id} signal={s} />)}
+        </div>
+      )}
+
+      {closed.length > 0 && (
+        <div className="signal-log-section">
+          <div className="signal-log-section-hdr">History</div>
+          {closed.slice(0, 30).map((s) => <SignalRow key={s.id} signal={s} />)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SignalRow({ signal }: { signal: TradeSignal }) {
+  const isBuy = signal.side === 'buy'
+  const pnl = signal.exit_price ? ((signal.exit_price - signal.entry) / signal.entry * 100) * (isBuy ? 1 : -1) : null
+  const won = pnl !== null && pnl > 0
+
+  return (
+    <div className={`signal-row ${isBuy ? 'signal-buy' : 'signal-sell'} ${signal.status}`}>
+      <div className="signal-row-icon">
+        {isBuy ? <TrendingUp size={13} className="signal-up" /> : <TrendingDown size={13} className="signal-down" />}
+      </div>
+      <div className="signal-row-body">
+        <div className="signal-row-top">
+          <span className={`signal-row-side ${isBuy ? 'bullish' : 'bearish'}`}>
+            {isBuy ? 'BUY' : 'SELL'}
+          </span>
+          <span className="signal-row-confidence">{(signal.confidence * 100).toFixed(0)}%</span>
+          <span className="signal-row-model">{signal.model}</span>
+        </div>
+        <div className="signal-row-details">
+          <span>Entry: ${signal.entry?.toFixed(2) ?? '--'}</span>
+          <span>SL: ${signal.stop_loss?.toFixed(2) ?? '--'}</span>
+          <span>TP: ${signal.exit_price?.toFixed(2) ?? '--'}</span>
+          <span>RR: {signal.risk_reward?.toFixed(2) ?? '--'}</span>
+        </div>
+        {signal.reason && <div className="signal-row-reason">{signal.reason}</div>}
+        <div className="signal-row-meta">
+          <span className={`signal-row-status ${signal.status}`}>{signal.status}</span>
+          <span><Clock size={10} /> {new Date(signal.timestamp).toLocaleTimeString()}</span>
+          {pnl !== null && (
+            <span className={won ? 'signal-pnl-pos' : 'signal-pnl-neg'}>
+              {won ? '+' : ''}{pnl.toFixed(2)}%
             </span>
-          </div>
-          <div className="scalping-metric">
-            <span className="scalping-label">Avg RRR</span>
-            <span className="scalping-value">{stats.avgRR.toFixed(2)}</span>
-          </div>
-          <div className="scalping-metric">
-            <span className="scalping-label">Open</span>
-            <span className="scalping-value" style={{ color: getStatusColor('open') }}>{stats.open}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Confidence Breakdown */}
-      <div className="scalping-section">
-        <h3 className="scalping-section-title">
-          <Shield size={14} /> Confidence Distribution
-        </h3>
-        <div className="scalping-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
-          <div className="scalping-metric">
-            <span className="scalping-label" style={{ color: '#22c55e' }}>HIGH</span>
-            <span className="scalping-value">{stats.highConf}</span>
-          </div>
-          <div className="scalping-metric">
-            <span className="scalping-label" style={{ color: '#f59e0b' }}>MEDIUM</span>
-            <span className="scalping-value">{stats.medConf}</span>
-          </div>
-          <div className="scalping-metric">
-            <span className="scalping-label" style={{ color: '#94a3b8' }}>LOW</span>
-            <span className="scalping-value">{stats.lowConf}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Signal Feed */}
-      <div className="scalping-section">
-        <h3 className="scalping-section-title">
-          <Crosshair size={14} /> Recent Signals
-        </h3>
-        <div style={{ maxHeight: 400, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {signals.length === 0 && (
-            <div className="scalping-empty">No signals recorded yet</div>
           )}
-          {signals.slice(0, 80).map((sig) => (
-            <div key={sig.id} style={{
-              display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
-              borderRadius: 6, fontSize: 11, background: 'rgba(255,255,255,0.03)',
-              borderLeft: `3px solid ${getSideColor(sig.side)}`,
-            }}>
-              <span style={{ color: '#64748b', minWidth: 48, fontSize: 10 }}>{formatTime(sig.timestamp)}</span>
-              <span style={{ color: getSideColor(sig.side), fontWeight: 700, minWidth: 40 }}>
-                {sig.side?.includes('LONG') ? 'LONG' : sig.side?.includes('SHORT') ? 'SHORT' : sig.side}
-              </span>
-              <span style={{ color: getConfColor(sig.confidence), minWidth: 44 }}>
-                {sig.confidence}
-              </span>
-              <span style={{ color: '#94a3b8', minWidth: 32 }}>
-                1:{sig.risk_reward.toFixed(1)}
-              </span>
-              <span style={{
-                color: getStatusColor(sig.status), minWidth: 40, fontSize: 9,
-                textTransform: 'uppercase', letterSpacing: '0.05em',
-              }}>
-                {sig.status}
-              </span>
-              <span style={{ color: '#64748b', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {sig.reason?.slice(0, 80)}{sig.reason?.length > 80 ? '...' : ''}
-              </span>
-            </div>
-          ))}
         </div>
       </div>
     </div>

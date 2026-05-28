@@ -73,13 +73,6 @@ Risk management dashboard with Kelly fraction, CVaR95 estimation, risk of ruin c
 ### Momentum
 Momentum indicators including RSI, displacement ratio, trend score, volatility score, and expected move calculations.
 
-### Log (Signal Log)
-Live scrollable feed of all scalp signals with:
-- Summary stats: total count, long/short split, avg RRR, open signals
-- Confidence distribution (HIGH/MEDIUM/LOW)
-- Per-signal entry: timestamp, direction, confidence, RRR, status, reasons
-- Auto-refreshes every 15 seconds from signal journal
-
 ### Alerts
 System alert center with audio notifications for:
 - High confidence signals (>= 75%)
