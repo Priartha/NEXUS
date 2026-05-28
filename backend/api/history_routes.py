@@ -147,9 +147,12 @@ def api_ai_decisions(
 
 
 @router.get("/ai/accuracy")
-def api_ai_accuracy(days: int = Query(7, ge=1, le=365)):
+def api_ai_accuracy(
+    days: int = Query(7, ge=1, le=365),
+    timeframe: Optional[str] = Query(None),
+):
     """Get AI decision accuracy stats."""
-    return get_ai_accuracy(days=days)
+    return get_ai_accuracy(days=days, timeframe=timeframe)
 
 
 # ─── Liquidity History ────────────────────────────────────

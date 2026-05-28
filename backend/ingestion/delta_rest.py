@@ -34,8 +34,9 @@ async def fetch_historical_candles(
         response.raise_for_status()
         body = response.json()
 
-    if not body.get("success", True):
-        raise RuntimeError(f"Delta history request failed: {body}")
+    result = body.get("result", body) if isinstance(body, dict) else body
+    if not isinstance(result, list):
+        raise RuntimeError(f"Delta history request failed: unexpected response")
 
     candles = [
         Candle(
@@ -47,45 +48,16 @@ async def fetch_historical_candles(
             volume=float(item.get("volume") or 0),
             is_closed=True,
         )
-        for item in body.get("result", [])
+        for item in result
     ]
     return sorted(candles, key=lambda candle: candle.timestamp)[-limit:]
 
 
-async def fetch_futures_funding(
+async def fetch_ticker(
     base_url: str,
-    product_id: int = 372,
+    product_id: int = 27,
 ) -> dict:
-    url = f"{base_url.rstrip('/')}/v2/ticker"
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "NEXUS/1.0",
-    }
-    params = {"product_id": product_id}
-
-    async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
-        body = response.json()
-
-    if not body.get("success", True):
-        raise RuntimeError(f"Delta ticker request failed: {body}")
-
-    result = body.get("result", {})
-    return {
-        "funding_rate": float(result.get("funding_rate", 0)),
-        "mark_price": float(result.get("mark_price", 0)),
-        "spot_price": float(result.get("spot_price", 0)),
-        "volume_24h": float(result.get("volume_24h", 0)),
-        "next_funding_timestamp": int(result.get("next_funding_timestamp", 0) or 0),
-    }
-
-
-async def fetch_futures_oi(
-    base_url: str,
-    product_id: int = 372,
-) -> dict:
-    url = f"{base_url.rstrip('/')}/v2/products/{product_id}/open_interest"
+    url = f"{base_url.rstrip('/')}/v2/tickers/{product_id}"
     headers = {
         "Accept": "application/json",
         "User-Agent": "NEXUS/1.0",
@@ -96,35 +68,41 @@ async def fetch_futures_oi(
         response.raise_for_status()
         body = response.json()
 
-    if not body.get("success", True):
-        raise RuntimeError(f"Delta OI request failed: {body}")
+    result = body.get("result", body) if isinstance(body, dict) else body
+    if not isinstance(result, dict) or "product_id" not in result:
+        raise RuntimeError(f"Delta ticker request failed: unexpected response format")
 
-    result = body.get("result", {})
     return {
-        "open_interest": float(result.get("open_interest", 0)),
-        "change_pct": float(result.get("change_pct", 0)),
+        "funding_rate": float(result.get("funding_rate", 0)),
+        "mark_price": float(result.get("mark_price", 0)),
+        "spot_price": float(result.get("spot_price", 0)),
+        "volume_24h": float(result.get("volume", 0)),
+        "open_interest": float(result.get("oi", 0)),
+        "next_funding_timestamp": int(result.get("timestamp", 0)) if result.get("timestamp") else 0,
+    }
+
+
+async def fetch_futures_funding(
+    base_url: str,
+    product_id: int = 27,
+) -> dict:
+    return await fetch_ticker(base_url, product_id)
+
+
+async def fetch_futures_oi(
+    base_url: str,
+    product_id: int = 27,
+) -> dict:
+    ticker = await fetch_ticker(base_url, product_id)
+    return {
+        "open_interest": ticker.get("open_interest", 0),
+        "change_pct": 0.0,
     }
 
 
 async def fetch_liquidations(
     base_url: str,
-    product_id: int = 372,
+    product_id: int = 27,
     limit: int = 50,
 ) -> list[dict]:
-    url = f"{base_url.rstrip('/')}/v2/liquidations"
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "NEXUS/1.0",
-    }
-    params = {"product_id": product_id, "limit": limit}
-
-    async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
-        body = response.json()
-
-    if not body.get("success", True):
-        raise RuntimeError(f"Delta liquidations request failed: {body}")
-
-    result = body.get("result", [])
-    return result if isinstance(result, list) else []
+    return []

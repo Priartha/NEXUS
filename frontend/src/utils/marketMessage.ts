@@ -281,6 +281,10 @@ const MessageSchema = z.union([
       updated_at: z.number().nullable().optional(),
       error: z.string().nullable().optional(),
     }).nullable().optional(),
+    scalp: z.any().nullable().optional(),
+    scalp_risk: z.any().nullable().optional(),
+    psychology: z.any().nullable().optional(),
+    readability: z.any().nullable().optional(),
     orderbook: OrderbookDataSchema.optional(),
     stats: z.object({
       closed_candles: z.number(),
@@ -302,8 +306,8 @@ const MessageSchema = z.union([
       win_rate: z.number(),
     }).optional(),
   }),
-  z.object({ update_type: z.literal('tick'), candle: CandleSchema, btc_patterns: z.any().nullable().optional() }),
-  z.object({ update_type: z.literal('close'), candle: CandleSchema, btc_patterns: z.any().nullable().optional() }),
+  z.object({ update_type: z.literal('tick'), candle: CandleSchema, scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }),
+  z.object({ update_type: z.literal('close'), candle: CandleSchema, scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }),
   z.object({ update_type: z.literal('status'), status: z.string(), message: z.string().optional(), retry_in_seconds: z.number().optional() }),
   z.object({ update_type: z.literal('sentiment'), sentiment: z.any() }), // Simplified
   z.object({ update_type: z.literal('ai_ict'), ai_ict: z.any() }), // Simplified

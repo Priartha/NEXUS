@@ -81,7 +81,7 @@ def test_candle_close_check_uses_latest():
 
     engine._filters = MethodType(lambda self, *args, **kwargs: [], engine)
     engine._signal_quality_blockers = MethodType(lambda self, *args, **kwargs: [], engine)
-    engine._confluence_long = MethodType(lambda self, *args, **kwargs: (0.55, ["a", "b", "c"]), engine)
+    engine._confluence_long = MethodType(lambda self, *args, **kwargs: (0.65, ["a", "b", "c"]), engine)
     engine._confluence_short = MethodType(lambda self, *args, **kwargs: (0.10, ["x"]), engine)
 
     ctx = engine.compute(candles)

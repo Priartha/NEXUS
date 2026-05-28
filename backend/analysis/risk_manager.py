@@ -40,9 +40,9 @@ class RiskManager:
         max_correlation: float = 0.8,
     ):
         self.initial_balance = initial_balance
+        self.max_position_size_pct = max_position_size_pct
         self.max_daily_loss = initial_balance * max_daily_loss_pct
         self.max_drawdown = initial_balance * max_drawdown_pct
-        self.max_position_size = initial_balance * max_position_size_pct
         self.max_open_positions = max_open_positions
         self.max_consecutive_losses = max_consecutive_losses
         self.cooldown_minutes = cooldown_minutes_after_loss
@@ -74,8 +74,10 @@ class RiskManager:
         if signal_confidence < self.min_confidence:
             blockers.append(f"Confidence {signal_confidence:.2f} below minimum {self.min_confidence}")
 
-        if risk_amount > self.max_position_size:
-            blockers.append(f"Risk ${risk_amount:.0f} exceeds max position ${self.max_position_size:.0f}")
+        current_balance = self._current_balance()
+        max_position_size = current_balance * self.max_position_size_pct
+        if risk_amount > max_position_size:
+            blockers.append(f"Risk ${risk_amount:.0f} exceeds max position ${max_position_size:.0f}")
 
         if self.state.daily_trades >= 5:
             blockers.append("Max daily trades reached (5)")
@@ -83,7 +85,6 @@ class RiskManager:
         if self.state.daily_pnl <= -self.max_daily_loss:
             blockers.append(f"Daily loss limit hit: ${abs(self.state.daily_pnl):.0f} / ${self.max_daily_loss:.0f}")
 
-        current_balance = self._current_balance()
         drawdown = self.initial_balance - current_balance
         if drawdown >= self.max_drawdown:
             blockers.append(f"Max drawdown hit: ${drawdown:.0f} / ${self.max_drawdown:.0f}")

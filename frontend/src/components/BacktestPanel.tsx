@@ -41,8 +41,35 @@ interface BacktestRun {
   avg_win: number
   avg_loss: number
   avg_hold_bars: number
+  data_quality?: DataQualityReport
   trades?: any[]
   equity_curve?: any[]
+}
+
+interface DataQualityReport {
+  verdict: string
+  score: number
+  source_type: string
+  provider: string
+  requested_symbol: string
+  actual_symbol: string
+  symbol_alias_used: boolean
+  timeframe: string
+  native_timeframe: boolean
+  requested_count?: number | null
+  candle_count: number
+  unique_candle_count: number
+  first_timestamp?: number | null
+  last_timestamp?: number | null
+  expected_interval_ms: number
+  latest_age_ms?: number | null
+  stale: boolean
+  duplicate_count: number
+  missing_candle_count: number
+  irregular_interval_count: number
+  invalid_ohlc_count: number
+  zero_volume_count: number
+  warnings: string[]
 }
 
 async function safeFetchJson(url: string): Promise<any | null> {
@@ -57,15 +84,36 @@ async function safeFetchJson(url: string): Promise<any | null> {
   }
 }
 
+function isNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function metric(value: number | null | undefined, digits = 2): string {
+  return isNumber(value) ? value.toFixed(digits) : '--'
+}
+
+function percent(value: number | null | undefined, digits = 1): string {
+  return isNumber(value) ? `${(value * 100).toFixed(digits)}%` : '--'
+}
+
+function signedPercentValue(value: number | null | undefined, digits = 2): string {
+  if (!isNumber(value)) return '--'
+  return `${value >= 0 ? '+' : ''}${value.toFixed(digits)}%`
+}
+
+function timeLabel(timestamp?: number | null): string {
+  return isNumber(timestamp) ? new Date(timestamp).toLocaleString() : '--'
+}
+
 export default function BacktestPanel() {
   const [runs, setRuns] = useState<BacktestRun[]>([])
   const [selectedRun, setSelectedRun] = useState<BacktestRun | null>(null)
   const [running, setRunning] = useState(false)
   const [candleCount, setCandleCount] = useState(500)
-  const [positionSize, setPositionSize] = useState(2)
-  const [maxHoldBars, setMaxHoldBars] = useState(50)
+  const [positionSize, setPositionSize] = useState(1.5)
+  const [maxHoldBars, setMaxHoldBars] = useState(12)
   const [trailingStop, setTrailingStop] = useState(false)
-  const [tpMultiplier, setTpMultiplier] = useState(4)
+  const [tpMultiplier, setTpMultiplier] = useState(0)
   const [trades, setTrades] = useState<any[]>([])
   const [equityCurve, setEquityCurve] = useState<any[]>([])
   const [expandedTrades, setExpandedTrades] = useState(false)
@@ -121,13 +169,15 @@ export default function BacktestPanel() {
         body: JSON.stringify({
           candle_count: candleCount,
           position_size_pct: positionSize / 100,
-          symbol: 'BTCUSDT',
+          symbol: 'BTCUSD',
           timeframe: '15m',
           initial_balance: 10000,
           max_hold_bars: maxHoldBars,
           breakeven_threshold: 1.0,
           trailing_stop: trailingStop,
           tp_atr_multiplier: tpMultiplier,
+          signal_side_mode: 'invert',
+          avoid_reason_tokens: ['CVD falling'],
           adaptive_learning: true,
         }),
       })
@@ -273,24 +323,24 @@ export default function BacktestPanel() {
   }
 
   const verdict = selectedRun ? (() => {
-    const pf = selectedRun.profit_factor ?? 0
-    const dd = selectedRun.max_drawdown_pct ?? 100
-    const trades = selectedRun.total_trades ?? 0
-    const pnl = selectedRun.total_pnl ?? 0
+    const pf = selectedRun.profit_factor
+    const dd = selectedRun.max_drawdown_pct
+    const trades = selectedRun.total_trades
+    const pnlPct = selectedRun.total_pnl_pct
 
-    if (trades < 3) {
-      return { label: 'INSUFFICIENT DATA', icon: AlertTriangle, color: '#f59f43' }
+    if (!isNumber(pf) || !isNumber(dd) || !isNumber(trades) || !isNumber(pnlPct)) {
+      return { label: 'DATA UNAVAILABLE', icon: AlertTriangle, color: '#f59f43' }
     }
-    if (pf >= 1.5 && pnl > 0 && dd < 15) {
-      return { label: 'GOOD MODEL', icon: CheckCircle, color: '#1fe3a3' }
+    if (trades < 30) {
+      return { label: 'LOW SAMPLE', icon: AlertTriangle, color: '#f59f43' }
     }
-    if (pf > 1.0 && pnl > 0 && dd < 15) {
-      return { label: 'PROFITABLE MODEL', icon: CheckCircle, color: '#1fe3a3' }
+    if (pf >= 1.5 && pnlPct > 0 && dd < 15) {
+      return { label: 'PASSED STRICT GATE', icon: CheckCircle, color: '#1fe3a3' }
     }
-    if (pf < 1.0 || pnl < 0) {
-      return { label: 'BAD MODEL', icon: XCircle, color: '#ff5b6b' }
+    if (pf > 1.0 && pnlPct > 0 && dd < 15) {
+      return { label: 'PROFITABLE, WEAK PF', icon: AlertTriangle, color: '#f59f43' }
     }
-    return { label: 'NEEDS WORK', icon: AlertTriangle, color: '#f59f43' }
+    return { label: 'FAILING BACKTEST', icon: XCircle, color: '#ff5b6b' }
   })() : null
 
   return (
@@ -371,7 +421,7 @@ export default function BacktestPanel() {
             type="number"
             value={tpMultiplier}
             onChange={(e) => setTpMultiplier(Number(e.target.value))}
-            min={2}
+            min={0}
             max={8}
             step={1}
           />
@@ -513,46 +563,44 @@ export default function BacktestPanel() {
               <verdict.icon size={14} color={verdict.color} />
               <span style={{ color: verdict.color, fontWeight: 700 }}>{verdict.label}</span>
               <span className="bt-verdict-sub">
-                WR {(selectedRun.win_rate * 100).toFixed(0)}% · PF{' '}
-                {selectedRun.profit_factor != null ? selectedRun.profit_factor.toFixed(2) : '∞'} · DD{' '}
-                {selectedRun.max_drawdown_pct.toFixed(1)}%
+                WR {percent(selectedRun.win_rate, 1)} | PF {metric(selectedRun.profit_factor, 4)} | DD{' '}
+                {metric(selectedRun.max_drawdown_pct, 4)}%
               </span>
             </div>
           )}
 
           {/* Stats Grid */}
           <div className="bt-result-grid">
-            <div className={`bt-cell ${selectedRun.total_pnl >= 0 ? 'green' : 'red'}`}>
+            <div className={`bt-cell ${!isNumber(selectedRun.total_pnl) || selectedRun.total_pnl >= 0 ? 'green' : 'red'}`}>
               <div className="bt-cell-label">PnL</div>
-              <div className="bt-cell-val">${(selectedRun.total_pnl ?? 0).toFixed(2)}</div>
-              <div className={`bt-cell-sub ${selectedRun.total_pnl_pct >= 0 ? 'green' : 'red'}`}>
-                {(selectedRun.total_pnl_pct ?? 0) >= 0 ? '+' : ''}
-                {(selectedRun.total_pnl_pct ?? 0).toFixed(2)}%
+              <div className="bt-cell-val">{isNumber(selectedRun.total_pnl) ? `$${metric(selectedRun.total_pnl, 2)}` : '--'}</div>
+              <div className={`bt-cell-sub ${!isNumber(selectedRun.total_pnl_pct) || selectedRun.total_pnl_pct >= 0 ? 'green' : 'red'}`}>
+                {signedPercentValue(selectedRun.total_pnl_pct, 4)}
               </div>
             </div>
-            <div className={`bt-cell ${(selectedRun.win_rate ?? 0) >= 0.5 ? 'green' : 'red'}`}>
+            <div className={`bt-cell ${isNumber(selectedRun.win_rate) && selectedRun.win_rate < 0.5 ? 'red' : 'green'}`}>
               <div className="bt-cell-label">Win Rate</div>
-              <div className="bt-cell-val">{((selectedRun.win_rate ?? 0) * 100).toFixed(1)}%</div>
+              <div className="bt-cell-val">{percent(selectedRun.win_rate, 2)}</div>
               <div className="bt-cell-sub">
-                {selectedRun.winning_trades ?? 0}W / {selectedRun.losing_trades ?? 0}L
+                {isNumber(selectedRun.winning_trades) ? selectedRun.winning_trades : '--'}W / {isNumber(selectedRun.losing_trades) ? selectedRun.losing_trades : '--'}L
               </div>
             </div>
             <div className="bt-cell">
               <div className="bt-cell-label">Profit Factor</div>
               <div className="bt-cell-val">
-                {selectedRun.profit_factor != null ? selectedRun.profit_factor.toFixed(2) : '∞'}
+                {metric(selectedRun.profit_factor, 4)}
               </div>
-              <div className="bt-cell-sub">{selectedRun.total_trades ?? 0} trades</div>
+              <div className="bt-cell-sub">{isNumber(selectedRun.total_trades) ? selectedRun.total_trades : '--'} trades</div>
             </div>
             <div className="bt-cell">
               <div className="bt-cell-label">Sharpe</div>
-              <div className="bt-cell-val">{(selectedRun.sharpe_ratio ?? 0).toFixed(2)}</div>
+              <div className="bt-cell-val">{metric(selectedRun.sharpe_ratio, 4)}</div>
               <div className="bt-cell-sub">ratio</div>
             </div>
             <div className="bt-cell">
               <div className="bt-cell-label">Max DD</div>
-              <div className="bt-cell-val red">{(selectedRun.max_drawdown_pct ?? 0).toFixed(2)}%</div>
-              <div className="bt-cell-sub">-${(selectedRun.max_drawdown ?? 0).toFixed(2)}</div>
+              <div className="bt-cell-val red">{metric(selectedRun.max_drawdown_pct, 4)}%</div>
+              <div className="bt-cell-sub">{isNumber(selectedRun.max_drawdown) ? `$${metric(selectedRun.max_drawdown, 2)}` : '--'}</div>
             </div>
             <div className="bt-cell">
               <div className="bt-cell-label">Balance</div>
@@ -565,25 +613,62 @@ export default function BacktestPanel() {
           <div className="bt-strip">
             <span>
               <DollarSign size={11} /> Avg Win{' '}
-              <strong className="green">+${(selectedRun.avg_win ?? 0).toFixed(2)}</strong>
+              <strong className="green">{isNumber(selectedRun.avg_win) ? `+$${metric(selectedRun.avg_win, 2)}` : '--'}</strong>
             </span>
             <span>
               <TrendingDown size={11} /> Avg Loss{' '}
-              <strong className="red">-${(selectedRun.avg_loss ?? 0).toFixed(2)}</strong>
+              <strong className="red">{isNumber(selectedRun.avg_loss) ? `$${metric(selectedRun.avg_loss, 2)}` : '--'}</strong>
             </span>
             <span>
               <Target size={11} /> RR{' '}
               <strong>
-                {(selectedRun.avg_loss ?? 0) > 0 && (selectedRun.avg_win ?? 0) > 0
-                  ? ((selectedRun.avg_win ?? 0) / Math.max(selectedRun.avg_loss ?? 0.01, 0.01)).toFixed(2)
+                {isNumber(selectedRun.avg_loss) && isNumber(selectedRun.avg_win) && selectedRun.avg_loss > 0 && selectedRun.avg_win > 0
+                  ? (selectedRun.avg_win / selectedRun.avg_loss).toFixed(4)
                   : '--'}
               </strong>
             </span>
             <span>
               <Clock size={11} /> Avg Hold{' '}
-              <strong>{selectedRun.avg_hold_bars != null ? `${selectedRun.avg_hold_bars.toFixed(1)} bars` : '--'}</strong>
+              <strong>{isNumber(selectedRun.avg_hold_bars) ? `${metric(selectedRun.avg_hold_bars, 1)} bars` : '--'}</strong>
             </span>
           </div>
+
+          {selectedRun.data_quality && (
+            <div className="bt-strip">
+              <span>
+                <Database size={11} /> Data{' '}
+                <strong>{selectedRun.data_quality.verdict.replace(/_/g, ' ').toUpperCase()}</strong>
+              </span>
+              <span>
+                Score <strong>{selectedRun.data_quality.score}/100</strong>
+              </span>
+              <span>
+                Source <strong>{selectedRun.data_quality.provider}:{selectedRun.data_quality.source_type}</strong>
+              </span>
+              <span>
+                Symbol <strong>{selectedRun.data_quality.actual_symbol}</strong>
+              </span>
+              <span>
+                Candles <strong>{selectedRun.data_quality.candle_count}/{selectedRun.data_quality.requested_count ?? '--'}</strong>
+              </span>
+              <span>
+                Gaps <strong>{selectedRun.data_quality.missing_candle_count}</strong>
+              </span>
+              <span>
+                Duplicates <strong>{selectedRun.data_quality.duplicate_count}</strong>
+              </span>
+              <span>
+                Last <strong>{timeLabel(selectedRun.data_quality.last_timestamp)}</strong>
+              </span>
+            </div>
+          )}
+
+          {selectedRun.data_quality?.warnings?.length ? (
+            <div className="bt-error">
+              <AlertTriangle size={14} />
+              <span>{selectedRun.data_quality.warnings.join('; ')}</span>
+            </div>
+          ) : null}
 
           {/* Equity Curve */}
           {equityCurve.length > 1 && (
@@ -674,9 +759,9 @@ export default function BacktestPanel() {
                     minute: '2-digit',
                   })}
                 </span>
-                <span className="bt-hist-pnl">${run.total_pnl?.toFixed(0) ?? '0'}</span>
-                <span className="bt-hist-wr">{(run.win_rate * 100).toFixed(0)}%</span>
-                <span className="bt-hist-trades">{run.total_trades}tx</span>
+                <span className="bt-hist-pnl">{isNumber(run.total_pnl) ? `$${metric(run.total_pnl, 0)}` : '--'}</span>
+                <span className="bt-hist-wr">{percent(run.win_rate, 1)}</span>
+                <span className="bt-hist-trades">{isNumber(run.total_trades) ? run.total_trades : '--'}tx</span>
               </button>
             ))}
           </div>
@@ -688,9 +773,6 @@ export default function BacktestPanel() {
         <div className="bt-empty">
           <Zap size={24} className="bt-empty-icon" />
           <p>Configure parameters and execute a backtest to see if the model works on past data.</p>
-          <p className="bt-empty-hint">
-            Good model = 50%+ win rate, profit factor {'>'} 1.5, drawdown {'<'} 15%
-          </p>
         </div>
       )}
     </div>

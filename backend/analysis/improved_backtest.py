@@ -89,7 +89,7 @@ class ImprovedBacktestEngine:
                     # Position sizing based on confidence
                     if self.confidence_sizing:
                         size_multiplier = sig["confidence"] / 0.50  # Scale around 50% confidence
-                        size_multiplier = max(0.5, min(size_multiplier, 1.5))  # Clamp 0.5x to 1.5x
+                        size_multiplier = max(0.5, min(size_multiplier, 1.0))  # Clamp 0.5x to 1.0x (never exceed base risk)
                     else:
                         size_multiplier = 1.0
                     

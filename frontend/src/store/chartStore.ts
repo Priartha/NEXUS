@@ -83,10 +83,21 @@ function upsertCandle(candles: ChartCandle[], candle: ApiCandle): ChartCandle[] 
 
 const CACHE_KEY = 'nexus-chart-store'
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
 function loadCache(): Partial<ChartStore> {
   try {
     const raw = localStorage.getItem(CACHE_KEY)
-    if (raw) return JSON.parse(raw)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    if (!isObject(parsed)) return {}
+    return {
+      signals: Array.isArray(parsed.signals) ? (parsed.signals as TradeSignal[]) : [],
+      scalpContext: isObject(parsed.scalpContext) ? (parsed.scalpContext as unknown as ScalpContext) : null,
+      scalpRisk: isObject(parsed.scalpRisk) ? (parsed.scalpRisk as unknown as ScalpRiskSummary) : null,
+    }
   } catch {}
   return {}
 }
@@ -197,15 +208,12 @@ export const useChartStore = create<ChartStore>((set) => ({
       }
 
       // Handle snapshot candles
-      const rawCandles = msg.candles as ApiCandle[] | undefined
+      const rawCandles = Array.isArray(msg.candles) ? (msg.candles as ApiCandle[]) : undefined
       if (rawCandles && rawCandles.length > 0) {
-        console.log(`[Store] Applying ${rawCandles.length} candles from ${updateType}`)
         next.candles = rawCandles.map(toChartCandle).slice(-700)
       } else if (message.candle) {
         // Single candle update (tick/close)
-        if (state.candles.length === 0) {
-          console.log('[Store] Single candle but no history, skipping')
-        } else {
+        if (state.candles.length > 0) {
           next.candles = upsertCandle(state.candles, message.candle)
         }
       }
@@ -225,13 +233,13 @@ export const useChartStore = create<ChartStore>((set) => ({
 
       if (message.candle) next.lastApiCandle = message.candle
       if (message.quote !== undefined) next.quote = message.quote
-      if (message.fvgs) next.fvgs = message.fvgs
-      if (message.order_blocks) next.orderBlocks = message.order_blocks
-      if (message.liquidity) next.liquidity = message.liquidity
-      if (message.liquidity_events) next.liquidityEvents = message.liquidity_events
-      if (message.signals) next.signals = message.signals
-      if (message.swings) next.swings = message.swings
-      if (message.structure) next.structure = message.structure
+      if (message.fvgs !== undefined) next.fvgs = message.fvgs
+      if (message.order_blocks !== undefined) next.orderBlocks = message.order_blocks
+      if (message.liquidity !== undefined) next.liquidity = message.liquidity
+      if (message.liquidity_events !== undefined) next.liquidityEvents = message.liquidity_events
+      if (message.signals !== undefined) next.signals = message.signals
+      if (message.swings !== undefined) next.swings = message.swings
+      if (message.structure !== undefined) next.structure = message.structure
       if (message.metrics !== undefined) next.metrics = message.metrics
       if (message.projection !== undefined) next.projection = message.projection
       if (message.regime !== undefined) next.regime = message.regime
@@ -241,8 +249,8 @@ export const useChartStore = create<ChartStore>((set) => ({
       if (message.psychology !== undefined) next.psychology = message.psychology
       if (message.readability !== undefined) next.readability = message.readability
       if (message.orderbook !== undefined) next.orderbook = message.orderbook
-      if (message.stats) next.stats = message.stats
-      if (message.paper_trading) next.paperTrading = message.paper_trading
+      if (message.stats !== undefined) next.stats = message.stats
+      if (message.paper_trading !== undefined) next.paperTrading = message.paper_trading
       if (message.scalp !== undefined) next.scalpContext = message.scalp
       if (message.scalp_risk !== undefined) next.scalpRisk = message.scalp_risk
 

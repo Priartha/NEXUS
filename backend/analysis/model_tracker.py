@@ -144,6 +144,19 @@ class ModelPerformanceTracker:
         try:
             cutoff = int(time.time() * 1000) - days * 86400000
 
+            # Total predictions (all, regardless of outcome)
+            total_row = conn.execute("""
+                SELECT COUNT(*) FROM model_predictions WHERE timestamp >= ?
+            """, (cutoff,)).fetchone()
+            total_predictions = total_row[0] if total_row else 0
+
+            # Avg confidence (all predictions, not just those with outcomes)
+            conf_rows = conn.execute("""
+                SELECT predicted_confidence FROM model_predictions WHERE timestamp >= ?
+            """, (cutoff,)).fetchall()
+            avg_conf = sum(r[0] for r in conf_rows) / len(conf_rows) if conf_rows else 0.0
+
+            # Outcome-only metrics
             rows = conn.execute("""
                 SELECT predicted_direction, predicted_grade, predicted_confidence,
                        actual_direction, actual_return, was_correct, timeframe
@@ -152,12 +165,14 @@ class ModelPerformanceTracker:
             """, (cutoff,)).fetchall()
 
             if not rows:
-                return ModelMetrics()
+                return ModelMetrics(
+                    total_predictions=total_predictions,
+                    avg_confidence=round(avg_conf, 4),
+                )
 
             total = len(rows)
             correct = sum(r[5] for r in rows)
             accuracy = correct / total if total > 0 else 0.0
-            avg_conf = sum(r[2] for r in rows) / total
 
             correct_returns = [r[4] for r in rows if r[5] == 1]
             wrong_returns = [r[4] for r in rows if r[5] == 0]
@@ -182,7 +197,7 @@ class ModelPerformanceTracker:
             degradation = accuracy_7d < accuracy_30d * 0.85 and accuracy_7d < 0.45
 
             return ModelMetrics(
-                total_predictions=total,
+                total_predictions=total_predictions,
                 correct_predictions=correct,
                 accuracy=round(accuracy, 4),
                 avg_confidence=round(avg_conf, 4),

@@ -176,6 +176,41 @@ def get_paper_trade_stats() -> dict:
 def save_backtest_run(run: dict) -> None:
     conn = get_conn()
     try:
+        if run.get("walk_forward"):
+            combined = run.get("combined", {})
+            train = run.get("train_period", {})
+            test = run.get("test_period", {})
+            start_date = train.get("start_date", 0)
+            end_date = test.get("end_date", 0)
+            candle_count = train.get("candle_count", 0) + test.get("candle_count", 0)
+            initial_balance = combined.get("initial_balance", 10000.0)
+            final_balance = combined.get("final_balance", 10000.0)
+            total_pnl = combined.get("total_pnl", 0.0)
+            total_pnl_pct = combined.get("total_pnl_pct", 0.0)
+            total_trades = combined.get("total_trades", 0)
+            winning_trades = combined.get("winning_trades", 0)
+            losing_trades = combined.get("losing_trades", 0)
+            win_rate = combined.get("win_rate", 0.0)
+            profit_factor = combined.get("profit_factor", 0.0)
+            max_drawdown = combined.get("max_drawdown", 0.0)
+            max_drawdown_pct = combined.get("max_drawdown_pct", 0.0)
+            sharpe = combined.get("sharpe_ratio", 0.0)
+        else:
+            start_date = run.get("start_date", 0)
+            end_date = run.get("end_date", 0)
+            candle_count = run.get("candle_count", 0)
+            initial_balance = run.get("initial_balance", 10000.0)
+            final_balance = run.get("final_balance")
+            total_pnl = run.get("total_pnl", 0.0)
+            total_pnl_pct = run.get("total_pnl_pct", 0.0)
+            total_trades = run.get("total_trades", 0)
+            winning_trades = run.get("winning_trades", 0)
+            losing_trades = run.get("losing_trades", 0)
+            win_rate = run.get("win_rate")
+            profit_factor = run.get("profit_factor")
+            max_drawdown = run.get("max_drawdown", 0.0)
+            max_drawdown_pct = run.get("max_drawdown_pct", 0.0)
+            sharpe = run.get("sharpe_ratio")
         conn.execute("""
             INSERT OR REPLACE INTO backtest_runs
             (id, symbol, timeframe, start_date, end_date, candle_count,
@@ -185,17 +220,18 @@ def save_backtest_run(run: dict) -> None:
              win_rate, avg_win, avg_loss, profit_factor, created_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            run["id"], run["symbol"], run["timeframe"],
-            run["start_date"], run["end_date"], run["candle_count"],
-            run.get("initial_balance", 10000.0), run.get("final_balance"),
-            run.get("total_trades", 0), run.get("winning_trades", 0),
-            run.get("losing_trades", 0), run.get("total_pnl", 0.0),
-            run.get("total_pnl_pct", 0.0), run.get("max_drawdown", 0.0),
-            run.get("max_drawdown_pct", 0.0), run.get("sharpe_ratio"),
-            run.get("win_rate"), run.get("avg_win"), run.get("avg_loss"),
-            run.get("profit_factor"), int(time.time() * 1000),
+            run.get("id"), run.get("symbol", ""), run.get("timeframe", ""),
+            start_date, end_date, candle_count,
+            initial_balance, final_balance,
+            total_trades, winning_trades, losing_trades, total_pnl,
+            total_pnl_pct, max_drawdown, max_drawdown_pct, sharpe,
+            win_rate, run.get("avg_win"), run.get("avg_loss"),
+            profit_factor, int(time.time() * 1000),
         ))
         conn.commit()
+    except Exception as e:
+        import traceback
+        logging.getLogger("backend").error(f"save_backtest_run failed: {e}\n{traceback.format_exc()}")
     finally:
         conn.close()
 
@@ -204,20 +240,25 @@ def save_backtest_trades(run_id: str, trades: list[dict]) -> None:
     conn = get_conn()
     try:
         for t in trades:
-            conn.execute("""
-                INSERT OR REPLACE INTO backtest_trades
-                (id, run_id, signal_id, timestamp, side, entry_price,
-                 stop_loss, exit_price, exit_timestamp, pnl, pnl_pct,
-                 risk_reward, confidence, reason, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                t["id"], run_id, t.get("signal_id"), t["timestamp"],
-                t["side"], t["entry_price"], t["stop_loss"], t["exit_price"],
-                t.get("exit_timestamp"), t.get("pnl"), t.get("pnl_pct"),
-                t.get("risk_reward"), t.get("confidence"), t.get("reason"),
-                t.get("status", "closed"),
-            ))
+            try:
+                conn.execute("""
+                    INSERT OR REPLACE INTO backtest_trades
+                    (id, run_id, signal_id, timestamp, side, entry_price,
+                     stop_loss, exit_price, exit_timestamp, pnl, pnl_pct,
+                     risk_reward, confidence, reason, status)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    t.get("id"), run_id, t.get("signal_id"), t.get("timestamp"),
+                    t.get("side"), t.get("entry_price"), t.get("stop_loss"), t.get("exit_price"),
+                    t.get("exit_timestamp"), t.get("pnl"), t.get("pnl_pct"),
+                    t.get("risk_reward"), t.get("confidence"), t.get("reason"),
+                    t.get("status", "closed"),
+                ))
+            except Exception as e:
+                logging.getLogger("backend").warning(f"Skipping bad trade row: {e}")
         conn.commit()
+    except Exception as e:
+        logging.getLogger("backend").error(f"save_backtest_trades: {e}")
     finally:
         conn.close()
 

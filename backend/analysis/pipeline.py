@@ -93,6 +93,7 @@ class AnalysisPipeline:
         self.scalp_risk = ScalpRiskManager()
         self.scalp_context = None
         self.futures_context: FuturesContext | dict | None = None
+        self.ai_ict_review: Any = None
 
     def add_quote(self, quote: MarketQuote) -> None:
         """Add a market quote for orderbook analysis."""
@@ -115,6 +116,7 @@ class AnalysisPipeline:
                 regime=self.regime,
                 liquidity_events=self.liquidity_events,
                 futures_context=self.futures_context,
+                timeframe=store.timeframe,
             )
         return {
             "scalp": to_wire(self.scalp_context) if self.scalp_context else None,
@@ -372,6 +374,7 @@ class AnalysisPipeline:
                 regime=self.regime,
                 liquidity_events=self.liquidity_events,
                 futures_context=self.futures_context,
+                timeframe=store.timeframe,
             )
 
         # Convert scalping signals to TradeSignal for system compatibility
@@ -430,6 +433,26 @@ class AnalysisPipeline:
         else:
             signals = []
 
+        psych = self.psychology
+        if psych is None:
+            psych = PsychologySnapshot(
+                timestamp=candle.timestamp if candle else int(time.time() * 1000),
+                fear_greed_score=0.0, fear_greed_label="neutral",
+                retail_participation=0.5, smart_money_activity=0.0,
+                emotional_state="balanced", trap_risk=0.5,
+                conviction_score=0.5, psychological_levels=[],
+                summary="Insufficient data for psychology analysis",
+            )
+        read = self.readability
+        if read is None:
+            read = ReadabilitySnapshot(
+                timestamp=candle.timestamp if candle else int(time.time() * 1000),
+                overall_score=0.5, grade="C", candle_clarity=0.5,
+                trend_quality=None, range_quality=None,
+                noise_level=0.5, structure_reliability=0.5,
+                tradeability="fair", dominant_pattern="unknown",
+            )
+
         payload = {
             "update_type": update_type,
             "symbol": store.symbol,
@@ -437,11 +460,11 @@ class AnalysisPipeline:
             "candle": to_wire(candle) if candle else None,
             "swings": to_wire(self.swings[-80:]),
             "signals": to_wire(signals),
-            "metrics": to_wire(self.metrics),
+            "metrics": self._metrics_payload(),
             "projection": to_wire(self.projection),
             "regime": to_wire(self.regime),
-            "psychology": to_wire(self.psychology),
-            "readability": to_wire(self.readability),
+            "psychology": to_wire(psych),
+            "readability": to_wire(read),
             "btc_patterns": to_wire(self.btc_patterns),
             "orderbook": {
                 "imbalances": to_wire(self.ob_imbalances[-15:]),
@@ -469,17 +492,15 @@ class AnalysisPipeline:
         if include_candles:
             payload["candles"] = to_wire(store.get_chart_candles())
 
-        # Paper trading stats
-        if self._paper_trading:
-            pt_stats = repo.get_paper_trade_stats()
-            payload["paper_trading"] = pt_stats
+        if self.ai_ict_review is not None:
+            payload["ai_ict"] = to_wire(self.ai_ict_review)
 
         # Save signals before paper trading (foreign key reference)
         for sig in signals:
             repo.save_signal(to_wire(sig))
 
         # Paper trading & alerts
-        if self._paper_trading and signals and candle:
+        if self._paper_trading and candle:
             events = self._paper_trading.evaluate_signals(
                 signals, candle, symbol=store.symbol, timeframe=store.timeframe,
                 mtf_confluence=mtf,
@@ -490,6 +511,9 @@ class AnalysisPipeline:
                 elif ev["type"] == "trade_closed":
                     self.scalp_risk.record_trade_close(ev.get("pnl", 0))
                 self._on_alert(ev)
+
+        if self._paper_trading:
+            payload["paper_trading"] = repo.get_paper_trade_stats()
 
         for sig in signals:
             alert = check_signal_alert(to_wire(sig))
@@ -529,6 +553,13 @@ class AnalysisPipeline:
 
         fvgs_active = [f for f in self.fvgs if not f.is_filled]
         obs_active = [ob for ob in self.order_blocks if not ob.is_breaker]
+        ai_decision = getattr(self, "_ai_decision", {}) or {}
+
+        # Newer runtime flows keep the current AI review on ai_ict_review.
+        # Expose that same decision shape to the history recorder so analytics
+        # remains aligned with the live snapshot payload.
+        if not ai_decision and self.ai_ict_review is not None:
+            ai_decision = to_wire(self.ai_ict_review)
 
         return {
             "symbol": getattr(self, "_symbol", "BTCUSDT"),
@@ -548,35 +579,7 @@ class AnalysisPipeline:
                 "volume_state": self.regime.volume_state,
                 "reason": self.regime.reason,
             },
-            "metrics": {
-                "rsi14": self.metrics.rsi14,
-                "atr14": self.metrics.atr14,
-                "ema20": self.metrics.ema20,
-                "ema50": self.metrics.ema50,
-                "vwap": self.metrics.vwap,
-                "vwap_distance_pct": self.metrics.vwap_distance_pct,
-                "volume_zscore": self.metrics.volume_zscore,
-                "realized_volatility": self.metrics.realized_volatility,
-                "trend_score": self.metrics.trend_score,
-                "volatility_score": self.metrics.volatility_score,
-                "institutional_bias": self.metrics.institutional_bias,
-                "bias_score": self.metrics.bias_score,
-                "expected_move": self.metrics.expected_move,
-                "expected_move_pct": getattr(self.metrics, "expected_move_pct", 0.0),
-                "hurst_exponent": getattr(self.metrics, "hurst_exponent", 0.0),
-                "shannon_entropy": getattr(self.metrics, "shannon_entropy", 0.0),
-                "garch_volatility": getattr(self.metrics, "garch_volatility", 0.0),
-                "kalman_trend_strength": getattr(self.metrics, "kalman_trend_strength", 0.0),
-                "markov_bull_prob": getattr(self.metrics, "markov_bull_prob", 0.0),
-                "markov_bear_prob": getattr(self.metrics, "markov_bear_prob", 0.0),
-                "monte_carlo_var95": getattr(self.metrics, "monte_carlo_var95", 0.0),
-                "fourier_dominant_period": getattr(self.metrics, "fourier_dominant_period", 0.0),
-                "volume_profile_poc": getattr(self.metrics, "volume_profile_poc", 0.0),
-                "volume_profile_imbalance": getattr(self.metrics, "volume_profile_imbalance", 0.0),
-                "return_skewness": getattr(self.metrics, "return_skewness", 0.0),
-                "return_kurtosis": getattr(self.metrics, "return_kurtosis", 0.0),
-                "fractal_dimension": getattr(self.metrics, "fractal_dimension", 0.0),
-            },
+            "metrics": self._metrics_payload(),
             "patterns": patterns,
             "fvgs": [{"id": f.id, "direction": f.direction, "top": f.top, "bottom": f.bottom} for f in fvgs_active],
             "order_blocks": [{"id": ob.id, "direction": ob.direction, "top": ob.top, "bottom": ob.bottom} for ob in obs_active],
@@ -600,7 +603,7 @@ class AnalysisPipeline:
                 for e in self.liquidity_events
             ],
             "sentiment": getattr(self, "_sentiment", {}),
-            "ai_decision": getattr(self, "_ai_decision", {}),
+            "ai_decision": ai_decision,
             "orderbook": {
                 "bid": self.orderbook_analyzer.current_bid if hasattr(self.orderbook_analyzer, "current_bid") else None,
                 "ask": self.orderbook_analyzer.current_ask if hasattr(self.orderbook_analyzer, "current_ask") else None,
@@ -634,6 +637,57 @@ class AnalysisPipeline:
             }
             for c in closed
         ]
+
+    def _metrics_payload(self) -> dict | None:
+        if not self.metrics:
+            return None
+        return {
+            "timestamp": getattr(self.metrics, "timestamp", 0),
+            "rsi14": self.metrics.rsi14,
+            "atr14": self.metrics.atr14,
+            "ema20": self.metrics.ema20,
+            "ema50": self.metrics.ema50,
+            "vwap": self.metrics.vwap,
+            "vwap_distance_pct": self.metrics.vwap_distance_pct,
+            "volume_zscore": self.metrics.volume_zscore,
+            "realized_volatility": self.metrics.realized_volatility,
+            "parkinson_volatility": getattr(self.metrics, "parkinson_volatility", 0.0),
+            "garman_klass_volatility": getattr(self.metrics, "garman_klass_volatility", 0.0),
+            "displacement_ratio": getattr(self.metrics, "displacement_ratio", 0.0),
+            "premium_discount": getattr(self.metrics, "premium_discount", 0.0),
+            "equilibrium": getattr(self.metrics, "equilibrium", 0.0),
+            "range_high": getattr(self.metrics, "range_high", 0.0),
+            "range_low": getattr(self.metrics, "range_low", 0.0),
+            "trend_score": self.metrics.trend_score,
+            "volatility_score": self.metrics.volatility_score,
+            "institutional_bias": self.metrics.institutional_bias,
+            "bias_score": self.metrics.bias_score,
+            "expected_move": self.metrics.expected_move,
+            "expected_move_pct": getattr(self.metrics, "expected_move_pct", 0.0),
+            "hurst_exponent": getattr(self.metrics, "hurst_exponent", 0.0),
+            "shannon_entropy": getattr(self.metrics, "shannon_entropy", 0.0),
+            "garch_volatility": getattr(self.metrics, "garch_volatility", 0.0),
+            "garch_persistence": getattr(self.metrics, "garch_persistence", 0.0),
+            "kalman_trend": getattr(self.metrics, "kalman_trend", 0.0),
+            "kalman_trend_strength": getattr(self.metrics, "kalman_trend_strength", 0.0),
+            "markov_bull_prob": getattr(self.metrics, "markov_bull_prob", 0.0),
+            "markov_bear_prob": getattr(self.metrics, "markov_bear_prob", 0.0),
+            "markov_regime_certainty": getattr(self.metrics, "markov_regime_certainty", 0.0),
+            "monte_carlo_var95": getattr(self.metrics, "monte_carlo_var95", 0.0),
+            "monte_carlo_expected_return": getattr(self.metrics, "monte_carlo_expected_return", 0.0),
+            "monte_carlo_max_drawdown": getattr(self.metrics, "monte_carlo_max_drawdown", 0.0),
+            "fourier_dominant_period": getattr(self.metrics, "fourier_dominant_period", 0.0),
+            "fourier_cycle_strength": getattr(self.metrics, "fourier_cycle_strength", 0.0),
+            "volume_profile_poc": getattr(self.metrics, "volume_profile_poc", 0.0),
+            "volume_profile_vah": getattr(self.metrics, "volume_profile_vah", 0.0),
+            "volume_profile_val": getattr(self.metrics, "volume_profile_val", 0.0),
+            "volume_profile_imbalance": getattr(self.metrics, "volume_profile_imbalance", 0.0),
+            "return_skewness": getattr(self.metrics, "return_skewness", 0.0),
+            "return_kurtosis": getattr(self.metrics, "return_kurtosis", 0.0),
+            "fractal_dimension": getattr(self.metrics, "fractal_dimension", 0.0),
+            "ljung_box_statistic": getattr(self.metrics, "ljung_box_statistic", 0.0),
+            "autocorrelation_lag1": getattr(self.metrics, "autocorrelation_lag1", 0.0),
+        }
 
     def set_store_reference(self, store: CandleStore) -> None:
         """Set reference to candle store for state extraction."""

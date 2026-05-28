@@ -25,7 +25,7 @@ class Settings:
     ws_reconnect_max_seconds: float = float(os.getenv("ICT_WS_RECONNECT_MAX_SECONDS", "30"))
 
     # Delta Exchange futures product config
-    futures_product_id: int = int(os.getenv("DELTA_FUTURES_PRODUCT_ID", "372"))  # BTCUSD perpetual
+    futures_product_id: int = int(os.getenv("DELTA_FUTURES_PRODUCT_ID", "27"))  # BTCUSD perpetual
     futures_leverage: int = int(os.getenv("DELTA_FUTURES_LEVERAGE", "20"))  # Increased for better futures profitability
     futures_margin_mode: str = os.getenv("DELTA_FUTURES_MARGIN_MODE", "cross")
     futures_funding_refresh_seconds: float = float(os.getenv("DELTA_FUTURES_FUNDING_REFRESH_SECONDS", "30"))

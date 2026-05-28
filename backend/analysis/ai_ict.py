@@ -713,10 +713,13 @@ class AiIctService:
         blockers: list[str] = []
 
         # Strict thresholds for execution
-        if scorecard[direction] < 0.45:
-            blockers.append("Combined confluence below execution threshold")
-        if separation < 0.20:
-            blockers.append("Bullish and bearish evidence too close (no clear edge)")
+        if direction != "neutral":
+            if scorecard[direction] < 0.45:
+                blockers.append("Combined confluence below execution threshold")
+            if separation < 0.20:
+                blockers.append("Bullish and bearish evidence too close (no clear edge)")
+        else:
+            blockers.append("No directional bias detected")
         execution_block = _phase_block_reason(payload, direction)
         if execution_block:
             blockers.append(execution_block)
@@ -725,7 +728,7 @@ class AiIctService:
             score = min(score, 0.45)
             confirmations = []
             blockers = _prepend_unique(blockers, execution_block)
-        elif scorecard[direction] < 0.30:
+        elif direction != "neutral" and scorecard[direction] < 0.30:
             direction = "neutral"
             score = min(score, 0.45)
             confirmations = []

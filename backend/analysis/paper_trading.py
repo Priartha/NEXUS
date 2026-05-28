@@ -10,24 +10,29 @@ NEW FEATURES:
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Any
 
 from backend.analysis.risk_manager import RiskManager
-from backend.analysis.profitability_guard import can_trade_live
+from backend.analysis.self_aware_agent import agent as ai_agent
 from backend.models.types import Candle, TradeSignal
 from backend.storage import repository as repo
+
+logger = logging.getLogger(__name__)
 
 
 class PaperTradingEngine:
     """Simulated trade execution with realistic costs and risk enforcement."""
 
+    enabled: bool = True
+
     def __init__(
         self,
         initial_balance: float = 10_000.0,
         max_concurrent: int = 1,
-        min_confidence: float = 0.40,
+        min_confidence: float = 0.55,
         max_daily_trades: int = 5,
         max_daily_loss_pct: float = 0.03,
         cooldown_after_losses: int = 3,
@@ -62,6 +67,9 @@ class PaperTradingEngine:
         timeframe: str = "5m",
         mtf_confluence: dict | None = None,
     ) -> list[dict]:
+        if not self.enabled:
+            return []
+
         open_trades = repo.get_paper_trades(status="open")
         events: list[dict] = []
 
@@ -72,15 +80,6 @@ class PaperTradingEngine:
 
         qualified = [s for s in signals if s.confidence >= self.min_confidence and s.status in ("open", "pending", "active")]
         if not qualified:
-            return events
-
-        allowed_by_validation, validation_blockers = can_trade_live()
-        if not allowed_by_validation:
-            events.append({
-                "type": "trade_blocked",
-                "reason": "profitability_validation",
-                "blockers": validation_blockers,
-            })
             return events
 
         open_count = len([t for t in open_trades if t["status"] == "open"])
@@ -101,7 +100,8 @@ class PaperTradingEngine:
 
         best = max(qualified, key=lambda s: s.confidence)
 
-        risk_amount = self.initial_balance * self.risk_per_trade_pct
+        current_balance = self._current_balance()
+        risk_amount = current_balance * self.risk_per_trade_pct
         allowed, blockers = self.risk_manager.can_open_trade(
             signal_confidence=best.confidence,
             risk_amount=risk_amount,
@@ -192,6 +192,8 @@ class PaperTradingEngine:
             bars_held = trade.get("bars_held", 0) + 1
             trade["bars_held"] = bars_held
             repo.update_paper_trade(trade["id"], {"bars_held": bars_held})
+            if bars_held <= 1:
+                continue
             funding_cost = bars_held * self.funding_rate_per_8h * entry * qty
 
             if side == "buy":
@@ -231,6 +233,38 @@ class PaperTradingEngine:
                 pnl_pct = pnl / (entry * qty) * 100 if entry * qty else 0
                 reason = "stop_loss" if hit_stop else "target_hit"
                 repo.close_paper_trade(trade["id"], exit_price, round(pnl, 2), round(pnl_pct, 4), reason)
+
+                try:
+                    ai_agent.record_trade_outcome(
+                        signal={
+                            "signal": side.upper(),
+                            "entry": entry,
+                            "pattern_type": f"{side}_{reason}",
+                            "features": {
+                                "atr_pct": trade.get("atr_at_entry", 0),
+                                "confidence": trade.get("confidence", 0),
+                                "risk_reward": trade.get("risk_reward", 0),
+                            },
+                            "regime": "unknown",
+                            "reason": trade.get("reason", ""),
+                        },
+                        exit_price=exit_price,
+                        won=pnl > 0,
+                        pnl_pct=round(pnl_pct, 4),
+                    )
+                except Exception:
+                    logger.exception("Failed to record AI agent trade outcome")
+
+                try:
+                    from backend.analysis.model_tracker import model_tracker
+                    model_tracker.record_outcome(
+                        signal_id=trade.get("signal_id", ""),
+                        actual_direction=side,
+                        actual_return=round(pnl_pct / 100.0, 4),
+                        hold_period_bars=trade.get("bars_held", 0),
+                    )
+                except Exception:
+                    logger.exception("Failed to record model tracker outcome")
 
                 self.risk_manager.record_trade_result(pnl)
 

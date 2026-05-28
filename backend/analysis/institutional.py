@@ -5,6 +5,18 @@ import numpy as np
 import pandas as pd
 import ta
 
+from backend.analysis.ai_ict import (
+    _fourier_dominant_cycle,
+    _fractal_dimension,
+    _garch11_forecast,
+    _hurst_exponent,
+    _kalman_filter_trend,
+    _markov_regime_switching,
+    _monte_carlo_paths,
+    _shannon_entropy,
+    _skewness_kurtosis,
+    _volume_profile_analysis,
+)
 from backend.models.types import Candle, LiquidityEvent, MarketMetrics, PriceProjection, Swing
 
 
@@ -52,7 +64,7 @@ def compute_market_metrics(candles: list[Candle], swings: list[Swing], lookback:
     else:
         institutional_bias = "neutral"
 
-    return MarketMetrics(
+    metrics = MarketMetrics(
         timestamp=latest.timestamp,
         atr14=_round(atr14),
         ema20=_round(ema20),
@@ -76,6 +88,8 @@ def compute_market_metrics(candles: list[Candle], swings: list[Swing], lookback:
         expected_move=_round(expected_move),
         expected_move_pct=_round(_safe_div(expected_move, latest.close) * 100, 3),
     )
+    _attach_advanced_metrics(metrics, ordered)
+    return metrics
 
 
 def build_price_projection(
@@ -242,6 +256,70 @@ def _dealing_range(candles: list[Candle], swings: list[Swing]) -> tuple[float, f
     return max(candle.high for candle in candles), min(candle.low for candle in candles)
 
 
+def _attach_advanced_metrics(metrics: MarketMetrics, candles: list[Candle]) -> None:
+    closes = [c.close for c in candles if c.close > 0]
+    if len(closes) < 50:
+        return
+
+    returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes)) if closes[i - 1] > 0 and closes[i] > 0]
+    if not returns:
+        return
+
+    recent_returns = returns[-60:] if len(returns) >= 60 else returns
+    recent_closes_80 = closes[-80:] if len(closes) >= 80 else closes
+    recent_closes_100 = closes[-100:] if len(closes) >= 100 else closes
+    recent_candles = [
+        {"close": c.close, "volume": c.volume}
+        for c in (candles[-50:] if len(candles) >= 50 else candles)
+    ]
+
+    garch_vol, garch_persistence = _garch11_forecast(recent_returns)
+    kalman = _kalman_filter_trend(recent_closes_80)
+    markov = _markov_regime_switching(recent_returns)
+    mc = _monte_carlo_paths(
+        closes[-1],
+        kalman.get("trend", 0.0),
+        garch_vol if garch_vol > 0 else 0.01,
+        steps=20,
+        simulations=200,
+    )
+    dominant_period, cycle_strength = _fourier_dominant_cycle(recent_closes_100)
+    vol_profile = _volume_profile_analysis(recent_candles)
+    skew, kurt = _skewness_kurtosis(recent_returns)
+    fractal_dim = _fractal_dimension(recent_closes_80)
+    hurst = _hurst_exponent(closes)
+    entropy = _shannon_entropy(closes)
+    autocorr_lag1, ljung_box = _autocorrelation_stats(recent_returns)
+
+    setattr(metrics, "hurst_exponent", _round(hurst, 4))
+    setattr(metrics, "shannon_entropy", _round(entropy, 4))
+    setattr(metrics, "garch_volatility", _round(garch_vol, 6))
+    setattr(metrics, "garch_persistence", _round(garch_persistence, 4))
+    setattr(metrics, "kalman_trend", _round(kalman.get("trend", 0.0), 6))
+    setattr(metrics, "kalman_trend_strength", _round(kalman.get("trend_strength", 0.0), 4))
+    setattr(metrics, "kalman_prediction_error", _round(kalman.get("prediction_error", 0.0), 6))
+    setattr(metrics, "markov_bull_prob", _round(markov.get("bull_prob", 0.0), 4))
+    setattr(metrics, "markov_bear_prob", _round(markov.get("bear_prob", 0.0), 4))
+    setattr(metrics, "markov_transition_prob", _round(markov.get("transition_prob", 0.0), 4))
+    setattr(metrics, "markov_regime_certainty", _round(markov.get("regime_certainty", 0.0), 4))
+    setattr(metrics, "monte_carlo_var95", _round(mc.get("var95", 0.0), 4))
+    setattr(metrics, "monte_carlo_expected_return", _round(mc.get("expected_return", 0.0), 4))
+    setattr(metrics, "monte_carlo_max_drawdown", _round(mc.get("max_drawdown_prob", 0.0), 4))
+    setattr(metrics, "monte_carlo_p5", _round(mc.get("p5", 0.0), 2))
+    setattr(metrics, "monte_carlo_p50", _round(mc.get("p50", 0.0), 2))
+    setattr(metrics, "fourier_dominant_period", _round(dominant_period, 2))
+    setattr(metrics, "fourier_cycle_strength", _round(cycle_strength, 4))
+    setattr(metrics, "volume_profile_poc", _round(vol_profile.get("poc", 0.0), 2))
+    setattr(metrics, "volume_profile_vah", _round(vol_profile.get("vah", 0.0), 2))
+    setattr(metrics, "volume_profile_val", _round(vol_profile.get("val", 0.0), 2))
+    setattr(metrics, "volume_profile_imbalance", _round(vol_profile.get("volume_imbalance", 0.0), 4))
+    setattr(metrics, "return_skewness", _round(skew, 4))
+    setattr(metrics, "return_kurtosis", _round(kurt, 4))
+    setattr(metrics, "fractal_dimension", _round(fractal_dim, 4))
+    setattr(metrics, "autocorrelation_lag1", _round(autocorr_lag1, 4))
+    setattr(metrics, "ljung_box_statistic", _round(ljung_box, 4))
+
+
 def _trend_score(
     close: float,
     atr: float,
@@ -259,6 +337,20 @@ def _trend_score(
     range_score = _clamp(premium_discount, -1.0, 1.0)
     score = (ema_spread * 0.32) + (price_ema * 0.14) + (vwap_score * 0.2) + (rsi_score * 0.2) + (range_score * 0.14)
     return _clamp(score, -1.0, 1.0)
+
+
+def _autocorrelation_stats(returns: list[float]) -> tuple[float, float]:
+    n = len(returns)
+    if n < 10:
+        return 0.0, 0.0
+    mean = sum(returns) / n
+    centered = [r - mean for r in returns]
+    denom = sum(x * x for x in centered)
+    if denom <= 0:
+        return 0.0, 0.0
+    acf1 = sum(centered[i] * centered[i - 1] for i in range(1, n)) / denom
+    q_stat = n * (n + 2) * ((acf1 * acf1) / max(n - 1, 1))
+    return acf1, q_stat
 
 
 def _median_period_ms(candles: list[Candle]) -> int:

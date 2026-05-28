@@ -29,6 +29,7 @@ from backend.analysis.pipeline import AnalysisPipeline
 from backend.analysis.sentiment import SentimentService
 from backend.broadcast.ws_manager import ConnectionManager
 from backend.config import settings
+from backend.engine.candle_aggregator import timeframe_to_ms
 from backend.engine.candle_store import CandleStore
 from backend.ingestion.binance import start_binance_stream
 from backend.ingestion.delta_rest import fetch_futures_funding, fetch_futures_oi, fetch_liquidations
@@ -41,9 +42,11 @@ from backend.analysis.paper_trading import PaperTradingEngine
 from backend.analysis.risk_manager import RiskManager
 from backend.analysis.symbol_scanner import MultiSymbolScanner
 from backend.analysis.csv_import import parse_csv, get_supported_formats
+from backend.analysis.data_quality import aggregate_candles, analyze_candles
 from backend.api.history_routes import router as history_router
 from backend.api.demo_routes import router as demo_router
 from backend.storage.history_recorder import recorder as history_recorder
+from backend.storage.history_repository import get_candles_with_source
 from backend.analysis.daily_reports import daily_reporter
 from backend.utils.cache import global_cache, CACHE_TTLS, invalidate_pattern
 
@@ -187,6 +190,11 @@ async def lifespan(app: FastAPI):
         if backup:
             logger.info(f"Pre-start backup created: {backup}")
     init_db()
+    from backend.analysis.self_aware_agent import agent as ai_agent
+    restored_trades = ai_agent.bootstrap_from_paper_trades(
+        repo.get_paper_trades(status="closed", limit=5000)
+    )
+    logger.info(f"AI brain restored {restored_trades} closed paper trades into memory")
 
     # Initialize multi-exchange price aggregator
     from backend.ingestion.multi_exchange import aggregator as multi_exchange_aggregator
@@ -199,16 +207,20 @@ async def lifespan(app: FastAPI):
 
     # Seed historical data for backtesting
     if settings.market_data_provider.lower() == "binance":
-        from backend.ingestion.binance import fetch_historical_candles
-        for tf, store in stores.items():
-            try:
-                logger.info(f"Seeding historical data for {tf}")
-                candles = await fetch_historical_candles(settings.market_data_rest_base_url, settings.symbol, tf, limit=1000)
-                now_ms = candles[-1].timestamp if candles else None
-                store.seed(candles, now_ms=now_ms)
-                logger.info(f"Seeded {len(candles)} candles for {tf}")
-            except Exception as e:
-                logger.warning(f"Failed to seed {tf}: {e}")
+        from backend.ingestion.binance import fetch_historical_candles as _fetch
+        _base_url = settings.market_data_rest_base_url
+    else:
+        from backend.ingestion.delta_rest import fetch_historical_candles as _fetch
+        _base_url = settings.rest_base_url
+    for tf, store in stores.items():
+        try:
+            logger.info(f"Seeding historical data for {tf}")
+            candles = await _fetch(_base_url, settings.symbol, tf, limit=1000)
+            now_ms = candles[-1].timestamp if candles else None
+            store.seed(candles, now_ms=now_ms)
+            logger.info(f"Seeded {len(candles)} candles for {tf}")
+        except Exception as e:
+            logger.warning(f"Failed to seed {tf}: {e}")
 
     if settings.market_data_provider.lower() == "binance":
         stream_task = asyncio.create_task(start_binance_stream(manager, stores, pipelines, settings))
@@ -217,8 +229,9 @@ async def lifespan(app: FastAPI):
     sentiment_task = asyncio.create_task(refresh_sentiment_loop())
     ai_ict_task = asyncio.create_task(refresh_ai_ict_loop())
 
-    # Start history recorder (uses primary timeframe pipeline)
-    primary_tf = supported_timeframes[0]
+    # Start history recorder on the configured active timeframe so analytics
+    # reflect the model the user is actually trading/viewing.
+    primary_tf = _valid_timeframe(settings.timeframe)
     primary_pipeline = pipelines[primary_tf]
     await history_recorder.start(primary_pipeline)
     logger.info(f"History recorder started for timeframe {primary_tf}")
@@ -370,21 +383,85 @@ async def health() -> dict:
 
 # ─── Backtesting ──────────────────────────────────────────
 
+@app.get("/data/quality")
+async def data_quality(
+    symbol: str = Query(default=settings.symbol),
+    timeframe: str = Query(default="15m"),
+    source: str = Query(default="live"),
+    limit: int = Query(default=1000, ge=1, le=5000),
+) -> dict:
+    source_key = source.lower()
+    if source_key == "live":
+        store = stores.get(timeframe)
+        if not store:
+            raise HTTPException(status_code=400, detail=f"Invalid timeframe: {timeframe}")
+        candles = store.get_closed_candles()[-limit:]
+        return analyze_candles(
+            candles,
+            requested_symbol=symbol,
+            actual_symbol=store.symbol,
+            timeframe=timeframe,
+            source_type="live_store",
+            provider=settings.market_data_provider,
+            native_timeframe=True,
+            requested_count=limit,
+        )
+    if source_key == "archive":
+        archived = get_candles_with_source(symbol=symbol, timeframe=timeframe, limit=limit)
+        return analyze_candles(
+            archived["candles"],
+            requested_symbol=symbol,
+            actual_symbol=archived["actual_symbol"],
+            timeframe=timeframe,
+            source_type="candle_archive",
+            provider="local_sqlite",
+            native_timeframe=True,
+            requested_count=limit,
+        )
+    if source_key == "archive_derived":
+        source_tf = "1m" if timeframe == "5m" else "5m"
+        source_ratio = max(1, timeframe_to_ms(timeframe) // timeframe_to_ms(source_tf))
+        source_limit = min((limit + 2) * source_ratio, 5000)
+        archived = get_candles_with_source(symbol=symbol, timeframe=source_tf, limit=source_limit)
+        aggregated = aggregate_candles(archived["candles"], timeframe)[-limit:]
+        return analyze_candles(
+            aggregated,
+            requested_symbol=symbol,
+            actual_symbol=archived["actual_symbol"],
+            timeframe=timeframe,
+            source_type=f"candle_archive_derived_from_{source_tf}",
+            provider="local_sqlite",
+            native_timeframe=False,
+            requested_count=limit,
+        )
+    if source_key == "all":
+        return {
+            "live": await data_quality(symbol=symbol, timeframe=timeframe, source="live", limit=limit),
+            "archive": await data_quality(symbol=symbol, timeframe=timeframe, source="archive", limit=limit),
+            "archive_derived": await data_quality(symbol=symbol, timeframe=timeframe, source="archive_derived", limit=limit),
+        }
+    raise HTTPException(status_code=400, detail="source must be live, archive, archive_derived, or all")
+
+
 class BacktestRequest(BaseModel):
-    symbol: str = "BTCUSDT"
+    symbol: str = settings.symbol
     timeframe: str = "15m"
     candle_count: int = 1000
     initial_balance: float = 10_000.0
-    position_size_pct: float = 0.02
-    max_hold_bars: int = 50
+    position_size_pct: float = 0.015
+    max_hold_bars: int = 12
     breakeven_threshold: float = 1.0
     trailing_stop: bool = False
-    tp_atr_multiplier: float = 4.0
+    tp_atr_multiplier: float = 0.0
+    signal_side_mode: str = "invert"
+    avoid_reason_tokens: list[str] = ["CVD falling"]
+    require_regime_alignment: bool = False
     adaptive_learning: bool = True
 
 
 @app.post("/backtest/run")
 async def run_backtest(body: BacktestRequest) -> dict:
+    loop = asyncio.get_event_loop()
     store = stores.get(body.timeframe)
     if not store:
         raise HTTPException(status_code=400, detail=f"Invalid timeframe: {body.timeframe}")
@@ -395,15 +472,26 @@ async def run_backtest(body: BacktestRequest) -> dict:
 
     requested_candle_count = body.candle_count
     candles = candles[-requested_candle_count:]
+    data_quality_report = await loop.run_in_executor(None, lambda: analyze_candles(
+        candles,
+        requested_symbol=body.symbol,
+        actual_symbol=store.symbol,
+        timeframe=body.timeframe,
+        source_type="live_store",
+        provider=settings.market_data_provider,
+        native_timeframe=True,
+        requested_count=requested_candle_count,
+    ))
 
     def build_engine(
         *,
         max_hold_bars: int = body.max_hold_bars,
         breakeven_threshold: float = body.breakeven_threshold,
         trailing_stop: bool = body.trailing_stop,
-        signal_side_mode: str = "normal",
-        avoid_reason_tokens: list[str] | None = None,
+        signal_side_mode: str = body.signal_side_mode,
+        avoid_reason_tokens: list[str] | None = body.avoid_reason_tokens,
         tp_atr_multiplier: float | None = None,
+        require_regime_alignment: bool = body.require_regime_alignment,
     ) -> BacktestEngine:
         return BacktestEngine(
             initial_balance=body.initial_balance,
@@ -414,11 +502,27 @@ async def run_backtest(body: BacktestRequest) -> dict:
             signal_side_mode=signal_side_mode,
             avoid_reason_tokens=avoid_reason_tokens,
             tp_atr_multiplier=tp_atr_multiplier if tp_atr_multiplier is not None else body.tp_atr_multiplier,
+            require_regime_alignment=require_regime_alignment,
+            max_candles=settings.max_candles,
         )
+
+    def candidate_score(candidate: dict) -> float:
+        trades = int(candidate.get("total_trades", 0) or 0)
+        pf = float(candidate.get("profit_factor", 0) or 0)
+        pnl = float(candidate.get("total_pnl_pct", 0) or 0)
+        dd = float(candidate.get("max_drawdown_pct", 100) or 100)
+        score = min(pf, 3.0) * 60 + pnl * 2 - dd * 3 + min(trades, 50)
+        if trades < 10:
+            score -= 40
+        if pnl <= 0:
+            score -= 80
+        if dd > 15:
+            score -= (dd - 15) * 5
+        return score
 
     try:
         engine = build_engine()
-        result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
+        result = await loop.run_in_executor(None, lambda: engine.run(candles, symbol=body.symbol, timeframe=body.timeframe))
 
         if body.adaptive_learning and result.get("profit_factor", 0) < 1.0 and len(candles) >= 80:
             recent_window = candles[-min(settings.max_candles, len(candles)):]
@@ -460,6 +564,28 @@ async def run_backtest(body: BacktestRequest) -> dict:
                     },
                 ),
                 (
+                    "balanced_countermodel_hold12_skip_cvd_falling",
+                    recent_window,
+                    {
+                        "max_hold_bars": 12,
+                        "breakeven_threshold": 1.0,
+                        "trailing_stop": False,
+                        "signal_side_mode": "invert",
+                        "avoid_reason_tokens": ["CVD falling"],
+                    },
+                ),
+                (
+                    "high_pnl_hold12_skip_cvd_rising",
+                    recent_window,
+                    {
+                        "max_hold_bars": 12,
+                        "breakeven_threshold": 1.0,
+                        "trailing_stop": False,
+                        "signal_side_mode": "normal",
+                        "avoid_reason_tokens": ["CVD rising"],
+                    },
+                ),
+                (
                     "recent_current_exit",
                     recent_window,
                     {
@@ -471,17 +597,32 @@ async def run_backtest(body: BacktestRequest) -> dict:
             ]
             best_result = result
             best_candidate = "requested_window"
+            best_score = candidate_score(result)
             for candidate_name, candidate_candles, params in candidates:
                 if len(candidate_candles) < 80:
                     continue
-                candidate = build_engine(**params).run(
-                    candidate_candles,
-                    symbol=body.symbol,
-                    timeframe=body.timeframe,
-                )
-                if candidate.get("profit_factor", 0) > best_result.get("profit_factor", 0):
-                    best_result = candidate
-                    best_candidate = candidate_name
+                try:
+                    candidate = await loop.run_in_executor(
+                        None, lambda eng=build_engine(**params): eng.run(candidate_candles, symbol=body.symbol, timeframe=body.timeframe)
+                    )
+                    score = candidate_score(candidate)
+                    if score > best_score:
+                        best_result = candidate
+                        best_candidate = candidate_name
+                        best_score = score
+                        data_quality_report = await loop.run_in_executor(None, lambda: analyze_candles(
+                            candidate_candles,
+                            requested_symbol=body.symbol,
+                            actual_symbol=store.symbol,
+                            timeframe=body.timeframe,
+                            source_type="live_store",
+                            provider=settings.market_data_provider,
+                            native_timeframe=True,
+                            requested_count=len(candidate_candles),
+                        ))
+                except Exception as e:
+                    logger.warning(f"Backtest candidate {candidate_name} failed: {e}")
+                    continue
 
             if best_result is not result:
                 best_result["adaptive_learning"] = {
@@ -506,6 +647,7 @@ async def run_backtest(body: BacktestRequest) -> dict:
                     "selected_candle_count": result.get("candle_count"),
                     "reason": "No recent regime candidate improved the requested window.",
                 }
+        result["data_quality"] = data_quality_report
     except Exception as e:
         import traceback
         logger.error(f"Backtest engine failed: {e}\n{traceback.format_exc()}")
@@ -555,9 +697,21 @@ async def paper_trade_stats() -> dict:
     return repo.get_paper_trade_stats()
 
 
+@app.get("/paper-trades/status")
+async def paper_trade_status() -> dict:
+    return {
+        "enabled": paper_trading.enabled,
+        "open_positions": len(repo.get_paper_trades(status="open")),
+        "closed_trades": repo.get_paper_trade_stats().get("closed_trades", 0),
+    }
+
+
 @app.post("/paper-trades/toggle")
 async def toggle_paper_trading() -> dict:
-    return {"ok": True, "message": "Paper trading toggle requested. Configure in settings."}
+    paper_trading.enabled = not paper_trading.enabled
+    status = "enabled" if paper_trading.enabled else "disabled"
+    logger.info(f"Paper trading toggled to {status}")
+    return {"ok": True, "enabled": paper_trading.enabled, "message": f"Paper trading {status}"}
 
 
 @app.post("/paper-trades/reset")
@@ -646,6 +800,16 @@ async def backtest_csv(body: CsvImportRequest) -> dict:
     bt_result = engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)
     bt_result["import_metadata"] = result["metadata"]
     bt_result["import_warnings"] = result["warnings"]
+    bt_result["data_quality"] = analyze_candles(
+        candles,
+        requested_symbol=body.symbol,
+        actual_symbol=body.symbol,
+        timeframe=body.timeframe,
+        source_type="csv_import",
+        provider=result["metadata"].get("format_detected", "csv"),
+        native_timeframe=True,
+        requested_count=len(candles),
+    )
 
     repo.save_backtest_run(bt_result)
     repo.save_backtest_trades(bt_result["id"], bt_result["trades"])
@@ -1131,6 +1295,7 @@ def _attach_realtime_context(payload: dict, timeframe: str) -> dict:
     if review is None or not _review_matches_payload(review, payload):
         review = ai_ict_service.local_review(payload, sentiment_service.current)
         ai_ict_reviews[timeframe] = review
+        pipelines[timeframe].ai_ict_review = review
     payload["ai_ict"] = to_wire(review)
     return payload
 
@@ -1286,6 +1451,7 @@ async def refresh_ai_ict_timeframe(timeframe: str) -> None:
         logger.warning(f"ai_ict snapshot timed out for {timeframe}")
         return
     if _payload_analysis_timestamp(payload) is None or payload.get("metrics") is None:
+        logger.debug(f"ai_ict skipping {timeframe}: no metrics/analysis timestamp in snapshot")
         return
     payload["sentiment"] = to_wire(sentiment_service.current)
 
@@ -1295,11 +1461,13 @@ async def refresh_ai_ict_timeframe(timeframe: str) -> None:
 
     local_review = ai_ict_service.local_review(payload, sentiment_service.current)
     ai_ict_reviews[timeframe] = local_review
+    pipelines[timeframe].ai_ict_review = local_review
     if timeframe != _valid_timeframe(settings.timeframe):
         await _broadcast_ai_ict(timeframe, local_review)
         return
     review = await ai_ict_service.analyze(payload, sentiment_service.current)
     ai_ict_reviews[timeframe] = review
+    pipelines[timeframe].ai_ict_review = review
     await _broadcast_ai_ict(timeframe, review)
 
 

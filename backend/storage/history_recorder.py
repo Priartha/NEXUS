@@ -39,6 +39,7 @@ class HistoryRecorder:
         self._last_snapshot = 0
         self._last_candle_sync = 0
         self._last_cleanup = 0
+        self._last_ai_decision_marker: tuple[Any, ...] | None = None
 
     async def start(self, pipeline: Any) -> None:
         """Start the background recorder."""
@@ -161,11 +162,22 @@ class HistoryRecorder:
 
             # AI Decision
             ai = state.get("ai_decision", {})
-            if ai and ai.get("grade") and ai.get("grade") != "NO_TRADE":
-                ai["timestamp"] = now_ms
-                ai["symbol"] = state.get("symbol", "BTCUSDT")
-                ai["timeframe"] = state.get("timeframe", "5m")
-                save_ai_decision(ai)
+            if ai and ai.get("grade"):
+                marker = (
+                    ai.get("updated_at") or ai.get("timestamp"),
+                    ai.get("timeframe") or state.get("timeframe", "5m"),
+                    ai.get("direction"),
+                    ai.get("grade"),
+                    ai.get("entry"),
+                    ai.get("stop_loss"),
+                    ai.get("take_profit"),
+                )
+                if marker != self._last_ai_decision_marker:
+                    ai["timestamp"] = now_ms
+                    ai["symbol"] = state.get("symbol", "BTCUSDT")
+                    ai["timeframe"] = state.get("timeframe", "5m")
+                    save_ai_decision(ai)
+                    self._last_ai_decision_marker = marker
 
             # Liquidity events
             for event in state.get("liquidity_events", []):

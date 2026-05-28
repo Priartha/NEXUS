@@ -19,6 +19,7 @@ import {
   ChevronUp,
   AlertCircle,
 } from 'lucide-react'
+import { useChartStore } from '../store/chartStore'
 
 interface PatternStats {
   total_patterns: number
@@ -36,6 +37,8 @@ interface RegimeDistribution {
 
 interface AiAccuracy {
   total_decisions: number
+  actionable_decisions?: number
+  no_trade_decisions?: number
   grade_distribution: { [grade: string]: { count: number; avg_confidence: number } }
   avg_confidence: number
   avg_setup_score: number
@@ -162,6 +165,7 @@ async function safeFetchJson(url: string): Promise<any | null> {
 }
 
 export function AnalyticsPanel() {
+  const selectedTimeframe = useChartStore((state) => state.selectedTimeframe)
   const [activeTab, setActiveTab] = useState<TabKey>('overview')
   const [loading, setLoading] = useState(true)
   const [patternStats, setPatternStats] = useState<PatternStats | null>(null)
@@ -184,7 +188,7 @@ export function AnalyticsPanel() {
         await Promise.all([
           safeFetchJson(`/history/patterns/stats?days=${daysFilter}`),
           safeFetchJson(`/history/regimes/distribution?days=${daysFilter}`),
-          safeFetchJson(`/history/ai/accuracy?days=${daysFilter}`),
+          safeFetchJson(`/history/ai/accuracy?days=${daysFilter}&timeframe=${encodeURIComponent(selectedTimeframe)}`),
           safeFetchJson('/history/stats'),
           safeFetchJson(`/history/performance?limit=${daysFilter}`),
           safeFetchJson('/history/patterns?limit=50'),
@@ -204,7 +208,7 @@ export function AnalyticsPanel() {
     } finally {
       setLoading(false)
     }
-  }, [daysFilter])
+  }, [daysFilter, selectedTimeframe])
 
   useEffect(() => {
     loadData()
@@ -485,10 +489,19 @@ function OverviewTab({
           AI Decision Stats
         </h3>
         {aiAccuracy ? (
-          <>
+          aiAccuracy.total_decisions > 0 ? (
+            <>
             <div className="overview-stat-row">
-              <span>Total Decisions</span>
+              <span>Total Reviews</span>
               <strong>{aiAccuracy.total_decisions}</strong>
+            </div>
+            <div className="overview-stat-row">
+              <span>Actionable</span>
+              <strong>{aiAccuracy.actionable_decisions ?? 0}</strong>
+            </div>
+            <div className="overview-stat-row">
+              <span>No Trade</span>
+              <strong>{aiAccuracy.no_trade_decisions ?? 0}</strong>
             </div>
             <div className="overview-stat-row">
               <span>Avg Confidence</span>
@@ -512,7 +525,10 @@ function OverviewTab({
                 </strong>
               </div>
             ))}
-          </>
+            </>
+          ) : (
+            <p className="empty-state">No recent AI decisions in the selected time window</p>
+          )
         ) : (
           <p className="empty-state">No AI data available</p>
         )}

@@ -12,12 +12,17 @@ export default function PaperTradingPanel() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [openRes, closedRes] = await Promise.all([
+      const [openRes, closedRes, statusRes] = await Promise.all([
         fetch('/paper-trades?status=open'),
         fetch('/paper-trades?status=closed'),
+        fetch('/paper-trades/status'),
       ])
       setTrades(await openRes.json())
       setClosedTrades(await closedRes.json())
+      if (statusRes.ok) {
+        const status = await statusRes.json()
+        setActive(Boolean(status?.enabled))
+      }
     } catch { /* ignore */ } finally { setLoading(false) }
   }, [])
 
@@ -29,8 +34,12 @@ export default function PaperTradingPanel() {
 
   const togglePaperTrading = async () => {
     try {
-      await fetch('/paper-trades/toggle', { method: 'POST' })
-      setActive(!active)
+      const res = await fetch('/paper-trades/toggle', { method: 'POST' })
+      if (res.ok) {
+        const status = await res.json()
+        setActive(Boolean(status?.enabled))
+      }
+      fetchData()
     } catch { /* ignore */ }
   }
 

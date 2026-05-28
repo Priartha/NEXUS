@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from backend.storage.schema import get_conn
+from backend.analysis.data_quality import symbol_aliases
 
 
 # ─── Market Snapshots ─────────────────────────────────────
@@ -423,20 +424,46 @@ def get_candles(
     limit: int = 1000,
 ) -> list[dict]:
     """Query archived candles."""
+    result = get_candles_with_source(symbol, timeframe, start_ts, end_ts, limit)
+    return result["candles"]
+
+
+def get_candles_with_source(
+    symbol: str = "BTCUSDT",
+    timeframe: str = "5m",
+    start_ts: int | None = None,
+    end_ts: int | None = None,
+    limit: int = 1000,
+) -> dict:
+    """Query archived candles and report the actual symbol key used."""
     conn = get_conn()
     try:
-        query = "SELECT * FROM candle_archive WHERE symbol=? AND timeframe=?"
-        params: list[Any] = [symbol, timeframe]
-        if start_ts:
-            query += " AND timestamp>=?"
-            params.append(start_ts)
-        if end_ts:
-            query += " AND timestamp<=?"
-            params.append(end_ts)
-        query += " ORDER BY timestamp ASC LIMIT ?"
-        params.append(limit)
-        rows = conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        aliases = symbol_aliases(symbol)
+        for alias in aliases:
+            query = "SELECT * FROM candle_archive WHERE symbol=? AND timeframe=?"
+            params: list[Any] = [alias, timeframe]
+            if start_ts:
+                query += " AND timestamp>=?"
+                params.append(start_ts)
+            if end_ts:
+                query += " AND timestamp<=?"
+                params.append(end_ts)
+            query += " ORDER BY timestamp ASC LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(query, params).fetchall()
+            if rows or alias == aliases[-1]:
+                return {
+                    "requested_symbol": symbol,
+                    "actual_symbol": alias,
+                    "timeframe": timeframe,
+                    "candles": [dict(r) for r in rows],
+                }
+        return {
+            "requested_symbol": symbol,
+            "actual_symbol": symbol,
+            "timeframe": timeframe,
+            "candles": [],
+        }
     finally:
         conn.close()
 
@@ -520,28 +547,42 @@ def get_ai_decisions(
         conn.close()
 
 
-def get_ai_accuracy(days: int = 7) -> dict:
+def get_ai_accuracy(days: int = 7, timeframe: str | None = None) -> dict:
     """Calculate AI decision accuracy over recent days."""
     conn = get_conn()
     try:
         cutoff = int(time.time() * 1000) - (days * 24 * 60 * 60 * 1000)
-        total = conn.execute(
-            "SELECT COUNT(*) FROM ai_decisions_history WHERE timestamp>=? AND grade!='NO_TRADE'", (cutoff,)
+        where = "timestamp>=?"
+        params: list[object] = [cutoff]
+        if timeframe:
+            where += " AND timeframe=?"
+            params.append(timeframe)
+
+        total_reviews = conn.execute(
+            f"SELECT COUNT(*) FROM ai_decisions_history WHERE {where}", params
         ).fetchone()[0]
-        grade_dist = conn.execute("""
+        actionable = conn.execute(
+            f"SELECT COUNT(*) FROM ai_decisions_history WHERE {where} AND grade!='NO_TRADE'", params
+        ).fetchone()[0]
+        no_trade = conn.execute(
+            f"SELECT COUNT(*) FROM ai_decisions_history WHERE {where} AND grade='NO_TRADE'", params
+        ).fetchone()[0]
+        grade_dist = conn.execute(f"""
             SELECT grade, COUNT(*) as count, AVG(confidence) as avg_conf
-            FROM ai_decisions_history WHERE timestamp>=? AND grade!='NO_TRADE'
+            FROM ai_decisions_history WHERE {where}
             GROUP BY grade ORDER BY count DESC
-        """, (cutoff,)).fetchall()
+        """, params).fetchall()
         avg_conf = conn.execute(
-            "SELECT AVG(confidence) FROM ai_decisions_history WHERE timestamp>=?", (cutoff,)
+            f"SELECT AVG(confidence) FROM ai_decisions_history WHERE {where}", params
         ).fetchone()[0] or 0
         avg_setup = conn.execute(
-            "SELECT AVG(setup_score) FROM ai_decisions_history WHERE timestamp>=?", (cutoff,)
+            f"SELECT AVG(setup_score) FROM ai_decisions_history WHERE {where}", params
         ).fetchone()[0] or 0
 
         return {
-            "total_decisions": total,
+            "total_decisions": total_reviews,
+            "actionable_decisions": actionable,
+            "no_trade_decisions": no_trade,
             "grade_distribution": {r["grade"]: {"count": r["count"], "avg_confidence": round(r["avg_conf"], 3)} for r in grade_dist},
             "avg_confidence": round(avg_conf, 3),
             "avg_setup_score": round(avg_setup, 3),

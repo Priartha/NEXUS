@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -238,6 +239,46 @@ class MarketMemory:
         wins = sum(1 for t in regime_trades if t.won)
         return wins / len(regime_trades)
     
+    def save(self, path: str = "data/market_memory.pkl") -> None:
+        import pickle, os
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump({
+                "patterns": self.patterns,
+                "trade_history": self.trade_history,
+                "price_levels": list(self.price_levels),
+                "volume_profile": list(self.volume_profile),
+                "regime_history": list(self.regime_history),
+                "total_trades": self.total_trades,
+                "winning_trades": self.winning_trades,
+                "total_pnl": self.total_pnl,
+                "cycles_learned": self.cycles_learned,
+                "day_of_week_behavior": self.day_of_week_behavior,
+                "volatility_states": self.volatility_states,
+            }, f)
+
+    @classmethod
+    def load(cls, path: str = "data/market_memory.pkl") -> "MarketMemory":
+        import pickle
+        mem = cls()
+        try:
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+            mem.patterns = data.get("patterns", {})
+            mem.trade_history = data.get("trade_history", [])
+            mem.price_levels = deque(data.get("price_levels", []), maxlen=10000)
+            mem.volume_profile = deque(data.get("volume_profile", []), maxlen=5000)
+            mem.regime_history = deque(data.get("regime_history", []), maxlen=1000)
+            mem.total_trades = data.get("total_trades", 0)
+            mem.winning_trades = data.get("winning_trades", 0)
+            mem.total_pnl = data.get("total_pnl", 0.0)
+            mem.cycles_learned = data.get("cycles_learned", {})
+            mem.day_of_week_behavior = data.get("day_of_week_behavior", {})
+            mem.volatility_states = data.get("volatility_states", {})
+        except (FileNotFoundError, pickle.UnpicklingError, EOFError):
+            pass
+        return mem
+
     def get_statistics(self) -> dict:
         """Get trading statistics."""
         win_rate = self.winning_trades / self.total_trades if self.total_trades > 0 else 0
@@ -450,8 +491,10 @@ class SelfAwareTradingAgent:
         # Learning state
         self.total_decisions = 0
         self.correct_decisions = 0
+        self._decision_ids: set[str] = set()
+        self._loaded_trade_ids: set[str] = set()
         
-    def analyze_market(self, candles: list[Candle]) -> dict:
+    def analyze_market(self, candles: list[Candle], timeframe: str = "5m") -> dict:
         """Primary analysis method - extracts all intelligence from price."""
         if len(candles) < 50:
             return {'signal': 'WAIT', 'reason': 'Insufficient data', 'confidence': 0}
@@ -533,8 +576,32 @@ class SelfAwareTradingAgent:
             'market_intel': market_intel,
             'regime': regime,
         }
+        self._record_decision(signal, candles[-1].timestamp, timeframe)
         
         return signal
+
+    def _record_decision(self, signal: dict, candle_timestamp: int, timeframe: str = "5m") -> None:
+        """Count one actionable AI decision per closed candle and side."""
+        from backend.analysis.ids import stable_id
+        sig = signal.get("signal", "")
+        direction = "long" if sig == "LONG" else "short"
+        entry = signal.get("entry", 0)
+        sl = signal.get("stop_loss", 0)
+        decision_id = stable_id("scalp", direction, candle_timestamp, int(entry * 10), int(sl * 10))
+        if decision_id in self._decision_ids:
+            return
+        self._decision_ids.add(decision_id)
+        self.total_decisions += 1
+
+        if sig in ("LONG", "SHORT"):
+            from backend.analysis.model_tracker import model_tracker
+            model_tracker.record_prediction(
+                signal_id=decision_id,
+                timeframe=timeframe,
+                predicted_direction=direction,
+                predicted_grade=signal.get("pattern_type", "unknown"),
+                predicted_confidence=signal.get("confidence", 0.5),
+            )
     
     def _detect_regime(self, candles: list[Candle]) -> str:
         """Detect current market regime from price action."""
@@ -734,6 +801,7 @@ class SelfAwareTradingAgent:
             pattern_features=signal.get('features', {}),
             pattern_type=signal.get('pattern_type', 'unknown'),
             entry_reason=signal.get('reason', ''),
+            exit_reason=signal.get('exit_reason', 'trade_closed'),
             pnl_pct=pnl_pct,
             won=won,
             was_correct=won,
@@ -746,6 +814,72 @@ class SelfAwareTradingAgent:
         self.total_decisions += 1
         if won:
             self.correct_decisions += 1
+
+    def bootstrap_from_paper_trades(self, trades: list[dict]) -> int:
+        """Load closed paper-trade outcomes into memory after restart."""
+        loaded = 0
+        for trade in trades:
+            trade_id = str(trade.get('id') or '')
+            if not trade_id or trade_id in self._loaded_trade_ids:
+                continue
+            if trade.get('status') != 'closed' or trade.get('pnl_pct') is None:
+                continue
+
+            side = str(trade.get('side') or 'unknown')
+            pattern_type = self._pattern_type_from_reason(str(trade.get('reason') or ''), side)
+            pnl_pct = float(trade.get('pnl_pct') or 0)
+            entry_price = float(trade.get('entry_price') or 0)
+            exit_price = float(trade.get('exit_price') or 0)
+            timestamp = int(trade.get('opened_at') or trade.get('closed_at') or time.time() * 1000)
+            won = pnl_pct > 0
+
+            memory = TradeMemory(
+                trade_id=trade_id,
+                timestamp=timestamp,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                side=side,
+                price_level=entry_price,
+                volatility=0,
+                volume_ratio=1,
+                trend_strength=0,
+                regime='paper_history',
+                pattern_features={
+                    'confidence': float(trade.get('confidence') or 0),
+                    'risk_reward': float(trade.get('risk_reward') or 0),
+                },
+                pattern_type=pattern_type,
+                entry_reason=str(trade.get('reason') or ''),
+                exit_reason=str(trade.get('close_reason') or ''),
+                pnl_pct=pnl_pct,
+                won=won,
+                was_correct=won,
+                lessons=[f"Restored paper outcome: {'WIN' if won else 'LOSS'} ({pnl_pct:.2f}%)"],
+            )
+            self.memory.add_trade(memory)
+            self._loaded_trade_ids.add(trade_id)
+            self.total_decisions = max(self.total_decisions, self.memory.total_trades)
+            self.correct_decisions = max(self.correct_decisions, self.memory.winning_trades)
+            loaded += 1
+        return loaded
+
+    @staticmethod
+    def _pattern_type_from_reason(reason: str, side: str) -> str:
+        lowered = reason.lower()
+        if "ai brain:" in lowered:
+            fragment = lowered.split("ai brain:", 1)[1].split("|", 1)[0].strip()
+            return fragment.replace(" ", "_") or f"{side}_ai_pattern"
+        if "ai signal:" in lowered:
+            return f"{side}_ai_signal"
+        if "vwap" in lowered:
+            return f"{side}_vwap"
+        if "fvg" in lowered:
+            return f"{side}_fvg"
+        if "order block" in lowered or " ob" in lowered:
+            return f"{side}_order_block"
+        if "rsi" in lowered:
+            return f"{side}_rsi"
+        return f"{side}_paper_trade"
     
     def get_agent_status(self) -> dict:
         """Get agent learning status."""
@@ -757,9 +891,39 @@ class SelfAwareTradingAgent:
             'market_hours_knowledge': len(self.memory.cycles_learned),
         }
 
+    def save_state(self, path: str = "data/agent_brain.pkl") -> None:
+        """Save entire agent state to disk."""
+        import pickle, os
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self.memory.save(path.replace("agent_brain.pkl", "market_memory.pkl"))
+        state = {
+            "total_decisions": self.total_decisions,
+            "correct_decisions": self.correct_decisions,
+            "_decision_ids": self._decision_ids,
+            "_loaded_trade_ids": self._loaded_trade_ids,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(state, f)
+
+    def load_state(self, path: str = "data/agent_brain.pkl") -> bool:
+        """Load agent state from disk. Returns True if loaded."""
+        import pickle
+        self.memory = MarketMemory.load(path.replace("agent_brain.pkl", "market_memory.pkl"))
+        try:
+            with open(path, "rb") as f:
+                state = pickle.load(f)
+            self.total_decisions = state.get("total_decisions", 0)
+            self.correct_decisions = state.get("correct_decisions", 0)
+            self._decision_ids = state.get("_decision_ids", set())
+            self._loaded_trade_ids = state.get("_loaded_trade_ids", set())
+            return True
+        except (FileNotFoundError, pickle.UnpicklingError, EOFError):
+            return False
+
 
 # ──────────────────────────────────────────────────────────────
 # Singleton instance
 # ──────────────────────────────────────────────────────────────
 
 agent = SelfAwareTradingAgent()
+agent.load_state()  # Restore saved experience if available

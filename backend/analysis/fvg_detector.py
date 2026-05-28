@@ -41,10 +41,10 @@ def update_fvg_fills(fvgs: list[FVG], latest_candle: Candle) -> list[FVG]:
     for fvg in fvgs:
         if fvg.is_filled or latest_candle.timestamp <= fvg.timestamp:
             continue
-        if fvg.direction == "bullish" and latest_candle.close < fvg.bottom:
+        if fvg.direction == "bullish" and latest_candle.low <= fvg.bottom:
             fvg.is_filled = True
             fvg.fill_timestamp = latest_candle.timestamp
-        elif fvg.direction == "bearish" and latest_candle.close > fvg.top:
+        elif fvg.direction == "bearish" and latest_candle.high >= fvg.top:
             fvg.is_filled = True
             fvg.fill_timestamp = latest_candle.timestamp
     return fvgs

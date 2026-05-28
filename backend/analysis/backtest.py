@@ -55,6 +55,8 @@ class BacktestEngine:
         avoid_reason_tokens: list[str] | None = None,
         tp_atr_multiplier: float = 0.0,  # 0 = use signal default
         sl_atr_multiplier: float = 0.0,  # 0 = use signal default
+        require_regime_alignment: bool = False,
+        max_candles: int = 0,  # 0 = unlimited
     ):
         self.initial_balance = float(initial_balance)
         self.position_size_pct = float(position_size_pct)
@@ -70,10 +72,12 @@ class BacktestEngine:
         self.avoid_reason_tokens = avoid_reason_tokens or []
         self.tp_atr_multiplier = tp_atr_multiplier
         self.sl_atr_multiplier = sl_atr_multiplier
+        self.require_regime_alignment = require_regime_alignment
+        self.max_candles = max_candles
         self._tp_atr_multiplier = None  # Set via set_tp_multiplier()
 
     def set_tp_multiplier(self, mult: float | None):
-        """Override TP to be `mult` × SL distance instead of signal's target_2.
+        """Override TP to be `mult` Ã— SL distance instead of signal's target_2.
         e.g., mult=3 means 3:1 R:R (6 ATR TP with 2 ATR SL). None = use signal default."""
         self._tp_atr_multiplier = mult
 
@@ -86,6 +90,8 @@ class BacktestEngine:
         train_pct: float = 0.7,
     ) -> dict:
         candles = sorted(candles, key=lambda c: c.timestamp)
+        if self.max_candles > 0 and len(candles) > self.max_candles:
+            candles = candles[-self.max_candles:]
 
         if walk_forward and len(candles) >= 200:
             return self._run_walk_forward(candles, symbol, timeframe, train_pct)
@@ -107,26 +113,32 @@ class BacktestEngine:
         timeframe: str,
         start_balance: float,
     ) -> dict:
+        if len(candles) < 80:
+            return self._insufficient_data_result(candles, symbol, timeframe, start_balance)
+
         try:
             results, equity, balance, peak, open_trades, returns_series, regime_map = self._execute_trades(
                 candles, timeframe, start_balance=start_balance
             )
         except Exception as e:
-            logger.error(f"_execute_trades failed: {e}")
-            return self._fallback_result(candles, symbol, timeframe, start_balance=start_balance)
+            logger.exception("_execute_trades failed")
+            raise RuntimeError(f"Backtest trade execution failed for {symbol} {timeframe}") from e
 
         try:
             benchmark_returns = self._compute_benchmark_returns(candles)
             sma_returns = self._compute_sma_benchmark_returns(candles)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Benchmark return computation failed: {e}")
             benchmark_returns = []
             sma_returns = []
 
         stats = self._compute_stats(results, equity, balance, candles, symbol, timeframe, start_balance=start_balance)
         try:
             stats.update(self._compute_benchmark_stats(candles, benchmark_returns, sma_returns))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Benchmark stats failed: {e}")
+            stats["benchmark_buy_hold"] = None
+            stats["benchmark_sma_crossover"] = None
 
         try:
             stat_result = compute_full_statistics(
@@ -146,15 +158,8 @@ class BacktestEngine:
             }
         except Exception as e:
             logger.warning(f"Statistical tests failed: {e}")
-            stats["statistical"] = {
-                "deflated_sharpe": 0.0,
-                "p_value": 1.0,
-                "is_significant": False,
-                "monte_carlo_p_value": 1.0,
-                "probability_of_overfitting": 0.0,
-                "confidence_interval_95": [0.0, 0.0],
-                "min_track_record_length": 0,
-            }
+            stats["statistical"] = None
+            stats["statistical_error"] = str(e)
 
         try:
             regime_perf = self._compute_regime_performance(candles, results, regime_map)
@@ -167,10 +172,14 @@ class BacktestEngine:
         stats["equity_curve"] = equity
         return stats
 
-    def _fallback_result(self, candles: list[Candle], symbol: str, timeframe: str, start_balance: float | None = None) -> dict:
-        """Return a minimal valid result when the full backtest fails."""
-        initial_balance = self.initial_balance if start_balance is None else float(start_balance)
-        balance = initial_balance
+    def _insufficient_data_result(
+        self,
+        candles: list[Candle],
+        symbol: str,
+        timeframe: str,
+        start_balance: float,
+    ) -> dict:
+        initial_balance = float(start_balance)
         return {
             "id": str(uuid.uuid4()),
             "symbol": symbol,
@@ -178,8 +187,9 @@ class BacktestEngine:
             "start_date": candles[0].timestamp if candles else 0,
             "end_date": candles[-1].timestamp if candles else 0,
             "candle_count": len(candles),
+            "calculation_status": "insufficient_data",
             "initial_balance": initial_balance,
-            "final_balance": round(balance, 2),
+            "final_balance": initial_balance,
             "total_pnl": 0.0,
             "total_pnl_pct": 0.0,
             "total_trades": 0,
@@ -197,18 +207,10 @@ class BacktestEngine:
             "commission_pct": self.commission_pct,
             "total_funding_cost": 0.0,
             "funding_rate_per_8h": self.funding_rate_per_8h,
-            "statistical": {
-                "deflated_sharpe": 0.0,
-                "p_value": 1.0,
-                "is_significant": False,
-                "monte_carlo_p_value": 1.0,
-                "probability_of_overfitting": 0.0,
-                "confidence_interval_95": [0.0, 0.0],
-                "min_track_record_length": 0,
-            },
+            "statistical": None,
             "regime_performance": {},
-            "benchmark_buy_hold": {"total_return_pct": 0.0, "sharpe_ratio": 0.0},
-            "benchmark_sma_crossover": {"sharpe_ratio": 0.0},
+            "benchmark_buy_hold": None,
+            "benchmark_sma_crossover": None,
             "trades": [],
             "equity_curve": [],
         }
@@ -244,11 +246,15 @@ class BacktestEngine:
             train_result.get("regime_performance", {}),
             test_result.get("regime_performance", {}),
         )
-        benchmark_buy_hold = self._compute_benchmark_stats(
-            candles,
-            self._compute_benchmark_returns(candles),
-            self._compute_sma_benchmark_returns(candles),
-        ).get("benchmark_buy_hold", {})
+        try:
+            benchmark_buy_hold = self._compute_benchmark_stats(
+                candles,
+                self._compute_benchmark_returns(candles),
+                self._compute_sma_benchmark_returns(candles),
+            ).get("benchmark_buy_hold", {})
+        except Exception as e:
+            logger.warning(f"Walk-forward benchmark stats failed: {e}")
+            benchmark_buy_hold = {}
 
         return {
             "id": str(uuid.uuid4()),
@@ -386,7 +392,7 @@ class BacktestEngine:
             scalp._cur_oi = prev_oi + oi_change
             scalp._oi_hist.append((current.timestamp, scalp._cur_oi))
 
-            # UNIFIED SCALPING ENGINE — primary signal source
+            # UNIFIED SCALPING ENGINE â€” primary signal source
             scalp_ctx = scalp.compute(
                 candles=window,
                 metrics=metrics_engine,
@@ -395,6 +401,7 @@ class BacktestEngine:
                 swings=swing_engine,
                 regime=regime,
                 liquidity_events=liq_evt_engine,
+                timeframe=timeframe,
             )
 
             signals = scalp_ctx.signals
@@ -439,6 +446,10 @@ class BacktestEngine:
             for sig in new_signals:
                 if self.avoid_reason_tokens and any(token in sig.reason for token in self.avoid_reason_tokens):
                     continue
+                if self.require_regime_alignment:
+                    blocker = scalp._regime_direction_filter(window, sig.side, regime)
+                    if blocker:
+                        continue
                 if len([t for t in open_trades if t["status"] == "open"]) >= self.max_concurrent:
                     continue
                 if sig.confidence < 0.42:
@@ -496,8 +507,7 @@ class BacktestEngine:
                 bars_held = trade.get("bars_held", 0) + 1
                 trade["bars_held"] = bars_held
 
-                # Skip SL/TP on entry bar — its low/high occurred before entry at close
-                if bars_held == 1:
+                if bars_held == 1 and current.timestamp == trade["timestamp"]:
                     continue
 
                 if self.trailing_stop:
@@ -609,7 +619,9 @@ class BacktestEngine:
         returns = [e["account_balance"] / initial_balance - 1 for e in equity]
         avg_return = sum(returns) / len(returns) if returns else 0
         std_returns = (sum((r - avg_return) ** 2 for r in returns) / len(returns)) ** 0.5 if len(returns) > 1 else 0
-        sharpe = (avg_return / std_returns * math.sqrt(365)) if std_returns > 0 else 0
+        n_periods = len(returns)
+        periods_per_year = 365 * 24 * 60 * 60 / ((candles[-1].timestamp - candles[0].timestamp) / 1000) if len(candles) >= 2 and (candles[-1].timestamp - candles[0].timestamp) > 0 else 365
+        sharpe = (avg_return / std_returns * math.sqrt(periods_per_year)) if std_returns > 0 else 0
 
         max_consecutive_losses = 0
         current_consecutive = 0
@@ -654,11 +666,12 @@ class BacktestEngine:
         """Buy-and-hold benchmark returns."""
         if len(candles) < 10:
             return []
-        initial = candles[0].close
         returns = []
         for i in range(1, len(candles)):
-            ret = (candles[i].close - candles[i-1].close) / initial
-            returns.append(ret)
+            prev = candles[i-1].close
+            if prev > 0:
+                ret = (candles[i].close - prev) / prev
+                returns.append(ret)
         return returns
 
     def _compute_sma_benchmark_returns(self, candles: list[Candle]) -> list[float]:

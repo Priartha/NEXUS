@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { Component, useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -62,8 +62,29 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'depth' | 'volume' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain'
-const PRIMARY_PANEL_VIEWS: readonly PanelView[] = ['signals', 'scalp', 'brain', 'risk', 'trades', 'backtest', 'log', 'alerts']
+type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain'
+const PANEL_VIEWS: readonly PanelView[] = [
+  'signals',
+  'scalp',
+  'brain',
+  'risk',
+  'momentum',
+  'patterns',
+  'depth',
+  'institutional',
+  'trades',
+  'backtest',
+  'forward',
+  'log',
+  'alerts',
+  'alert-config',
+  'analytics',
+  'config',
+  'multi-exchange',
+  'model',
+  'db-status',
+  'psychology',
+]
 
 const SESSION_COLORS: Record<string, string> = {
   asian: '#8ab4f8',
@@ -80,7 +101,49 @@ const REGIME_COLORS: Record<string, string> = {
   trending: '#ffffff',
 }
 
-function App() {
+type RuntimeGuardProps = {
+  children: ReactNode
+}
+
+type RuntimeGuardState = {
+  hasError: boolean
+}
+
+class RuntimeGuard extends Component<RuntimeGuardProps, RuntimeGuardState> {
+  state: RuntimeGuardState = { hasError: false }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: Error) {
+    console.error('NEXUS UI runtime error', error)
+    window.setTimeout(() => window.location.reload(), 1500)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <main className="terminal">
+          <section className="hero-strip">
+            <div className="hero-card neutral">
+              <div className="hero-title">
+                <div className="hero-signal-group">
+                  <span className="hero-label">RUNTIME RECOVERY</span>
+                  <strong className="hero-action">RECONNECTING</strong>
+                </div>
+              </div>
+              <p className="hero-summary">The UI hit a runtime fault and is reloading automatically.</p>
+            </div>
+          </section>
+        </main>
+      )
+    }
+    return this.props.children
+  }
+}
+
+function AppShell() {
   const { reconnect } = useMarketSocket()
   useAudioAlerts()
   const candles = useChartStore((state) => state.candles)
@@ -367,7 +430,7 @@ function App() {
         <aside className="side-panel">
           <div className="panel-nav">
             <div className="panel-switch">
-            {PRIMARY_PANEL_VIEWS.map((view) => (
+            {PANEL_VIEWS.map((view) => (
               <button
                 key={view}
                 className={panelView === view ? 'active' : ''}
@@ -491,7 +554,7 @@ function App() {
                 {view === 'alert-config' && (
                   <>
                     <Bell size={11} />
-                    Alerts
+                    Alert CFG
                   </>
                 )}
               </button>
@@ -1170,6 +1233,14 @@ function App() {
       {/* ─── BTC LIVE HEADLINES ────────────────────── */}
       <BtcHeadlinesCorner />
     </main>
+  )
+}
+
+function App() {
+  return (
+    <RuntimeGuard>
+      <AppShell />
+    </RuntimeGuard>
   )
 }
 
