@@ -818,7 +818,7 @@ export interface ScalpContext {
   funding: ScalpFunding | null
   funding_rate: ScalpFundingRate | null
   open_interest: ScalpOpenInterest | null
-  liquidation_levels: ScalpLiquidationLevel[]
+  liquidation_levels: ScalpLiquidityLevel[]
   vwap: ScalpVWAP | null
   volume_profile: ScalpVolumeProfile | null
   liquidity_sweeps: ScalpLiquiditySweep[]
@@ -830,6 +830,23 @@ export interface ScalpContext {
   futures_leverage: number
   estimated_funding_cost_8h: number
   wick_rejection: ScalpWickRejection | null
+  ai_intelligence?: AiAgentStatus | null
+}
+
+export interface AiAgentStatus {
+  decisions: number
+  accuracy: number
+  memory_stats: {
+    total_trades: number
+    winning_trades: number
+    win_rate: number
+    total_pnl: number
+    avg_pnl_per_trade: number
+    patterns_learned: number
+    market_hours_learned: number
+  }
+  patterns_learned: number
+  market_hours_knowledge: number
 }
 
 export interface ScalpRiskSummary {
