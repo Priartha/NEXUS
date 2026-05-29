@@ -417,11 +417,37 @@ export interface MarketStats {
   active_liquidity: number
   liquidity_events: number
   signals: number
+  scalp_signals?: number
+  scalp_blocked?: number
   btc_patterns?: number
   btc_behaviors?: number
+  fear_greed?: string
+  readability_grade?: string
+  tradeability?: string
   ob_imbalances?: number
   ob_spread_anomalies?: number
   ob_accumulations?: number
+  ensemble?: {
+    total_trades: number
+    win_rate: number
+    total_pnl_pct: number
+    avg_pnl_per_trade: number
+    model_weights: Record<string, number>
+    regime_weights: Record<string, Record<string, number>>
+  }
+  self_optimizer?: {
+    total_attempts: number
+    kept_attempts: number
+    current_params: Record<string, number>
+    regime_performance: Record<string, { trades: number; win_rate: number; total_pnl: number }>
+  }
+  anomaly_detector?: {
+    observations: number
+    anomaly_count: number
+    baseline_return_mean: number
+    baseline_return_std: number
+    current_volatility: number
+  }
 }
 
 export interface InstitutionalMetrics {
@@ -818,7 +844,7 @@ export interface ScalpContext {
   funding: ScalpFunding | null
   funding_rate: ScalpFundingRate | null
   open_interest: ScalpOpenInterest | null
-  liquidation_levels: ScalpLiquidityLevel[]
+  liquidation_levels: ScalpLiquidationLevel[]
   vwap: ScalpVWAP | null
   volume_profile: ScalpVolumeProfile | null
   liquidity_sweeps: ScalpLiquiditySweep[]
@@ -830,7 +856,9 @@ export interface ScalpContext {
   futures_leverage: number
   estimated_funding_cost_8h: number
   wick_rejection: ScalpWickRejection | null
+  ai_brain_active?: boolean
   ai_intelligence?: AiAgentStatus | null
+  common_sense_warnings?: string[]
 }
 
 export interface AiAgentStatus {
@@ -852,6 +880,8 @@ export interface AiAgentStatus {
 export interface ScalpRiskSummary {
   current_balance: number
   initial_balance: number
+  peak_balance?: number
+  drawdown_pct?: number
   daily_pnl: number
   daily_trades: number
   daily_wins: number
@@ -869,4 +899,7 @@ export interface ScalpRiskSummary {
   max_leverage: number
   min_rrr: number
   max_hold_minutes: number
+  total_trades?: number
+  total_win_rate?: number
+  kelly_fraction?: number
 }

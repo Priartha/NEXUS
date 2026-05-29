@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { Brain, TrendingUp, TrendingDown, Activity, Target, Database, BarChart3, GitBranch, Layers } from 'lucide-react'
+import { Brain, Database, Layers } from 'lucide-react'
 import type { AiAgentStatus } from '../types/market'
 
 interface AIBrainPanelProps {

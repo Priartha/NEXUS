@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from typing import Any, Callable
 
+logger = logging.getLogger(__name__)
+
 from backend.analysis.alerts import check_signal_alert, check_regime_alert
 from backend.analysis.btc_patterns import detect_btc_patterns
+from backend.analysis.ensemble_model import ensemble as ensemble_model
+from backend.analysis.self_optimizer import optimizer as self_optimizer
+from backend.analysis.anomaly_detection import anomaly_detector
 from backend.analysis.fvg_detector import detect_fvgs, update_fvg_fills
 from backend.analysis.institutional import build_price_projection, compute_market_metrics
 from backend.analysis.liquidity import check_liquidity_sweeps, detect_equal_levels
@@ -20,7 +26,6 @@ from backend.analysis.unified_scalp import UnifiedScalpEngine
 from backend.analysis.scalp_risk import ScalpRiskManager
 from backend.config import settings
 from backend.storage import repository as repo
-from backend.analysis.signals import detect_trade_signals
 from backend.analysis.swing_detector import detect_swings
 from backend.engine.candle_store import CandleStore
 from backend.models.types import (
@@ -84,6 +89,7 @@ class AnalysisPipeline:
         self._last_regime_phase: str | None = None
 
         self._last_candle_count = 0
+        self._alerted_signal_ids: set[str] = set()
 
         # Thread safety for async execution
         self._lock = asyncio.Lock()
@@ -92,6 +98,7 @@ class AnalysisPipeline:
         self.scalp_engine = UnifiedScalpEngine()
         self.scalp_risk = ScalpRiskManager()
         self.scalp_context = None
+        self._last_scalp_context: ScalpContext | None = None
         self.futures_context: FuturesContext | dict | None = None
         self.ai_ict_review: Any = None
 
@@ -358,14 +365,14 @@ class AnalysisPipeline:
         from backend.analysis.mtf_confluence import compute_mtf_confluence
         mtf = compute_mtf_confluence(store.timeframe, {store.timeframe: store}, {store.timeframe: self})
 
-        ob_imb_data = to_wire(self.ob_imbalances[-15:])
-        ob_acc_data = to_wire([a for a in self.ob_accumulations if a.status == "active"][-10:])
-
-        # ── UNIFIED SCALPING ENGINE — PRIMARY signal source ──
-        # Fuses ALL data: order flow + VWAP + funding + OI + liquidation
-        # + volume profile + options + ICT patterns + regime + RSI + killzone
+        # ── SINGLE SIGNAL SOURCE: Unified Scalping Engine ──
+        # All data sources (candles, metrics, FVGs, OBs, swings, regime,
+        # liquidity, futures context, orderbook) are computed ONCE in
+        # _full_recalculate / _incremental_update and fed into the scalp
+        # engine. There is NO secondary/legacy signal path — this is the
+        # only signal generator in the system.
         if closed_candles and len(closed_candles) >= 20:
-            self.scalp_context = self.scalp_engine.compute(
+            fresh_ctx = self.scalp_engine.compute(
                 candles=closed_candles,
                 metrics=self.metrics,
                 fvgs=self.fvgs,
@@ -376,11 +383,28 @@ class AnalysisPipeline:
                 futures_context=self.futures_context,
                 timeframe=store.timeframe,
             )
+            # Cache the last valid scalp context (one with signals)
+            # so signals survive page refreshes even when cooldown blocks
+            # new signal generation on the snapshot request.
+            if fresh_ctx.signals:
+                self._last_scalp_context = fresh_ctx
+            self.scalp_context = fresh_ctx
+        elif self._last_scalp_context is not None:
+            # No candle data to compute from — serve last cached context
+            self.scalp_context = self._last_scalp_context
+
+        # Fall back to last known scalp context when current computation
+        # returns no signals (e.g. cooldown, blockers) but we have a
+        # recent valid context — keeps the UI alive across page refreshes.
+        display_ctx = self.scalp_context
+        if display_ctx and not display_ctx.signals and self._last_scalp_context is not None:
+            if self._last_scalp_context.signals:
+                display_ctx = self._last_scalp_context
 
         # Convert scalping signals to TradeSignal for system compatibility
         scalp_signals_as_trade: list[TradeSignal] = []
-        if self.scalp_context and self.scalp_context.signals:
-            for ss in self.scalp_context.signals:
+        if display_ctx and display_ctx.signals:
+            for ss in display_ctx.signals:
                 conf_map = {"HIGH": 0.80, "MEDIUM": 0.65, "LOW": 0.40}
                 side = "buy" if "LONG" in ss.signal_type else "sell"
                 t_sig = TradeSignal(
@@ -393,7 +417,7 @@ class AnalysisPipeline:
                     risk_reward=ss.risk_reward,
                     confidence=conf_map.get(ss.confidence, 0.65),
                     reason=ss.reason,
-                    status=ss.status,
+                    status="open" if ss.status == "active" else ss.status,
                     institutional_score=round(ss.risk_reward / 5.0, 3),
                     liquidity_score=0.5,
                     bias_score=0.5,
@@ -409,29 +433,8 @@ class AnalysisPipeline:
                 )
                 scalp_signals_as_trade.append(t_sig)
 
-        # Legacy signals as secondary (deprioritized)
-        legacy_signals: list[TradeSignal] = detect_trade_signals(
-            candles=closed_candles,
-            metrics=self.metrics,
-            fvgs=self.fvgs,
-            order_blocks=self.order_blocks,
-            liquidity_events=self.liquidity_events,
-            swings=self.swings,
-            regime=self.regime,
-            mtf_confluence=mtf,
-            ob_imbalances=ob_imb_data,
-            ob_accumulations=ob_acc_data,
-            psychology=self.psychology,
-            readability=self.readability,
-        ) if closed_candles else []
-
-        # PRIMARY signal = scalping signal (always takes priority)
-        if scalp_signals_as_trade:
-            signals = scalp_signals_as_trade[:1]
-        elif legacy_signals:
-            signals = _select_primary_signal(legacy_signals)
-        else:
-            signals = []
+        # SINGLE signal source: unified scalping engine only
+        signals = scalp_signals_as_trade[:1] if scalp_signals_as_trade else []
 
         psych = self.psychology
         if psych is None:
@@ -472,13 +475,13 @@ class AnalysisPipeline:
                 "depth_levels": to_wire(self.ob_depth_levels[-20:]),
                 "accumulations": to_wire([a for a in self.ob_accumulations if a.status == "active"][-10:]),
             },
-            "scalp": to_wire(self.scalp_context) if self.scalp_context else None,
+            "scalp": to_wire(display_ctx) if display_ctx else None,
             "scalp_risk": self.scalp_risk.get_risk_summary(),
             "stats": {
                 "closed_candles": len(closed_candles),
                 "signals": len(signals),
-                "scalp_signals": len(self.scalp_context.signals) if self.scalp_context else 0,
-                "scalp_blocked": len(self.scalp_context.trade_blocked_reasons) if self.scalp_context else 0,
+                "scalp_signals": len(display_ctx.signals) if display_ctx else 0,
+                "scalp_blocked": len(display_ctx.trade_blocked_reasons) if display_ctx else 0,
                 "ob_imbalances": len(self.ob_imbalances),
                 "ob_spread_anomalies": len([d for d in self.ob_spread_dynamics if d.status != "normal"]),
                 "ob_accumulations": len([a for a in self.ob_accumulations if a.status == "active"]),
@@ -487,6 +490,9 @@ class AnalysisPipeline:
                 "fear_greed": self.psychology.fear_greed_label if self.psychology else "unknown",
                 "readability_grade": self.readability.grade if self.readability else "unknown",
                 "tradeability": self.readability.tradeability if self.readability else "unknown",
+                "ensemble": ensemble_model.get_stats(),
+                "self_optimizer": self_optimizer.get_status(),
+                "anomaly_detector": anomaly_detector.get_status(),
             },
         }
         if include_candles:
@@ -510,15 +516,57 @@ class AnalysisPipeline:
                     self.scalp_risk.record_trade_open(ev.get("trade"))
                 elif ev["type"] == "trade_closed":
                     self.scalp_risk.record_trade_close(ev.get("pnl", 0))
-                self._on_alert(ev)
+                    # Feed closed trade to ensemble model and self-optimizer
+                    trade = ev.get("trade", {})
+                    trade_data = {
+                        'direction': trade.get('side', 'unknown'),
+                        'regime': trade.get('regime', self.regime.phase if self.regime else 'unknown'),
+                        'confidence': trade.get('confidence', 0.5),
+                        'pnl_pct': ev.get('pnl', 0),
+                        'won': ev.get('pnl', 0) > 0,
+                        'hold_minutes': trade.get('hold_minutes', 0),
+                        'entry_price': trade.get('entry_price', 0),
+                        'exit_price': trade.get('exit_price', 0),
+                    }
+                    # Record in ensemble for weight learning
+                    if self.scalp_context and self.scalp_context.signals:
+                        ss = self.scalp_context.signals[0]
+                        from backend.analysis.ensemble_model import EnsembleScore
+                        ens_score = EnsembleScore(
+                            direction=trade_data['direction'],
+                            confidence=trade_data['confidence'],
+                            microstructure_score=0.5,
+                            ict_score=0.5,
+                            momentum_score=0.5,
+                            regime=trade_data['regime'],
+                            weights_used={},
+                            reasons=[],
+                        )
+                        ensemble_model.record_outcome(ens_score, trade_data['won'], trade_data['pnl_pct'])
+                    # Record in self-optimizer
+                    self_optimizer.record_trade(trade_data)
+                    # Run self-optimization if due
+                    if self_optimizer.should_optimize():
+                        opt_result = self_optimizer.run_optimization()
+                        if opt_result.get('status') == 'applied':
+                            logger.info("Self-optimization applied: %s", opt_result)
+                # Only alert on blocked trades, not lifecycle events
+                if ev["type"] == "trade_blocked":
+                    self._on_alert(ev)
 
         if self._paper_trading:
             payload["paper_trading"] = repo.get_paper_trade_stats()
 
         for sig in signals:
-            alert = check_signal_alert(to_wire(sig))
-            if alert:
-                self._on_alert(alert)
+            if sig.id not in self._alerted_signal_ids:
+                alert = check_signal_alert(to_wire(sig))
+                if alert:
+                    self._on_alert(alert)
+                self._alerted_signal_ids.add(sig.id)
+
+        # Prune stale signal IDs to prevent memory growth
+        if len(self._alerted_signal_ids) > 1000:
+            self._alerted_signal_ids.clear()
 
         if self.regime and self.regime.phase != self._last_regime_phase:
             alert = check_regime_alert(self._last_regime_phase, self.regime.phase)
@@ -695,6 +743,11 @@ class AnalysisPipeline:
         self._timeframe = store.timeframe
         self._store = store
 
+    def set_aggregated_price(self, price: float, spread_pct: float, exchange_count: int) -> None:
+        """Set the multi-exchange aggregated price for cross-validation."""
+        if hasattr(self, 'scalp_engine') and self.scalp_engine is not None:
+            self.scalp_engine.ingest_aggregated_price(price, spread_pct, exchange_count)
+
     def _get_closed_candles_for_state(self) -> list[Candle]:
         """Get closed candles from the stored reference."""
         if hasattr(self, "_store"):
@@ -702,18 +755,4 @@ class AnalysisPipeline:
         return []
 
 
-def _select_primary_signal(signals: list[TradeSignal]) -> list[TradeSignal]:
-    active = [signal for signal in signals if signal.status in {"open", "pending"}]
-    candidates = active or signals[-12:]
-    if not candidates:
-        return []
-    primary = max(
-        candidates,
-        key=lambda signal: (
-            signal.confidence * 0.6
-            + min(signal.risk_reward / 3, 1.0) * 0.3
-            + signal.win_probability * 0.1,
-            signal.timestamp,
-        ),
-    )
-    return [primary]
+

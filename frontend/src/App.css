@@ -7152,3 +7152,257 @@
 .liq-distance, .liq-strength {
   color: var(--text-muted);
 }
+
+/* ═══════════════════════════════════════════════════════════
+   SIGNAL LOG PANEL
+   ═══════════════════════════════════════════════════════════ */
+
+.signal-log-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  min-width: 0;
+}
+
+.signal-log-hdr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 4px;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+.signal-log-hdr svg {
+  color: var(--accent-green);
+}
+
+.signal-log-count {
+  margin-left: auto;
+  color: var(--accent-green);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.signal-log-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.signal-log-empty-icon {
+  opacity: 0.3;
+}
+
+.signal-log-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px;
+}
+
+.signal-log-section-hdr {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  padding: 6px 4px 2px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 2px;
+}
+
+.signal-row {
+  display: flex;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.signal-row:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-elevated);
+}
+
+.signal-row.open,
+.signal-row.pending {
+  border-left: 2px solid var(--accent-green);
+}
+
+.signal-buy {
+  border-left: 2px solid #22c55e40;
+}
+
+.signal-sell {
+  border-left: 2px solid #ef444440;
+}
+
+.signal-buy.open,
+.signal-buy.pending {
+  border-left-color: #22c55e;
+}
+
+.signal-sell.open,
+.signal-sell.pending {
+  border-left-color: #ef4444;
+}
+
+.signal-row-icon {
+  display: flex;
+  align-items: flex-start;
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+
+.signal-up {
+  color: #22c55e;
+}
+
+.signal-down {
+  color: #ef4444;
+}
+
+.signal-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.signal-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.signal-row-side {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+.signal-row-side.bullish {
+  color: #22c55e;
+}
+
+.signal-row-side.bearish {
+  color: #ef4444;
+}
+
+.signal-row-confidence {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.signal-row-model {
+  font-size: 9px;
+  color: var(--text-muted);
+  background: var(--border-subtle);
+  padding: 0 4px;
+  border-radius: 3px;
+  margin-left: auto;
+}
+
+.signal-row-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.signal-row-details span {
+  white-space: nowrap;
+}
+
+.signal-row-reason {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  padding: 2px 4px;
+  background: var(--bg-surface);
+  border-radius: 3px;
+  word-break: break-word;
+}
+
+.signal-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+.signal-row-meta svg {
+  vertical-align: middle;
+  margin-right: 2px;
+}
+
+.signal-row-status {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 8px;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.signal-row-status.open {
+  color: #22c55e;
+  background: #22c55e15;
+}
+
+.signal-row-status.pending {
+  color: #f59e0b;
+  background: #f59e0b15;
+}
+
+.signal-row-status.closed {
+  color: var(--text-muted);
+  background: var(--border-subtle);
+}
+
+.signal-row-status.loss {
+  color: #ef4444;
+  background: #ef444415;
+}
+
+.signal-row-status.won {
+  color: #22c55e;
+  background: #22c55e15;
+}
+
+.signal-pnl-pos {
+  color: #22c55e;
+  font-weight: 700;
+}
+
+.signal-pnl-neg {
+  color: #ef4444;
+  font-weight: 700;
+}
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  color: var(--text-muted);
+  font-size: 12px;
+}

@@ -49,6 +49,7 @@ import { PsychologyPanel } from './components/PsychologyPanel'
 import { ScalpingPanel } from './components/ScalpingPanel'
 import SignalLogPanel from './components/SignalLogPanel'
 import { AIBrainPanel } from './components/AIBrainPanel'
+import { AiLabPanel } from './components/AiLabPanel'
 
 import AlertsPanel from './components/AlertsPanel'
 import BacktestPanel from './components/BacktestPanel'
@@ -62,11 +63,12 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain'
+type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab'
 const PANEL_VIEWS: readonly PanelView[] = [
   'signals',
   'scalp',
   'brain',
+  'ai-lab',
   'risk',
   'momentum',
   'patterns',
@@ -489,6 +491,12 @@ function AppShell() {
                   <>
                     <BrainCircuit size={11} />
                     AI Brain
+                  </>
+                )}
+                {view === 'ai-lab' && (
+                  <>
+                    <Radar size={11} />
+                    AI Lab
                   </>
                 )}
                 {view === 'psychology' && (
@@ -1030,11 +1038,13 @@ function AppShell() {
           )}
 
           {/* ─── TRADES (Paper Trading) TAB ──────────── */}
-          <div className={`panel-content ${panelView === 'trades' ? '' : 'panel-hidden'}`}>
-            <section>
-              <PaperTradingPanel />
-            </section>
-          </div>
+          {panelView === 'trades' && (
+            <div className="panel-content">
+              <section>
+                <PaperTradingPanel />
+              </section>
+            </div>
+          )}
 
           {/* ─── ALERTS TAB ─────────────────────────── */}
           {panelView === 'alerts' && (
@@ -1046,11 +1056,13 @@ function AppShell() {
           )}
 
           {/* ─── BACKTEST TAB ────────────────────────── */}
-          <div className={`panel-content ${panelView === 'backtest' ? '' : 'panel-hidden'}`}>
-            <section>
-              <BacktestPanel />
-            </section>
-          </div>
+          {panelView === 'backtest' && (
+            <div className="panel-content">
+              <section>
+                <BacktestPanel />
+              </section>
+            </div>
+          )}
 
           {/* ─── DEPTH TAB ──────────────────────────── */}
           {panelView === 'institutional' && (
@@ -1082,6 +1094,12 @@ function AppShell() {
               <AIBrainPanel 
                 aiIntelligence={scalpContext?.ai_intelligence}
               />
+            </div>
+          )}
+
+          {panelView === 'ai-lab' && (
+            <div className="panel-content">
+              <AiLabPanel />
             </div>
           )}
 

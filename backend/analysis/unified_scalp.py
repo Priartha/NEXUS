@@ -23,6 +23,7 @@ Output: EXACTLY ONE futures scalping signal or NO_TRADE.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import deque
@@ -31,7 +32,12 @@ from typing import Any
 
 from backend.analysis.wick_rejection import analyze_wick_rejection
 from backend.analysis.self_aware_agent import SelfAwareTradingAgent, agent as ai_agent
+from backend.analysis.ensemble_model import ensemble as ensemble_model
+from backend.analysis.self_optimizer import optimizer as self_optimizer
+from backend.analysis.anomaly_detection import anomaly_detector, adaptive_stop
 from backend.config import settings
+
+logger = logging.getLogger(__name__)
 from backend.models.types import (
     Candle,
     FVG,
@@ -127,6 +133,10 @@ class UnifiedScalpEngine:
         self._last_signal_ts: int = 0
         self._signal_cooldown_ms: int = 5 * 60 * 1000
         self._use_candle_timestamp_for_cooldown: bool = True
+        # Multi-exchange aggregated price for cross-validation
+        self._last_aggregated_price: float | None = None
+        self._last_aggregated_spread_pct: float = 0.0
+        self._last_exchange_count: int = 0
 
     def ingest_quote(self, q: MarketQuote) -> None:
         self._quotes.append(q)
@@ -144,6 +154,70 @@ class UnifiedScalpEngine:
 
     def ingest_liquidations(self, levels: list[dict]) -> None:
         self._liq_cache = levels
+
+    def ingest_aggregated_price(self, price: float, spread_pct: float, exchange_count: int) -> None:
+        """Ingest multi-exchange aggregated price for cross-validation."""
+        self._last_aggregated_price = price
+        self._last_aggregated_spread_pct = spread_pct
+        self._last_exchange_count = exchange_count
+
+    def _data_coherence_check(self, candles: list[Candle], now_ms: int, timeframe: str) -> list[str]:
+        """Verify ALL data sources are coherent and fresh before signal generation."""
+        issues: list[str] = []
+        if not candles:
+            issues.append("No candle data available")
+            return issues
+
+        # Check candle ordering and gaps
+        for i in range(1, len(candles)):
+            if candles[i].timestamp <= candles[i-1].timestamp:
+                issues.append(f"Non-monotonic candle timestamps at index {i}")
+                break
+
+        # Check for price anomalies (zero, negative, extreme outliers)
+        closes = [c.close for c in candles[-50:]]
+        if not closes:
+            issues.append("No close prices available")
+            return issues
+
+        mean_price = sum(closes) / len(closes)
+        if mean_price <= 0:
+            issues.append("Mean price near zero — data corruption likely")
+            return issues
+
+        for i, c in enumerate(candles[-20:]):
+            idx = len(candles) - 20 + i
+            if any(v <= 0 for v in [c.open, c.high, c.low, c.close]):
+                issues.append(f"Non-positive price in candle {idx}")
+                break
+            if c.high < c.low or c.high < c.open or c.high < c.close:
+                issues.append(f"Invalid candle range at index {idx}")
+                break
+            # Check for extreme outliers (>50% move in one candle)
+            change = abs(c.close - candles[max(0, idx-1)].close) / candles[max(0, idx-1)].close
+            if change > 0.50:
+                issues.append(f"Extreme {change*100:.0f}% price move in candle {idx}")
+                break
+
+        # Cross-check aggregated price vs candle close
+        if self._last_aggregated_price and self._last_aggregated_price > 0 and closes:
+            deviation = abs(closes[-1] - self._last_aggregated_price) / self._last_aggregated_price
+            if deviation > 0.01:
+                issues.append(
+                    f"Price mismatch: candle close ${closes[-1]:.2f} vs "
+                    f"{self._last_exchange_count}-exchange agg ${self._last_aggregated_price:.2f} "
+                    f"({deviation*100:.2f}%)"
+                )
+
+        # Ensure futures context has recent data if available
+        interval_seconds = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
+        expected_interval_ms = interval_seconds.get(timeframe, 300) * 1000
+        latest_ts_ms = candles[-1].timestamp
+        stale_ms = now_ms - latest_ts_ms
+        if stale_ms > expected_interval_ms * 4:
+            issues.append(f"Stale candles: last candle {stale_ms//60000}m ago")
+
+        return issues
 
     def compute(
         self,
@@ -167,6 +241,35 @@ class UnifiedScalpEngine:
             ctx.ai_intelligence = ai_agent.get_agent_status()
             return ctx
 
+        # ── Data coherence gate ─────────────────────────────────────────
+        # Verify ALL data sources are coherent before computing signals.
+        # If data is corrupted, stale, or inconsistent across sources, we
+        # return a blocked context rather than a false signal.
+        coherence_issues = self._data_coherence_check(candles, now_ms, timeframe)
+        if coherence_issues:
+            ctx = ScalpContext(timestamp=now_ms)
+            ctx.trade_blocked_reasons = coherence_issues
+            ctx.ai_brain_active = True
+            ctx.ai_intelligence = ai_agent.get_agent_status()
+            logger.warning(f"Data coherence check failed: {'; '.join(coherence_issues)}")
+            return ctx
+
+        # ── Anomaly / OOD detection gate ────────────────────────────────
+        # Detect black swan events, regime shifts, and out-of-distribution
+        # market states. Block trading during anomalies.
+        last_candle_for_anomaly = candles[-1] if candles else None
+        anomaly = anomaly_detector.detect(last_candle_for_anomaly)
+        if anomaly.should_block_trade:
+            logger.warning("Anomaly detected: %s (score=%.2f) — blocking trades",
+                           anomaly.anomaly_type, anomaly.anomaly_score)
+            ctx = ScalpContext(timestamp=now_ms)
+            ctx.trade_blocked_reasons = [f"Anomaly: {anomaly.description}"]
+            ctx.ai_brain_active = True
+            ctx.ai_intelligence = ai_agent.get_agent_status()
+            return ctx
+        # Update anomaly detector with new data
+        anomaly_detector.update(last_candle_for_anomaly)
+
         ordered = sorted(candles, key=lambda c: c.timestamp)
         closes = [c.close for c in ordered]
         price = closes[-1]
@@ -183,7 +286,25 @@ class UnifiedScalpEngine:
         rsi_3 = _rsi(closes[-20:], 3) if len(closes) >= 4 else 50.0
         kill_active, kill_session = _is_killzone(ordered[-1].timestamp)
 
+        # ── Common Sense Checks ─────────────────────────────────────────
+        # Sanity checks every human trader would follow before considering a trade
+        atr_for_common_sense = _atr(ordered, 14)
+        common_sense_blockers = self._common_sense_blockers(
+            ordered, price, atr_for_common_sense, now_ms, timeframe,
+        )
+        has_macro_event_block = any("macro" in b.lower() or "FOMC" in b or "CPI" in b or "NFP" in b for b in common_sense_blockers)
+
+        # Common sense blocks are soft warnings — only hard-block the most severe
+        severe_cs = [b for b in common_sense_blockers if any(k in b.lower() for k in
+            ["atr spike", "stale data", "price spike", "weekend"])]
+        cs_advisory = [b for b in common_sense_blockers if b not in severe_cs]
+        self._cs_advisory = cs_advisory
+        for b in severe_cs:
+            logger.warning("Common sense block: %s", b)
+
+        # ── Hard signal blockers ──
         blockers = self._filters(ordered, funding, funding_rate, futures_context)
+        blockers.extend(severe_cs)
 
         if blockers:
             ctx = ScalpContext(
@@ -199,8 +320,9 @@ class UnifiedScalpEngine:
                 wick_rejection=wick,
                 rsi_3=round(rsi_3, 2),
                 spot_volume_ok=all(b != "Spot volume below 30-day average" for b in blockers),
-                macro_event_block=any("macro" in b.lower() for b in blockers),
+                macro_event_block=has_macro_event_block,
                 trade_blocked_reasons=blockers,
+                common_sense_warnings=common_sense_blockers,
             )
             ctx.futures_leverage = settings.futures_leverage
             ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
@@ -221,7 +343,13 @@ class UnifiedScalpEngine:
 
         atr = _atr(ordered, 14)
         signals: list[ScalpSignal] = []
-        threshold = settings.scalp_min_confluence_score
+
+        # ── Get adaptive parameters from self-optimizer ──
+        regime_phase = regime.phase if regime else "unknown"
+        adaptive_params = self_optimizer.get_adaptive_params(regime_phase)
+
+        # Use adaptive threshold from self-optimizer
+        threshold = adaptive_params.get('min_confidence', settings.scalp_min_confluence_score)
 
         has_oi = oi.current_oi > 0 and len(self._oi_hist) >= 2
         has_funding = self._cur_funding != 0.0
@@ -231,13 +359,70 @@ class UnifiedScalpEngine:
             normalized_threshold = threshold * (max_possible / 1.0)
             threshold = max(normalized_threshold, 0.35)
 
-        winning_side = "long" if long_score >= short_score else "short"
-        winning_score = long_score if winning_side == "long" else short_score
-        losing_score = short_score if winning_side == "long" else long_score
+        # ── Self-Aware AI Agent is the CENTRAL BRAIN ────────────────────────
+        # It receives ALL 15 data sources + price action + memory and makes the final decision
+        agent_result = ai_agent.analyze_enriched(
+            candles=ordered, order_flow=order_flow, vwap=vwap, oi=oi,
+            funding=funding_rate, sweeps=sweeps, vol_profile=vol_profile,
+            rsi_3=rsi_3, kill_active=kill_active, kill_session=kill_session,
+            metrics=metrics, fvgs=fvgs, order_blocks=order_blocks,
+            regime_obj=regime, wick=wick, futures_context=futures_context,
+            long_confluence=long_score, short_confluence=short_score,
+            timeframe=timeframe,
+        )
 
-        winning_reasons = long_reasons if winning_side == "long" else short_reasons
+        # ── Ensemble Model: 3-model blend (microstructure + ICT + momentum) ──
+        micro_score, micro_reasons = ensemble_model.score_microstructure(
+            order_flow, vwap, oi, funding_rate, price, regime_phase,
+        )
+        ict_score, ict_reasons = ensemble_model.score_ict(
+            fvgs, order_blocks, sweeps, regime, price, regime_phase, ordered,
+        )
+        momentum_score, momentum_reasons = ensemble_model.score_momentum(
+            rsi_3, ordered, kill_active, kill_session, metrics, wick,
+        )
+        ensemble_result = ensemble_model.combine(
+            micro_score, ict_score, momentum_score, regime_phase,
+            micro_reasons, ict_reasons, momentum_reasons,
+        )
+
+        # ── Blend Agent + Ensemble (60% agent, 40% ensemble) ──
+        agent_has_signal = agent_result.get('signal') in ('LONG', 'SHORT')
+        ensemble_direction = ensemble_result.direction
+        ensemble_confidence = ensemble_result.confidence
+
+        if agent_has_signal:
+            agent_long = 1.0 if agent_result['signal'] == 'LONG' else 0.0
+            agent_conf = agent_result['confidence']
+        else:
+            agent_long = 1.0 if long_score >= short_score else 0.0
+            agent_conf = max(long_score, short_score)
+
+        # Ensemble score: map direction + confidence to [0, 1]
+        ensemble_long_score = 0.5 + (ensemble_confidence * 0.5 if ensemble_direction == 'long' else -ensemble_confidence * 0.5)
+
+        # Final blend
+        blended_long = agent_long * 0.6 + ensemble_long_score * 0.4
+        blended_confidence = agent_conf * 0.6 + ensemble_confidence * 0.4
+
+        if agent_has_signal:
+            winning_side = agent_result['signal'].lower()
+            winning_score = blended_confidence
+            winning_reasons = [r for r in agent_result.get('reason', '').split(' | ') if r]
+            winning_reasons.extend(ensemble_result.reasons[:3])
+            edge = abs(agent_result.get('long_score', 0) - agent_result.get('short_score', 0))
+        else:
+            winning_side = "long" if blended_long >= 0.5 else "short"
+            winning_score = blended_confidence
+            losing_score = 1.0 - blended_confidence
+            winning_reasons = long_reasons if winning_side == "long" else short_reasons
+            winning_reasons.extend(ensemble_result.reasons[:3])
+            edge = abs(blended_long - 0.5) * 2
+
         quality_blockers = self._signal_quality_blockers(
-            ordered, winning_side, winning_score, losing_score, regime, threshold, winning_reasons
+            ordered, winning_side, winning_score, 1.0 - winning_score if agent_has_signal else (short_score if winning_side == "long" else long_score),
+            regime, threshold, winning_reasons,
+            adaptive_edge=adaptive_params.get('min_edge', settings.scalp_min_directional_edge),
         )
 
         if quality_blockers:
@@ -257,6 +442,7 @@ class UnifiedScalpEngine:
                 spot_volume_ok=True,
                 macro_event_block=False,
                 trade_blocked_reasons=quality_blockers,
+                common_sense_warnings=cs_advisory,
             )
             ctx.futures_leverage = settings.futures_leverage
             ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
@@ -264,41 +450,15 @@ class UnifiedScalpEngine:
             ctx.ai_intelligence = ai_agent.get_agent_status()
             return ctx
 
-        # ── Self-Aware AI Agent (Primary Brain) ─────────────────────────────
-        # Pure price action analysis - no external dependencies
-        ai_signal = ai_agent.analyze_market(ordered, timeframe=timeframe)
-        
-        # Boost or override confluence scores based on AI brain
-        if ai_signal['signal'] in ['LONG', 'SHORT']:
-            ai_confidence = ai_signal.get('confidence', 0.5)
-            
-            # If AI has strong confidence (>0.7), boost that direction
-            if ai_confidence > 0.70:
-                if ai_signal['signal'] == 'LONG':
-                    long_score = max(long_score, ai_confidence)
-                    long_reasons.extend([f"AI Brain: {ai_signal.get('pattern_type', 'pattern')}", 
-                                        f"AI: {ai_signal.get('reason', '')[:50]}"])
-                else:
-                    short_score = max(short_score, ai_confidence)
-                    short_reasons.extend([f"AI Brain: {ai_signal.get('pattern_type', 'pattern')}",
-                                         f"AI: {ai_signal.get('reason', '')[:50]}"])
-            elif ai_confidence > 0.55 and long_score < threshold and short_score < threshold:
-                # AI can generate signal even if confluence is weak
-                if ai_signal['signal'] == 'LONG':
-                    long_score = ai_confidence
-                    long_reasons.append(f"AI Signal: {ai_signal.get('reason', '')[:80]}")
-                else:
-                    short_score = ai_confidence
-                    short_reasons.append(f"AI Signal: {ai_signal.get('reason', '')[:80]}")
-
         # Block signals in consolidation regime - no clear directional edge
         if regime and regime.phase == "consolidation":
             return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: consolidation regime - no directional edge"])
 
-        # Block signals in range_bound unless at extreme with strong AI confidence
+        # Block signals in range_bound — agent can override if confident
+        range_override = False
         if regime and regime.phase == "range_bound":
-            if ai_signal['signal'] in ['LONG', 'SHORT'] and ai_confidence > 0.65:
-                pass  # Let AI override with high confidence
+            if agent_has_signal and agent_result.get('confidence', 0) > 0.65:
+                range_override = True  # Agent overrides range block with high confidence
             else:
                 range_high = regime.range_high or max(c.high for c in ordered[-20:])
                 range_low = regime.range_low or min(c.low for c in ordered[-20:])
@@ -308,7 +468,7 @@ class UnifiedScalpEngine:
                 if winning_side == "short" and price < range_mid:
                     return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: short in range_bound below mid"])
 
-        if settings.scalp_require_candle_confirmation and regime and regime.phase == "range_bound":
+        if settings.scalp_require_candle_confirmation and regime and regime.phase == "range_bound" and not range_override:
             last_candle = ordered[-1]
             candle_range = last_candle.high - last_candle.low
             is_range_candle = regime is not None and regime.phase == "range_bound"
@@ -336,15 +496,23 @@ class UnifiedScalpEngine:
             remaining = (self._signal_cooldown_ms - (cooldown_ts - self._last_signal_ts)) / 60000
             return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, [f"Cooldown: {remaining:.1f}m until next signal"])
 
-        # Apply normalized threshold - AI brain can still override if confident
-        effective_threshold = threshold
-
-        if long_score >= effective_threshold and long_score >= short_score:
-            signals.append(self._build_signal("LONG BTCUSD", price, atr, long_score, long_reasons, now_ms, funding_rate))
+        # Build signal from either the agent's decision or fallback confluence
+        last_candle = ordered[-1]
+        if agent_has_signal:
+            signals.append(self._build_signal(
+                agent_result['signal'] + " BTCUSD", price, atr,
+                agent_result['confidence'], winning_reasons, now_ms, funding_rate,
+                enriched_features=agent_result.get('enriched_features'),
+                candle=last_candle,
+            ))
             self._last_signal_ts = cooldown_ts
-        elif short_score >= effective_threshold and short_score > long_score:
-            signals.append(self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate))
-            self._last_signal_ts = cooldown_ts
+        else:
+            if long_score >= threshold and long_score >= short_score:
+                signals.append(self._build_signal("LONG BTCUSD", price, atr, long_score, long_reasons, now_ms, funding_rate, candle=last_candle))
+                self._last_signal_ts = cooldown_ts
+            elif short_score >= threshold and short_score > long_score:
+                signals.append(self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate, candle=last_candle))
+                self._last_signal_ts = cooldown_ts
 
         ctx = ScalpContext(
             timestamp=now_ms,
@@ -362,6 +530,7 @@ class UnifiedScalpEngine:
             spot_volume_ok=True,
             macro_event_block=False,
             trade_blocked_reasons=[],
+            common_sense_warnings=cs_advisory,
         )
         ctx.futures_leverage = settings.futures_leverage
         ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
@@ -373,11 +542,13 @@ class UnifiedScalpEngine:
         return ctx
 
     def _blocked_ctx(self, now_ms, of, fund, fr, oi, liq, vwap, vp, sweeps, rsi_3, reasons, wick=None):
+        cs_warn = getattr(self, '_cs_advisory', [])
         ctx = ScalpContext(
             timestamp=now_ms, order_flow=of, funding=fund, funding_rate=fr,
             open_interest=oi, liquidation_levels=liq, vwap=vwap, volume_profile=vp,
             liquidity_sweeps=sweeps, wick_rejection=wick, signals=[], rsi_3=round(rsi_3, 2),
             spot_volume_ok=True, macro_event_block=False, trade_blocked_reasons=reasons,
+            common_sense_warnings=cs_warn,
         )
         ctx.futures_leverage = settings.futures_leverage
         ctx.estimated_funding_cost_8h = round(fr.current_rate * 3 * 100, 4) if fr else 0.0
@@ -581,12 +752,104 @@ class UnifiedScalpEngine:
                 blockers.append("Spot volume below 30-day average")
         return blockers
 
-    def _signal_quality_blockers(self, candles: list[Candle], side: str, winning_score: float, losing_score: float, regime: MarketRegime | None = None, adaptive_threshold: float | None = None, winning_reasons: list[str] | None = None) -> list[str]:
+    def _common_sense_blockers(
+        self, candles: list[Candle], price: float, atr: float, now_ms: int, timeframe: str,
+    ) -> list[str]:
+        """Common-sense market sanity checks every human trader would follow."""
+        blockers: list[str] = []
+
+        # 0. Multi-Exchange Price Deviation Check
+        # If the primary data source price deviates significantly from the
+        # volume-weighted median of multiple exchanges, the data may be stale
+        # or anomalous — block trading until they converge.
+        if self._last_aggregated_price is not None and self._last_aggregated_price > 0:
+            deviation = abs(price - self._last_aggregated_price) / self._last_aggregated_price
+            if deviation > 0.005:
+                blockers.append(
+                    f"Price deviation: {deviation*100:.3f}% from {self._last_exchange_count}-exchange "
+                    f"aggregate (${self._last_aggregated_price:.2f}) — possible data anomaly"
+                )
+            if self._last_aggregated_spread_pct > 0.01:
+                blockers.append(
+                    f"Cross-exchange spread {self._last_aggregated_spread_pct*100:.3f}% "
+                    f"— exchanges disagree on price"
+                )
+
+        # 1. ATR Spike Guard — volatility explosion / flash crash protection
+        if len(candles) >= 60:
+            atr_values = []
+            for i in range(14, len(candles)):
+                c = candles[i]
+                p = candles[i - 1]
+                tr = max(c.high - c.low, abs(c.high - p.close), abs(c.low - p.close))
+                atr_values.append(tr)
+            median_atr = sorted(atr_values)[len(atr_values) // 2] if atr_values else atr
+            if median_atr > 0 and atr > median_atr * 3.0:
+                blockers.append(f"ATR spike: {atr:.2f} vs median {median_atr:.2f} ({atr/median_atr:.1f}x) — abnormal volatility")
+
+        # 2. Stale Data Guard — feed failure detection
+        interval_seconds = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600}
+        expected_interval = interval_seconds.get(timeframe, 300) * 1000
+        latest_ts = candles[-1].timestamp if candles else now_ms
+        if now_ms - latest_ts > expected_interval * 3:
+            mins_stale = (now_ms - latest_ts) / 60000
+            blockers.append(f"Stale data: last candle {mins_stale:.0f}m ago ({timeframe})")
+
+        # 3. Price Spike Guard — flash crash / data error protection
+        if len(candles) >= 3:
+            prev_close = candles[-2].close
+            change_pct = abs(price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+            if change_pct > 3.0:
+                blockers.append(f"Price spike: {change_pct:.1f}% move in last candle — possible data anomaly")
+            elif change_pct > 1.5:
+                blockers.append(f"Large move: {change_pct:.1f}% in last candle — waiting for stabilization")
+
+        # 4. Low Volume Hours — thin market protection
+        dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        hour = dt.hour
+        weekday = dt.weekday()
+        is_weekend = weekday >= 5
+        if is_weekend:
+            blockers.append("Weekend — reduced liquidity")
+        elif hour < 2 or hour >= 23:
+            blockers.append(f"Low-volume hours ({hour:02d}:00 UTC) — waiting for liquidity")
+        elif hour < 7:
+            recent_vol = sum(c.volume for c in candles[-5:]) / max(len(candles[-5:]), 1)
+            base_vol = sum(c.volume for c in candles[-50:-5]) / max(len(candles[-50:-5]), 1)
+            if base_vol > 0 and recent_vol < base_vol * 0.4:
+                blockers.append(f"Asian session low volume: {recent_vol/base_vol:.0%} of normal")
+
+        # 5. Consecutive Candle Direction — trend exhaustion detection
+        if len(candles) >= 8:
+            same_dir = 0
+            for i in range(1, min(9, len(candles))):
+                c = candles[-i]
+                if c.close > c.open:
+                    same_dir = same_dir + 1 if same_dir >= 0 else 1
+                else:
+                    same_dir = same_dir - 1 if same_dir <= 0 else -1
+            if same_dir >= 6:
+                blockers.append(f"{same_dir} consecutive bullish candles — extended move, waiting for pullback")
+            elif same_dir <= -6:
+                blockers.append(f"{abs(same_dir)} consecutive bearish candles — extended move, waiting for bounce")
+
+        # 6. Volume Collapse Guard
+        if len(candles) >= 20:
+            recent_v = sum(c.volume for c in candles[-3:]) / 3
+            normal_v = sum(c.volume for c in candles[-20:-3]) / 17 if len(candles) >= 20 else recent_v
+            if normal_v > 0 and recent_v < normal_v * 0.2:
+                blockers.append(f"Volume collapse: {recent_v/normal_v:.0%} of normal — no conviction")
+
+        return blockers
+
+    def _signal_quality_blockers(self, candles: list[Candle], side: str, winning_score: float, losing_score: float, regime: MarketRegime | None = None, adaptive_threshold: float | None = None, winning_reasons: list[str] | None = None, adaptive_edge: float | None = None) -> list[str]:
         blockers: list[str] = []
         closes = [c.close for c in candles]
         price = closes[-1]
         threshold = adaptive_threshold if adaptive_threshold is not None else settings.scalp_min_confluence_score
         edge = winning_score - losing_score
+        # Use adaptive edge threshold if provided
+        edge_threshold = adaptive_edge if adaptive_edge is not None else settings.scalp_min_directional_edge
 
         if winning_reasons is not None and len(winning_reasons) < 3:
             blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 3+)")
@@ -595,11 +858,11 @@ class UnifiedScalpEngine:
         is_consolidation = regime is not None and regime.phase == "consolidation"
         is_range_bound = regime is not None and regime.phase == "range_bound"
         if is_consolidation:
-            min_edge = 0.05
+            min_edge = max(0.05, edge_threshold)
         elif is_range_bound:
-            min_edge = 0.04
+            min_edge = max(0.04, edge_threshold)
         else:
-            min_edge = 0.03
+            min_edge = max(0.03, edge_threshold)
         if edge < min_edge:
             blockers.append(f"Directional edge {edge:.2f} below {min_edge:.2f}")
 
@@ -774,7 +1037,6 @@ class UnifiedScalpEngine:
             score += wick_score
             reasons.append(f"Long lower wick: {wick.description}")
 
-        score = score / 1.15
         return _clamp(score, 0, 1), reasons
 
     def _confluence_short(self, price: float, of: ScalpOrderFlow, vwap: ScalpVWAP, oi: ScalpOpenInterest, funding: ScalpFunding, sweeps: list[ScalpLiquiditySweep], vp: ScalpVolumeProfile, rsi_3: float, kill_active: bool, kill_session: str, metrics: MarketMetrics | None, fvgs: list[FVG] | None, obs: list[OrderBlock] | None, regime: MarketRegime | None, candles: list[Candle], fc: FuturesContext | dict | None = None, wick: ScalpWickRejection | None = None) -> tuple[float, list[str]]:
@@ -906,7 +1168,6 @@ class UnifiedScalpEngine:
             score += wick_score
             reasons.append(f"Long upper wick: {wick.description}")
 
-        score = score / 1.15
         return _clamp(score, 0, 1), reasons
 
     # ── Filter: Only trade with regime direction ──
@@ -925,18 +1186,51 @@ class UnifiedScalpEngine:
         
         return None  # Passes filter
 
-    def _build_signal(self, signal_type: str, price: float, atr: float, score: float, reasons: list[str], now_ms: int, fr: ScalpFundingRate | None = None) -> ScalpSignal:
+    def _build_signal(self, signal_type: str, price: float, atr: float, score: float, reasons: list[str], now_ms: int, fr: ScalpFundingRate | None = None, enriched_features: dict | None = None, candle: Candle | None = None) -> ScalpSignal:
         is_long = "LONG" in signal_type
-        entry = price
         
-        # Dynamic risk management based on score
-        # Higher score = tighter stop (more leverage) + wider target (better R:R)
-        sl_multiplier = max(1.5, 3.5 - score * 2)  # 1.5 at score=1.0, 3.5 at score=0
-        tp1_multiplier = 3.0 + score * 3  # 3.0 at score=0, 6.0 at score=1.0
-        tp2_multiplier = 5.0 + score * 6  # 5.0 at score=0, 11.0 at score=1.0
+        # ── FIX: Entry at retracement level, NOT at candle close ──────────────
+        # Root cause: signal fires after candle closes, but entering at close
+        # means buying at the top of a completed move (or selling at the bottom).
+        # The market then reverses because the move is already exhausted.
+        #
+        # Fix: Position entry zone so price must retrace INTO the candle body.
+        # For longs: entry below close (into lower body or wick).
+        # For shorts: entry above close (into upper body or wick).
+        if candle:
+            candle_range = candle.high - candle.low
+            if is_long:
+                # LONG: enter on pullback into the candle body (below close)
+                # Use the candle's lower half as entry zone
+                zone_mid = min(price, candle.open + candle_range * 0.3)
+                zone_buffer = atr * 0.05
+                entry = zone_mid
+                entry_zone_low = round(candle.low, 2)
+                entry_zone_high = round(max(zone_mid + zone_buffer, candle.open), 2)
+                # Prevent zone from being above close (never buy at candle top)
+                entry_zone_high = min(entry_zone_high, round(price * 0.9995, 2))
+            else:
+                # SHORT: enter on bounce into the candle body (above close)
+                # Use the candle's upper half as entry zone
+                zone_mid = max(price, candle.close - candle_range * 0.3)
+                zone_buffer = atr * 0.05
+                entry = zone_mid
+                entry_zone_low = round(min(zone_mid - zone_buffer, candle.close), 2)
+                entry_zone_high = round(candle.high, 2)
+                # Prevent zone from being below close (never sell at candle bottom)
+                entry_zone_low = max(entry_zone_low, round(price * 1.0005, 2))
+        else:
+            # Fallback if no candle provided
+            entry = price
+            entry_dist = atr * 0.1
+            entry_zone_low = round(entry - entry_dist, 2)
+            entry_zone_high = round(entry + entry_dist, 2)
+
+        sl_multiplier = max(2.0, 4.0 - score * 2)
+        tp1_multiplier = 3.0 + score * 3
+        tp2_multiplier = 5.0 + score * 6
         
         sl_dist = atr * sl_multiplier
-        entry_dist = atr * 0.1
         t2_dist = atr * tp2_multiplier
         t1_dist = atr * tp1_multiplier
         
@@ -944,12 +1238,10 @@ class UnifiedScalpEngine:
         t1 = entry + t1_dist if is_long else entry - t1_dist
         t2 = entry + t2_dist if is_long else entry - t2_dist
         
-        # Calculate R:R ratio
         rr = round(abs(t2 - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0.0
         
-        # Leverage scales with score for high-quality signals
         base_leverage = max(3, int(10 * score))
-        leverage = min(settings.scalp_max_leverage, base_leverage + 5)  # Bonus leverage for good signals
+        leverage = min(settings.scalp_max_leverage, base_leverage + 5)
         
         confidence = "HIGH" if score >= 0.65 else ("MEDIUM" if score >= 0.50 else "LOW")
         time_limit = now_ms + settings.scalp_max_hold_minutes * 60 * 1000
@@ -958,10 +1250,10 @@ class UnifiedScalpEngine:
             reasons.append(f"Funding: {funding_impact:.3f}% per 8h")
 
         from backend.analysis.ids import stable_id
-        return ScalpSignal(
-            id=stable_id("scalp", "long" if is_long else "short", now_ms, int(price * 10), int(sl * 10)),
+        signal = ScalpSignal(
+            id=stable_id("scalp", "long" if is_long else "short", now_ms, int(entry * 10), int(sl * 10)),
             timestamp=now_ms, signal_type=signal_type,
-            entry_zone_low=round(entry - entry_dist, 2), entry_zone_high=round(entry + entry_dist, 2),
+            entry_zone_low=entry_zone_low, entry_zone_high=entry_zone_high,
             sl_level=round(sl, 2), target_1=round(t1, 2), target_2=round(t2, 2),
             leverage=leverage, reason=" | ".join(reasons), score=round(score, 4), risk_reward=round(rr, 2),
             confidence=confidence, time_limit_ms=time_limit,
@@ -969,6 +1261,9 @@ class UnifiedScalpEngine:
             partial_exit_pct=settings.scalp_partial_exit_pct,
             funding_impact_pct=round(funding_impact, 4),
         )
+        if enriched_features:
+            signal.enriched_features = enriched_features
+        return signal
 
     def _context_value(self, source: Any, key: str, default: Any = None) -> Any:
         if source is None:

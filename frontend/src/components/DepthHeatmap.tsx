@@ -24,7 +24,7 @@ export default function DepthHeatmap({ depthLevels }: Props) {
         {bids.map((level) => (
           <div key={level.id} className="dh-row">
             <span className="dh-tier">T{level.depth_tier}</span>
-            <span className="dh-price bearish">${formatPrice(level.price_level)}</span>
+            <span className="dh-price bullish">${formatPrice(level.price_level)}</span>
             <div className="dh-bar-track">
               <div
                 className="dh-bar bid"
@@ -41,7 +41,7 @@ export default function DepthHeatmap({ depthLevels }: Props) {
         {asks.map((level) => (
           <div key={level.id} className="dh-row">
             <span className="dh-tier">T{level.depth_tier}</span>
-            <span className="dh-price bullish">${formatPrice(level.price_level)}</span>
+            <span className="dh-price bearish">${formatPrice(level.price_level)}</span>
             <div className="dh-bar-track">
               <div
                 className="dh-bar ask"

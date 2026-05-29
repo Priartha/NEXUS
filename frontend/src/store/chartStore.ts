@@ -112,15 +112,16 @@ function saveCache(state: { signals: unknown; scalpContext: unknown; scalpRisk: 
   } catch {}
 }
 
-export const useChartStore = create<ChartStore>((set) => ({
-  ...loadCache(),
+export const useChartStore = create<ChartStore>((set) => {
+  const cached = loadCache()
+  return {
   candles: [],
   lastApiCandle: null,
   fvgs: [],
   orderBlocks: [],
   liquidity: [],
   liquidityEvents: [],
-  signals: [],
+  signals: cached.signals ?? [],
   swings: [],
   structure: [],
   metrics: null,
@@ -135,8 +136,8 @@ export const useChartStore = create<ChartStore>((set) => ({
   readability: null,
   stats: null,
   paperTrading: null,
-  scalpContext: null,
-  scalpRisk: null,
+  scalpContext: cached.scalpContext ?? null,
+  scalpRisk: cached.scalpRisk ?? null,
   availableTimeframes: ['1m', '5m', '15m', '1h'],
   selectedTimeframe: '5m',
   symbol: 'BTCUSD',
@@ -164,10 +165,15 @@ export const useChartStore = create<ChartStore>((set) => ({
       aiIct: null,
       quote: null,
       regime: null,
+      sentiment: null,
       orderbook: null,
       stats: null,
       psychology: null,
       readability: null,
+      btcPatterns: null,
+      paperTrading: null,
+      scalpContext: null,
+      scalpRisk: null,
       feedStatus: state.selectedTimeframe === timeframe ? state.feedStatus : 'switching',
     })),
 
@@ -268,4 +274,5 @@ export const useChartStore = create<ChartStore>((set) => ({
 
       return next
     }),
-}))
+  }
+})

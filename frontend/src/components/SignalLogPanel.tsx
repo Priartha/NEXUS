@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Activity, TrendingUp, TrendingDown, Target, Shield, Zap, Clock } from 'lucide-react'
+import { Activity, TrendingUp, TrendingDown, Shield, Clock } from 'lucide-react'
 import type { TradeSignal } from '../types/market'
 
 export default function SignalLogPanel() {

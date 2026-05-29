@@ -38,8 +38,8 @@ class PaperTradingEngine:
         cooldown_after_losses: int = 3,
         cooldown_minutes: int = 90,
         risk_per_trade_pct: float = 0.02,
-        trailing_atr_multiplier: float = 1.0,
-        breakeven_at_r: float = 1.0,
+        trailing_atr_multiplier: float = 2.0,
+        breakeven_at_r: float = 1.5,
         slippage_pct: float = 0.0001,
         commission_pct: float = 0.0002,
         funding_rate_per_8h: float = 0.0001,
@@ -84,6 +84,12 @@ class PaperTradingEngine:
 
         open_count = len([t for t in open_trades if t["status"] == "open"])
         if open_count >= self.max_concurrent:
+            return events
+
+        # Prevent duplicate entries from the same signal
+        open_signal_ids = {t.get("signal_id") for t in open_trades if t["status"] == "open"}
+        qualified = [s for s in qualified if s.id not in open_signal_ids]
+        if not qualified:
             return events
 
         now_ms = int(time.time() * 1000)
@@ -151,6 +157,7 @@ class PaperTradingEngine:
             "slippage_pct": round(slippage / best.entry * 100 if best.entry > 0 else 0, 4),
             "commission": round(commission, 2),
             "funding_rate": self.funding_rate_per_8h,
+            "enriched_features": getattr(best, 'enriched_features', None),
         }
         repo.save_paper_trade(trade)
         events.append({"type": "trade_opened", "trade": trade})
@@ -179,6 +186,7 @@ class PaperTradingEngine:
 
     def _check_exits(self, open_trades: list[dict], candle: Candle) -> list[dict]:
         events: list[dict] = []
+        now_ms = int(time.time() * 1000)
         for trade in open_trades:
             if trade["status"] != "open":
                 continue
@@ -194,15 +202,32 @@ class PaperTradingEngine:
             repo.update_paper_trade(trade["id"], {"bars_held": bars_held})
             if bars_held <= 1:
                 continue
+
+            # ── TIME-BASED EXIT: enforce max hold ──
+            hold_minutes = (now_ms - trade.get("opened_at", now_ms)) / 60000
+            max_hold = trade.get("max_hold_minutes", 30)
+            if hold_minutes > max_hold:
+                exit_price = candle.close
+                pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
+                commission = trade.get("commission", 0)
+                funding_cost = bars_held * self.funding_rate_per_8h * entry * qty
+                pnl -= commission + funding_cost
+                pnl_pct = pnl / (entry * qty) * 100 if entry * qty else 0
+                repo.close_paper_trade(trade["id"], exit_price, round(pnl, 2), round(pnl_pct, 4), "max_hold_exceeded")
+                self.risk_manager.record_trade_result(pnl)
+                events.append({"type": "trade_closed", "trade_id": trade["id"], "exit_price": exit_price, "pnl": round(pnl, 2), "reason": "max_hold_exceeded"})
+                continue
+
             funding_cost = bars_held * self.funding_rate_per_8h * entry * qty
 
             if side == "buy":
                 highest = max(trade.get("highest_price", entry), candle.high)
                 trade["highest_price"] = highest
+                # Wider trailing: use 2.0x ATR instead of 1.0x to avoid noise stops
                 if self.trailing_atr_multiplier > 0 and highest > entry:
                     profit_r = (highest - entry) / max(abs(entry - trade.get("initial_stop", sl)), 1e-10)
                     if profit_r >= self.breakeven_at_r:
-                        trailing_stop = highest - atr * self.trailing_atr_multiplier
+                        trailing_stop = highest - atr * max(self.trailing_atr_multiplier, 2.0)
                         new_sl = max(sl, trailing_stop)
                         if new_sl > sl:
                             trade["stop_loss"] = new_sl
@@ -216,7 +241,7 @@ class PaperTradingEngine:
                 if self.trailing_atr_multiplier > 0 and lowest < entry:
                     profit_r = (entry - lowest) / max(abs(entry - trade.get("initial_stop", sl)), 1e-10)
                     if profit_r >= self.breakeven_at_r:
-                        trailing_stop = lowest + atr * self.trailing_atr_multiplier
+                        trailing_stop = lowest + atr * max(self.trailing_atr_multiplier, 2.0)
                         new_sl = min(sl, trailing_stop)
                         if new_sl < sl:
                             trade["stop_loss"] = new_sl
@@ -235,6 +260,7 @@ class PaperTradingEngine:
                 repo.close_paper_trade(trade["id"], exit_price, round(pnl, 2), round(pnl_pct, 4), reason)
 
                 try:
+                    enriched_features = trade.get("enriched_features")
                     ai_agent.record_trade_outcome(
                         signal={
                             "signal": side.upper(),
@@ -244,7 +270,9 @@ class PaperTradingEngine:
                                 "atr_pct": trade.get("atr_at_entry", 0),
                                 "confidence": trade.get("confidence", 0),
                                 "risk_reward": trade.get("risk_reward", 0),
+                                **(enriched_features if isinstance(enriched_features, dict) else {}),
                             },
+                            "enriched_features": enriched_features if isinstance(enriched_features, dict) else None,
                             "regime": "unknown",
                             "reason": trade.get("reason", ""),
                         },

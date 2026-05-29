@@ -249,6 +249,12 @@ async def lifespan(app: FastAPI):
     # Futures context refresh loop
     futures_task = asyncio.create_task(refresh_futures_loop())
 
+    # Multi-exchange price aggregation loop
+    me_task = asyncio.create_task(refresh_multi_exchange_loop())
+
+    # Self-optimization loop (daily auto-research)
+    auto_research_task = asyncio.create_task(auto_research_loop())
+
     try:
         yield
     finally:
@@ -257,7 +263,8 @@ async def lifespan(app: FastAPI):
         await daily_reporter.stop()
         model_monitor_task.cancel()
         db_backup_task.cancel()
-        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task):
+        me_task.cancel()
+        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task, me_task):
             try:
                 await task
             except asyncio.CancelledError:
@@ -1524,6 +1531,55 @@ async def database_backup_loop(db_integrity) -> None:
         await asyncio.sleep(21600)
 
 
+async def auto_research_loop() -> None:
+    """Daily auto-research loop: analyze performance, optimize parameters, save state."""
+    from backend.analysis.self_optimizer import optimizer as self_optimizer
+    from backend.analysis.ensemble_model import ensemble as ensemble_model
+    from backend.analysis.self_aware_agent import agent as ai_agent
+    await asyncio.sleep(300)  # Wait 5 minutes after startup
+    while True:
+        try:
+            # Run self-optimization if due
+            if self_optimizer.should_optimize():
+                result = self_optimizer.run_optimization()
+                if result.get('status') == 'applied':
+                    logger.info("Auto-research: optimization applied — improvement=%.4f",
+                                result.get('improvement', 0))
+                    await manager.broadcast({
+                        "update_type": "auto_research",
+                        "action": "optimization_applied",
+                        "improvement": result.get('improvement', 0),
+                        "changes": result.get('changes', {}),
+                    })
+                elif result.get('status') == 'reverted':
+                    logger.info("Auto-research: optimization reverted (no improvement)")
+
+            # Save agent brain state periodically
+            ai_agent.save_state()
+            ensemble_model._save_state()
+            self_optimizer._save_state()
+
+            # Log status
+            opt_status = self_optimizer.get_status()
+            ens_stats = ensemble_model.get_stats()
+            agent_status = ai_agent.get_agent_status()
+            logger.info(
+                "Auto-research status: opt_attempts=%d kept=%d | ensemble_trades=%d wr=%.2f | "
+                "agent_decisions=%d accuracy=%.2f",
+                opt_status.get('total_attempts', 0),
+                opt_status.get('kept_attempts', 0),
+                ens_stats.get('total_trades', 0),
+                ens_stats.get('win_rate', 0),
+                agent_status.get('decisions', 0),
+                agent_status.get('accuracy', 0),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Auto-research loop failed: {e}", exc_info=True)
+        await asyncio.sleep(7200)  # Run every 2 hours
+
+
 async def refresh_futures_loop() -> None:
     base_url = settings.rest_base_url.rstrip("/") if settings.rest_base_url else "https://api.delta.exchange"
     product_id = settings.futures_product_id
@@ -1556,6 +1612,26 @@ async def refresh_futures_loop() -> None:
         except Exception:
             logger.exception("futures context refresh failed")
         await asyncio.sleep(settings.futures_funding_refresh_seconds)
+
+
+async def refresh_multi_exchange_loop() -> None:
+    """Periodically fetch multi-exchange aggregated price and feed into pipelines."""
+    from backend.ingestion.multi_exchange import aggregator as me_aggregator
+    while True:
+        try:
+            agg = await me_aggregator.get_aggregated_price(force_refresh=True)
+            if agg and agg.median_price > 0:
+                for pipeline in pipelines.values():
+                    pipeline.set_aggregated_price(
+                        price=agg.median_price,
+                        spread_pct=agg.spread_pct,
+                        exchange_count=agg.exchange_count,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("multi-exchange price refresh failed")
+        await asyncio.sleep(15)
 
 
 # ─── Multi-Exchange Price ───────────────────────────────

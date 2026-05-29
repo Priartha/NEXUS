@@ -5,6 +5,7 @@ import { Zap, TrendingUp, TrendingDown, Activity, BarChart3 } from 'lucide-react
 export function MomentumPanel() {
   const metrics = useChartStore((state) => state.metrics)
   const signals = useChartStore((state) => state.signals)
+  const regime = useChartStore((state) => state.regime)
 
   const momentum = useMemo(() => {
     if (!metrics) return null
@@ -25,7 +26,7 @@ export function MomentumPanel() {
       expectedMove: metrics.expected_move ?? 0,
       expectedMovePct: metrics.expected_move_pct ?? 0,
       displacement: metrics.displacement_ratio ?? 0,
-      efficiencyRatio: 0,
+      efficiencyRatio: regime?.efficiency_ratio ?? 0,
       signals,
       signalCount: signals.length,
       buySignals: signals.filter(s => s.side === 'buy').length,
@@ -33,7 +34,7 @@ export function MomentumPanel() {
       avgConfidence: signals.length ? signals.reduce((sum, s) => sum + s.confidence, 0) / signals.length : 0,
       avgRR: signals.length ? signals.reduce((sum, s) => sum + s.risk_reward, 0) / signals.length : 0,
     }
-  }, [metrics, signals])
+  }, [metrics, signals, regime])
 
   if (!momentum) {
     return (

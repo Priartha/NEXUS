@@ -289,12 +289,20 @@ const MessageSchema = z.union([
     stats: z.object({
       closed_candles: z.number(),
       signals: z.number(),
+      scalp_signals: z.number().optional(),
+      scalp_blocked: z.number().optional(),
       ob_imbalances: z.number().optional(),
       ob_spread_anomalies: z.number().optional(),
       ob_accumulations: z.number().optional(),
       btc_patterns: z.number().optional(),
       btc_behaviors: z.number().optional(),
-    }).optional(),
+      fear_greed: z.string().optional(),
+      readability_grade: z.string().optional(),
+      tradeability: z.string().optional(),
+      ensemble: z.any().optional(),
+      self_optimizer: z.any().optional(),
+      anomaly_detector: z.any().optional(),
+    }).passthrough().optional(),
     available_timeframes: z.array(z.string()).optional(),
     btc_patterns: z.any().nullable().optional(),
     paper_trading: z.object({
@@ -306,22 +314,20 @@ const MessageSchema = z.union([
       win_rate: z.number(),
     }).optional(),
   }),
-  z.object({ update_type: z.literal('tick'), candle: CandleSchema, scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }),
-  z.object({ update_type: z.literal('close'), candle: CandleSchema, scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }),
-  z.object({ update_type: z.literal('status'), status: z.string(), message: z.string().optional(), retry_in_seconds: z.number().optional() }),
+  z.object({ update_type: z.literal('tick'), candle: CandleSchema, quote: z.any().optional(), metrics: z.any().optional(), scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }).passthrough(),
+  z.object({ update_type: z.literal('close'), candle: CandleSchema, quote: z.any().optional(), metrics: z.any().optional(), scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }).passthrough(),
+  z.object({ update_type: z.literal('status'), status: z.string(), message: z.string().optional(), retry_in_seconds: z.number().optional(), symbol: z.string().optional(), timeframe: z.string().optional(), sentiment: z.any().optional(), ai_ict: z.any().optional(), available_timeframes: z.array(z.string()).optional() }).passthrough(),
   z.object({ update_type: z.literal('sentiment'), sentiment: z.any() }), // Simplified
   z.object({ update_type: z.literal('ai_ict'), ai_ict: z.any() }), // Simplified
   z.object({ update_type: z.literal('quote'), quote: z.any() }), // Simplified
+  z.object({ update_type: z.literal('futures_context'), futures_context: z.any() }).passthrough(),
+  z.object({ update_type: z.literal('alert') }).passthrough(),
 ])
 
 export function parseMarketMessage(value: unknown): MarketMessage | null {
-  // Silently skip update_type values not declared in the schema (e.g. "alert")
-  const maybe = value as Record<string, unknown> | null
-  if (maybe?.update_type === 'alert' || maybe?.update_type === 'futures_context') return null
   const result = MessageSchema.safeParse(value)
   if (result.success) {
     return result.data as MarketMessage
   }
-  console.warn('Invalid market message:', result.error, value)
   return null
 }

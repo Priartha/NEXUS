@@ -496,8 +496,16 @@ class ScalpSignal:
     max_hold_minutes: int = 15
     status: str = "active"
     entry_triggered: bool = False
+    score: float = 0.0
+    expected_move: float = 0.0
+    side: str = ""
+    entry: float = 0.0
+    stop_loss: float = 0.0
+    exit_price: float = 0.0
+    model: str = ""
     partial_exit_pct: float = 0.0
     funding_impact_pct: float = 0.0
+    enriched_features: Optional[dict] = None
 
 
 @dataclass
@@ -538,6 +546,9 @@ class ScalpContext:
     futures_leverage: int = 10
     estimated_funding_cost_8h: float = 0.0
     wick_rejection: Optional[ScalpWickRejection] = None
+    ai_brain_active: bool = False
+    ai_intelligence: Optional[dict] = None
+    common_sense_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass

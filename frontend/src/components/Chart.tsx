@@ -215,12 +215,9 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
     setChartApi(chart)
     setSeriesApi(series)
 
-    console.log('[Chart] Chart initialized, series ready')
-
     // Check if we already have candles in store
     const storeCandles = useChartStore.getState().candles
     if (storeCandles.length > 0) {
-      console.log(`[Chart] Store already has ${storeCandles.length} candles, applying immediately`)
       series.setData(storeCandles)
       fittedRef.current = true
     }
@@ -297,8 +294,6 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
     const isSameBar = prev.length > 0 && lastPrev && lastNew && lastNew.time === lastPrev.time
 
     candlesCountRef.current = candles.length
-
-    console.log(`[Chart] ${isSameBar ? 'Updating' : 'Setting'} ${candles.length} candles (prev: ${prev.length})`)
 
     if (isSameBar) {
       seriesRef.current.update(lastNew)
