@@ -30,7 +30,21 @@ cd frontend
 npm install
 npm run dev
 ```
-
 Open `http://localhost:5173` in your browser.
 
 ---
+
+
+# The system generates 1-3 signals per day on 5m timeframe. That means:
+
+3-7 days to hit 15 trades (ensemble calibration threshold)
+2-3 weeks to hit 50 trades (optimizer + ensemble fully calibrated)
+1 month to have statistically significant live performance data
+
+
+# Timeline to Live Profitability
+Phase	Trades Needed	Est. Time	What Happens
+Cold start	0-5	Today	System blocking most signals (edge threshold), getting stopped out on noise
+Calibration	5-15	2-3 days	Ensemble starts weighting models, optimizer begins tuning, stops widen
+Learning	15-30	1-2 weeks	Self-optimizer adjusts min_confidence/edge per regime, ensemble learns which model dominates in which regime
+Stabilization	30-50	2-3 weeks	Walk-forward optimization kicks in, adaptive parameters settle, win rate should approach historical 62.7%  
