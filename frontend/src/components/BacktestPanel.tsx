@@ -170,14 +170,14 @@ export default function BacktestPanel() {
           candle_count: candleCount,
           position_size_pct: positionSize / 100,
           symbol: 'BTCUSD',
-          timeframe: '5m',
+          timeframe: '15m',
           initial_balance: 10000,
           max_hold_bars: maxHoldBars,
-          breakeven_threshold: 0.5,
+          breakeven_threshold: 1.0,
           trailing_stop: trailingStop,
           tp_atr_multiplier: tpMultiplier,
-          signal_side_mode: 'normal',
-          avoid_reason_tokens: [],
+          signal_side_mode: 'invert',
+          avoid_reason_tokens: ['CVD falling'],
           adaptive_learning: true,
         }),
       })
@@ -263,7 +263,7 @@ export default function BacktestPanel() {
           content: text,
           format: csvFormat,
           symbol: 'BTCUSDT',
-          timeframe: '5m',
+          timeframe: '15m',
         }),
       })
       if (!res.ok) {
@@ -298,7 +298,7 @@ export default function BacktestPanel() {
           content: text,
           format: csvFormat,
           symbol: 'BTCUSDT',
-          timeframe: '5m',
+          timeframe: '15m',
         }),
       })
       if (!res.ok) {

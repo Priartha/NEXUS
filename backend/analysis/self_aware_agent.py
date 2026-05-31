@@ -171,10 +171,12 @@ class MarketMemory:
     
     def get_pattern_reliability(self, pattern_type: str, features: dict) -> float:
         """Get reliability score for a pattern."""
-        matching_patterns = [
-            p for p in self.patterns.values()
-            if p.pattern_type == pattern_type
-        ]
+        matching_patterns = []
+        for pattern in self.patterns.values():
+            if not isinstance(pattern, MarketPattern):
+                continue
+            if pattern.pattern_type == pattern_type:
+                matching_patterns.append(pattern)
         
         if not matching_patterns:
             return 0.5  # Neutral if no history

@@ -39,6 +39,7 @@ from backend.storage.schema import init_db
 from backend.storage import repository as repo
 from backend.analysis.backtest import BacktestEngine
 from backend.analysis.paper_trading import PaperTradingEngine
+from backend.analysis.profitability_guard import summarize_gate
 from backend.analysis.risk_manager import RiskManager
 from backend.analysis.symbol_scanner import MultiSymbolScanner
 from backend.analysis.csv_import import parse_csv, get_supported_formats
@@ -466,7 +467,7 @@ class BacktestRequest(BaseModel):
 
 
 @app.post("/backtest/run")
-async def run_backtest(body: BacktestRequest) -> dict:
+async def run_backtest(body: BacktestRequest, _authorized: None = Depends(require_api_key)) -> dict:
     loop = asyncio.get_event_loop()
     store = stores.get(body.timeframe)
     if not store:
@@ -707,13 +708,14 @@ async def paper_trade_stats() -> dict:
 async def paper_trade_status() -> dict:
     return {
         "enabled": paper_trading.enabled,
+        "profitability_gate": summarize_gate(),
         "open_positions": len(repo.get_paper_trades(status="open")),
         "closed_trades": repo.get_paper_trade_stats().get("closed_trades", 0),
     }
 
 
 @app.post("/paper-trades/toggle")
-async def toggle_paper_trading() -> dict:
+async def toggle_paper_trading(_authorized: None = Depends(require_api_key)) -> dict:
     paper_trading.enabled = not paper_trading.enabled
     status = "enabled" if paper_trading.enabled else "disabled"
     logger.info(f"Paper trading toggled to {status}")
@@ -721,13 +723,13 @@ async def toggle_paper_trading() -> dict:
 
 
 @app.post("/paper-trades/reset")
-async def reset_paper_trades() -> dict:
+async def reset_paper_trades(_authorized: None = Depends(require_api_key)) -> dict:
     count = repo.reset_paper_trades()
     return {"ok": True, "message": f"Cleared {count} paper trades"}
 
 
 @app.post("/backtest/reset")
-async def reset_backtest_data() -> dict:
+async def reset_backtest_data(_authorized: None = Depends(require_api_key)) -> dict:
     count = repo.reset_backtests()
     return {"ok": True, "message": f"Cleared {count} backtest runs"}
 

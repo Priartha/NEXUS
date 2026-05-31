@@ -276,7 +276,7 @@ export interface AiIctDecision {
 export interface TradeSignal {
   id: string
   timestamp: number
-  side: 'long' | 'short'
+  side: 'buy' | 'sell'
   entry: number
   stop_loss: number
   trailing_stop?: number | null
@@ -540,7 +540,7 @@ export interface PaperTrade {
   signal_id?: string
   symbol: string
   timeframe: string
-  side: 'long' | 'short'
+  side: 'buy' | 'sell'
   entry_price: number
   stop_loss: number
   take_profit: number

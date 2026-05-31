@@ -15,6 +15,7 @@ import time
 import uuid
 from typing import Any
 
+from backend.analysis.profitability_guard import evaluate_profitability_artifact
 from backend.analysis.risk_manager import RiskManager
 from backend.analysis.self_aware_agent import get_agent
 from backend.models.types import Candle, TradeSignal
@@ -77,6 +78,15 @@ class PaperTradingEngine:
         events.extend(exit_events)
 
         open_trades = repo.get_paper_trades(status="open")
+
+        gate = evaluate_profitability_artifact()
+        if not gate.allowed:
+            events.append({
+                "type": "trade_blocked",
+                "reason": "profitability_validation",
+                "blockers": gate.blockers,
+            })
+            return events
 
         qualified = [s for s in signals if s.confidence >= self.min_confidence and s.status in ("open", "pending", "active")]
         if not qualified:
@@ -215,7 +225,14 @@ class PaperTradingEngine:
                 pnl_pct = pnl / (entry * qty) * 100 if entry * qty else 0
                 repo.close_paper_trade(trade["id"], exit_price, round(pnl, 2), round(pnl_pct, 4), "max_hold_exceeded")
                 self.risk_manager.record_trade_result(pnl)
-                events.append({"type": "trade_closed", "trade_id": trade["id"], "exit_price": exit_price, "pnl": round(pnl, 2), "reason": "max_hold_exceeded"})
+                events.append({
+                    "type": "trade_closed",
+                    "trade_id": trade["id"],
+                    "trade": {**trade, "exit_price": exit_price, "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 4)},
+                    "exit_price": exit_price,
+                    "pnl": round(pnl, 2),
+                    "reason": "max_hold_exceeded",
+                })
                 continue
 
             funding_cost = self.funding_rate_per_8h * entry * qty
@@ -299,6 +316,14 @@ class PaperTradingEngine:
                 events.append({
                     "type": "trade_closed",
                     "trade_id": trade["id"],
+                    "trade": {
+                        **trade,
+                        "status": "closed",
+                        "exit_price": exit_price,
+                        "pnl": round(pnl, 2),
+                        "pnl_pct": round(pnl_pct, 4),
+                        "close_reason": reason,
+                    },
                     "exit_price": exit_price,
                     "pnl": round(pnl, 2),
                     "funding_cost": round(funding_cost, 2),

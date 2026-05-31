@@ -232,7 +232,7 @@ def parse_trade_message(message: dict, symbol: str) -> TradeTick | None:
         return None
 
     message_symbol = message.get("sy") or message.get("symbol") or message.get("product_symbol")
-    if message_symbol and message_symbol != symbol:
+    if not message_symbol or message_symbol != symbol:
         return None
 
     price_raw = (
@@ -264,7 +264,7 @@ def parse_trade_message(message: dict, symbol: str) -> TradeTick | None:
 def parse_quote_message(message: dict, symbol: str) -> MarketQuote | None:
     message_type = message.get("type")
     message_symbol = message.get("sy") or message.get("symbol") or message.get("product_symbol")
-    if message_symbol and message_symbol != symbol:
+    if not message_symbol or message_symbol != symbol:
         return None
 
     now_ms = int(time.time() * 1000)

@@ -11,7 +11,6 @@ from backend.analysis.alerts import check_signal_alert, check_regime_alert
 from backend.analysis.btc_patterns import detect_btc_patterns
 from backend.analysis.ensemble_model import ensemble as ensemble_model
 from backend.analysis.self_optimizer import optimizer as self_optimizer
-from backend.analysis.anomaly_detection import anomaly_detector
 from backend.analysis.fvg_detector import detect_fvgs, update_fvg_fills
 from backend.analysis.institutional import build_price_projection, compute_market_metrics
 from backend.analysis.liquidity import check_liquidity_sweeps, detect_equal_levels
@@ -492,7 +491,7 @@ class AnalysisPipeline:
                 "tradeability": self.readability.tradeability if self.readability else "unknown",
                 "ensemble": ensemble_model.get_stats(),
                 "self_optimizer": self_optimizer.get_status(),
-                "anomaly_detector": anomaly_detector.get_status(),
+                "anomaly_detector": self.scalp_engine.anomaly_detector.get_status(),
             },
         }
         if include_candles:
@@ -522,7 +521,7 @@ class AnalysisPipeline:
                         'direction': trade.get('side', 'unknown'),
                         'regime': trade.get('regime', self.regime.phase if self.regime else 'unknown'),
                         'confidence': trade.get('confidence', 0.5),
-                        'pnl_pct': ev.get('pnl', 0),
+                        'pnl_pct': trade.get('pnl_pct', ev.get('pnl', 0)),
                         'won': ev.get('pnl', 0) > 0,
                         'hold_minutes': trade.get('hold_minutes', 0),
                         'entry_price': trade.get('entry_price', 0),

@@ -34,7 +34,7 @@ from backend.analysis.wick_rejection import analyze_wick_rejection
 from backend.analysis.self_aware_agent import SelfAwareTradingAgent, get_agent
 from backend.analysis.ensemble_model import ensemble as ensemble_model
 from backend.analysis.self_optimizer import optimizer as self_optimizer
-from backend.analysis.anomaly_detection import anomaly_detector, adaptive_stop
+from backend.analysis.anomaly_detection import MarketAnomalyDetector, adaptive_stop
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
@@ -137,6 +137,7 @@ class UnifiedScalpEngine:
         self._last_aggregated_price: float | None = None
         self._last_aggregated_spread_pct: float = 0.0
         self._last_exchange_count: int = 0
+        self.anomaly_detector = MarketAnomalyDetector()
 
     def ingest_quote(self, q: MarketQuote) -> None:
         self._quotes.append(q)
@@ -258,7 +259,7 @@ class UnifiedScalpEngine:
         # Detect black swan events, regime shifts, and out-of-distribution
         # market states. Block trading during anomalies.
         last_candle_for_anomaly = candles[-1] if candles else None
-        anomaly = anomaly_detector.detect(last_candle_for_anomaly)
+        anomaly = self.anomaly_detector.detect(last_candle_for_anomaly)
         if anomaly.should_block_trade:
             logger.warning("Anomaly detected: %s (score=%.2f) — blocking trades",
                            anomaly.anomaly_type, anomaly.anomaly_score)
@@ -268,7 +269,7 @@ class UnifiedScalpEngine:
             ctx.ai_intelligence = get_agent().get_agent_status()
             return ctx
         # Update anomaly detector with new data
-        anomaly_detector.update(last_candle_for_anomaly)
+        self.anomaly_detector.update(last_candle_for_anomaly)
 
         ordered = sorted(candles, key=lambda c: c.timestamp)
         closes = [c.close for c in ordered]
@@ -296,7 +297,7 @@ class UnifiedScalpEngine:
 
         # Common sense blocks are soft warnings — only hard-block the most severe
         severe_cs = [b for b in common_sense_blockers if any(k in b.lower() for k in
-            ["atr spike", "stale data", "price spike", "weekend"])]
+            ["atr spike", "stale data", "price deviation", "cross-exchange spread"])]
         cs_advisory = [b for b in common_sense_blockers if b not in severe_cs]
         self._cs_advisory = cs_advisory
         for b in severe_cs:
