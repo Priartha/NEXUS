@@ -190,8 +190,8 @@ async def lifespan(app: FastAPI):
         if backup:
             logger.info(f"Pre-start backup created: {backup}")
     init_db()
-    from backend.analysis.self_aware_agent import agent as ai_agent
-    restored_trades = ai_agent.bootstrap_from_paper_trades(
+    from backend.analysis.self_aware_agent import get_agent
+    restored_trades = get_agent().bootstrap_from_paper_trades(
         repo.get_paper_trades(status="closed", limit=5000)
     )
     logger.info(f"AI brain restored {restored_trades} closed paper trades into memory")
@@ -1535,7 +1535,7 @@ async def auto_research_loop() -> None:
     """Daily auto-research loop: analyze performance, optimize parameters, save state."""
     from backend.analysis.self_optimizer import optimizer as self_optimizer
     from backend.analysis.ensemble_model import ensemble as ensemble_model
-    from backend.analysis.self_aware_agent import agent as ai_agent
+    from backend.analysis.self_aware_agent import get_agent
     await asyncio.sleep(300)  # Wait 5 minutes after startup
     while True:
         try:
@@ -1555,14 +1555,14 @@ async def auto_research_loop() -> None:
                     logger.info("Auto-research: optimization reverted (no improvement)")
 
             # Save agent brain state periodically
-            ai_agent.save_state()
+            get_agent().save_state()
             ensemble_model._save_state()
             self_optimizer._save_state()
 
             # Log status
             opt_status = self_optimizer.get_status()
             ens_stats = ensemble_model.get_stats()
-            agent_status = ai_agent.get_agent_status()
+            agent_status = get_agent().get_agent_status()
             logger.info(
                 "Auto-research status: opt_attempts=%d kept=%d | ensemble_trades=%d wr=%.2f | "
                 "agent_decisions=%d accuracy=%.2f",

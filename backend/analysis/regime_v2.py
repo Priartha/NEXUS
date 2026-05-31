@@ -39,7 +39,7 @@ def detect_market_regime(
     # ── Trend Metrics ──
     ema9 = _ema(closes, 9)
     ema21 = _ema(closes, 21)
-    ema50 = _ema(closes, min(50, len(closes) - 1))
+    ema50 = _ema(closes, min(50, len(closes)))
     ema_spread_pct = abs(ema9 - ema21) / max(ema21, 1e-10) * 100
 
     # Price position relative to EMAs
@@ -90,8 +90,9 @@ def detect_market_regime(
     # Require minimum EMA spread for trending
     has_ema_spread = ema_spread_pct > 0.20
 
-    # Require stronger evidence for trending
+    # Classify regime in priority order (first match wins)
     if is_structured_trend and is_ema_aligned and is_efficient and price_direction_matches and has_ema_spread:
+        # Strong trending
         phase = "trending"
         bias = structure["direction"]
         confidence = min(0.92, 0.55 + efficiency * 0.25 + (0.10 if is_ema_aligned else 0))
@@ -112,20 +113,20 @@ def detect_market_regime(
             f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned",
             f"Price: {price_change_pct:+.2f}%",
         ]
-
-    # 2. RANGING: no structure, price oscillating
-    elif not is_structured_trend and atr_compression < 0.30:
-        phase = "range_bound"
-        bias = "neutral"
-        confidence = 0.60
-        reasons = [
-            f"No clear structure ({structure['pattern']})",
-            f"ATR compressed: {atr_compression:.2f}",
-            f"Width: {width_pct:.2f}%",
-        ]
-
-    # 3. CONSOLIDATION: tight range, low volatility
+    elif sell_side_sweep and latest.close >= range_mid:
+        # 4. ACCUMULATION: sell-side sweep + reclaim + price above mid
+        phase = "accumulation"
+        bias = "bullish"
+        confidence = 0.70
+        reasons = ["Sell-side sweep reclaimed above mid"]
+    elif buy_side_sweep and latest.close <= range_mid:
+        # 5. DISTRIBUTION: buy-side sweep + rejection + price below mid
+        phase = "distribution"
+        bias = "bearish"
+        confidence = 0.70
+        reasons = ["Buy-side sweep rejected below mid"]
     elif width_pct < 1.5 and atr_compression < 0.20:
+        # 3. CONSOLIDATION: tight range, low volatility
         phase = "consolidation"
         bias = "neutral"
         confidence = 0.55
@@ -134,22 +135,24 @@ def detect_market_regime(
             f"ATR compressed: {atr_compression:.2f}",
             f"Volume: {volume_state}",
         ]
+    elif not is_structured_trend and atr_compression < 0.30:
+        # 2. RANGING: no structure, price oscillating
+        phase = "range_bound"
+        bias = "neutral"
+        confidence = 0.60
+        reasons = [
+            f"No clear structure ({structure['pattern']})",
+            f"ATR compressed: {atr_compression:.2f}",
+            f"Width: {width_pct:.2f}%",
+        ]
+    else:
+        # Default: trending with neutral bias (will be caught by safety check below)
+        phase = "trending"
+        bias = structure["direction"] if structure["direction"] != "neutral" else "neutral"
+        confidence = 0.50
+        reasons = [f"Fallback: {structure['pattern']}"]
 
-    # 4. ACCUMULATION: sell-side sweep + reclaim + price above mid
-    if sell_side_sweep and latest.close >= range_mid and phase in {"range_bound", "consolidation"}:
-        phase = "accumulation"
-        bias = "bullish"
-        confidence = min(0.85, confidence + 0.15)
-        reasons.append("Sell-side sweep reclaimed above mid")
-
-    # 5. DISTRIBUTION: buy-side sweep + rejection + price below mid
-    if buy_side_sweep and latest.close <= range_mid and phase in {"range_bound", "consolidation"}:
-        phase = "distribution"
-        bias = "bearish"
-        confidence = min(0.85, confidence + 0.15)
-        reasons.append("Buy-side sweep rejected below mid")
-
-    # 6. TRENDING breakout from consolidation
+    # 6. TRENDING breakout from consolidation (override if strong volume expansion)
     if phase in {"consolidation", "range_bound"} and volume_state == "expanding" and ema_spread_pct > 0.30:
         if price_above_ema9 and price_above_ema21:
             phase = "trending"

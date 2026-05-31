@@ -27,7 +27,6 @@ export function useBtcHeadlines() {
         setLoading(true)
         setError(null)
         const url = `${API_BASE || ''}/news/btc`
-        console.log('Fetching BTC news from', url)
         const response = await fetch(url)
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const data = await response.json()
@@ -44,7 +43,6 @@ export function useBtcHeadlines() {
           setHeadlines(withSentiment)
           setActiveSource('NEXUS Proxy')
           setError(null)
-          console.log(`Loaded ${withSentiment.length} headlines`)
         } else if (!cancelled) {
           throw new Error('No headlines returned')
         }

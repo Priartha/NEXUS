@@ -134,7 +134,7 @@ export default function PaperTradingPanel() {
       ) : (
         <div className="pt-trade-list">
           {trades.map((t) => {
-            const pnlPct = t.entry_price ? ((t.stop_loss - t.entry_price) / t.entry_price * 100).toFixed(2) : '0'
+            const pnlPct = t.pnl_pct != null ? Number(t.pnl_pct).toFixed(2) : (t.entry_price ? ((t.stop_loss - t.entry_price) / t.entry_price * 100).toFixed(2) : '0')
             return (
               <div key={t.id} className={`pt-trade ${t.side === 'buy' ? 'green' : 'red'}`}>
                 <div className="pt-trade-head">

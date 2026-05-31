@@ -130,7 +130,7 @@ export function BtcHeadlinesCorner() {
   }, [isDragging, position])
 
   const handleRefresh = useCallback(() => {
-    window.location.reload()
+    window.dispatchEvent(new CustomEvent('btc-headlines-refresh'))
   }, [])
 
   const handleClose = useCallback(() => {

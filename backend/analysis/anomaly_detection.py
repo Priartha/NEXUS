@@ -103,7 +103,7 @@ class MarketAnomalyDetector:
             self._volatility_window.append(vol)
         
         # Update baseline every 100 observations
-        if len(self._returns_window) % 100 == 0 and len(self._returns_window) >= 100:
+        if len(self._returns_window) >= 100 and len(self._returns_window) % 100 < 5:
             self._update_baseline()
 
     def detect(self, candle: Any = None, order_flow: Any = None, spread: float = 0.0) -> AnomalyDetection:
@@ -190,13 +190,16 @@ class MarketAnomalyDetector:
         candle_range = high - low
         if close > 0 and candle_range > 0:
             body = abs(close - open_price)
-            wick_ratio = candle_range / max(body, 0.01)
-            if wick_ratio > 5.0:
-                score = min(0.6, wick_ratio / 10.0)
-                if score > anomaly_score:
-                    anomaly_score = score
-                    anomaly_type = 'price_dislocation'
-                    reasons.append(f"Extreme wick ratio: {wick_ratio:.1f}x")
+            # For doji candles (body near 0), wick_ratio is naturally high
+            # but dojis are normal market behavior, not anomalies
+            if body > 0.001 * close:  # Only flag non-doji candles
+                wick_ratio = candle_range / body
+                if wick_ratio > 5.0:
+                    score = min(0.6, wick_ratio / 10.0)
+                    if score > anomaly_score:
+                        anomaly_score = score
+                        anomaly_type = 'price_dislocation'
+                        reasons.append(f"Extreme wick ratio: {wick_ratio:.1f}x")
         
         is_anomaly = anomaly_score > 0.5
         should_block = anomaly_score > 0.7
@@ -361,7 +364,10 @@ class AdaptiveTrailingStop:
         # Determine stop type
         if should_tighten:
             stop_type = 'regime_tightened'
-        elif self._breakeven_triggered and self._stop_price >= self._entry_price:
+        elif self._breakeven_triggered and (
+            (is_long and self._stop_price >= self._entry_price) or
+            (not is_long and self._stop_price <= self._entry_price)
+        ):
             stop_type = 'breakeven'
         elif profit_atr >= 1.5:
             stop_type = 'trailing'

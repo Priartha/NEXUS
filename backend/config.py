@@ -26,7 +26,7 @@ class Settings:
 
     # Delta Exchange futures product config
     futures_product_id: int = int(os.getenv("DELTA_FUTURES_PRODUCT_ID", "27"))  # BTCUSD perpetual
-    futures_leverage: int = int(os.getenv("DELTA_FUTURES_LEVERAGE", "20"))  # Increased for better futures profitability
+    futures_leverage: int = min(int(os.getenv("DELTA_FUTURES_LEVERAGE", "10")), 20)  # Capped at 20x
     futures_margin_mode: str = os.getenv("DELTA_FUTURES_MARGIN_MODE", "cross")
     futures_funding_refresh_seconds: float = float(os.getenv("DELTA_FUTURES_FUNDING_REFRESH_SECONDS", "30"))
     futures_oi_refresh_seconds: float = float(os.getenv("DELTA_FUTURES_OI_REFRESH_SECONDS", "30"))
@@ -59,7 +59,7 @@ class Settings:
     # Scalping engine configuration (Futures-only)
     scalp_enabled: bool = os.getenv("NEXUS_SCALP_ENABLED", "true").lower() == "true"
     scalp_max_risk_pct: float = float(os.getenv("NEXUS_SCALP_MAX_RISK_PCT", "0.02"))  # 2% risk per trade
-    scalp_max_leverage: int = int(os.getenv("NEXUS_SCALP_MAX_LEVERAGE", "25"))  # 25x for futures profitability
+    scalp_max_leverage: int = min(int(os.getenv("NEXUS_SCALP_MAX_LEVERAGE", "15")), 25)  # Capped at 25x
     scalp_max_positions: int = int(os.getenv("NEXUS_SCALP_MAX_POSITIONS", "1"))
     scalp_daily_loss_limit_pct: float = float(os.getenv("NEXUS_SCALP_DAILY_LOSS_PCT", "0.05"))
     scalp_min_rrr: float = float(os.getenv("NEXUS_SCALP_MIN_RRR", "2.0"))

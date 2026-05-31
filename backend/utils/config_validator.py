@@ -67,14 +67,14 @@ class ConfigValidator:
 
     def _validate_market_provider(self) -> list[ValidationIssue]:
         issues = []
-        provider = settings.market_data_provider.lower()
+        provider = (settings.market_data_provider or "").lower()
         if provider not in self.VALID_PROVIDERS:
             issues.append(ValidationIssue("ICT_MARKET_DATA_PROVIDER", "error", f"Invalid provider: {provider}. Must be binance or delta"))
         return issues
 
     def _validate_ai_config(self) -> list[ValidationIssue]:
         issues = []
-        provider = settings.ai_ict_provider.lower()
+        provider = (settings.ai_ict_provider or "").lower()
         if provider not in self.VALID_AI_PROVIDERS:
             issues.append(ValidationIssue("ICT_AI_ICT_PROVIDER", "error", f"Invalid AI provider: {provider}"))
         if provider == "gemini" and not settings.gemini_api_key:
@@ -87,7 +87,7 @@ class ConfigValidator:
 
     def _validate_sentiment_config(self) -> list[ValidationIssue]:
         issues = []
-        provider = settings.sentiment_provider.lower()
+        provider = (settings.sentiment_provider or "").lower()
         if provider not in {"auto", "gemini", "openai", "local"}:
             issues.append(ValidationIssue("ICT_SENTIMENT_PROVIDER", "error", f"Invalid sentiment provider: {provider}"))
         if provider == "gemini" and not settings.gemini_api_key:

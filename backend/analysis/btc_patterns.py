@@ -35,8 +35,8 @@ KILLZONE_WINDOWS: dict[str, tuple[int, int]] = {
 
 HALVING_DATES_MS: list[int] = [
     1588636800000,  # 2020-05-11
-    1640995200000,  # 2022-01-01 (estimate for next ~4y cycle)
-    1704067200000,  # 2024-01-01
+    1713484800000,  # 2024-04-19
+    1871040000000,  # ~2029 (estimated next halving)
 ]
 
 

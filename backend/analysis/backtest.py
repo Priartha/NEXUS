@@ -524,7 +524,7 @@ class BacktestEngine:
                                 trade["stop_loss"] = min(trade["stop_loss"], entry)
                                 sl = trade["stop_loss"]
 
-                funding_cost = bars_held * funding_per_bar * entry * qty
+                funding_cost = funding_per_bar * entry * qty
                 if bars_held >= self.max_hold_bars + 1:
                     exit_price = current.close
                     pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
@@ -538,7 +538,7 @@ class BacktestEngine:
                     trade["close_reason"] = "time_exit"
                     trade["funding_cost"] = round(funding_cost, 2)
                     balance += pnl
-                    returns_series.append(pnl / initial_balance)
+                    returns_series.append(pnl / balance if balance > 0 else 0)
                     results.append(dict(trade))
                     continue
 
@@ -562,7 +562,7 @@ class BacktestEngine:
                     trade["close_reason"] = "stop_loss"
                     trade["funding_cost"] = round(funding_cost, 2)
                     balance += pnl
-                    returns_series.append(pnl / initial_balance)
+                    returns_series.append(pnl / balance if balance > 0 else 0)
                     results.append(dict(trade))
                 elif hit_target:
                     exit_price = tp
@@ -577,7 +577,7 @@ class BacktestEngine:
                     trade["close_reason"] = "target_hit"
                     trade["funding_cost"] = round(funding_cost, 2)
                     balance += pnl
-                    returns_series.append(pnl / initial_balance)
+                    returns_series.append(pnl / balance if balance > 0 else 0)
                     results.append(dict(trade))
 
             if balance > peak:

@@ -224,12 +224,23 @@ class ModelPerformanceTracker:
         return row[1] / row[0]
 
     def _compute_trend(self, conn) -> str:
-        now = int(time.time() * 1000)
         recent = self._compute_accuracy(conn, 7)
         older = self._compute_accuracy(conn, 14)
         if older == 0:
             return "stable"
-        ratio = recent / older
+        # Compare recent 7-day accuracy against the prior 7-day window (days 8-14)
+        prior_cutoff = int(time.time() * 1000) - 14 * 86400000
+        recent_cutoff = int(time.time() * 1000) - 7 * 86400000
+        row = conn.execute("""
+            SELECT COUNT(*), SUM(was_correct) FROM model_predictions
+            WHERE timestamp >= ? AND timestamp < ? AND actual_direction != ''
+        """, (prior_cutoff, recent_cutoff)).fetchone()
+        if not row or row[0] == 0:
+            return "stable"
+        older_nonoverlap = row[1] / row[0]
+        if older_nonoverlap == 0:
+            return "stable"
+        ratio = recent / older_nonoverlap
         if ratio > 1.1:
             return "improving"
         elif ratio < 0.9:
@@ -245,7 +256,7 @@ class ModelPerformanceTracker:
             alerts.append({
                 "type": "model_degradation",
                 "severity": "high",
-                "message": f"Model accuracy dropped: 7d={metrics.accuracy_last_7d:.0%} vs 30d={metrics.accuracy_30d:.0%}",
+                "message": f"Model accuracy dropped: 7d={metrics.accuracy_last_7d:.0%} vs 30d={metrics.accuracy_last_30d:.0%}",
                 "timestamp": int(time.time() * 1000),
             })
 

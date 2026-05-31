@@ -109,11 +109,11 @@ export default function BacktestPanel() {
   const [runs, setRuns] = useState<BacktestRun[]>([])
   const [selectedRun, setSelectedRun] = useState<BacktestRun | null>(null)
   const [running, setRunning] = useState(false)
-  const [candleCount, setCandleCount] = useState(500)
-  const [positionSize, setPositionSize] = useState(1.5)
-  const [maxHoldBars, setMaxHoldBars] = useState(12)
-  const [trailingStop, setTrailingStop] = useState(false)
-  const [tpMultiplier, setTpMultiplier] = useState(0)
+  const [candleCount, setCandleCount] = useState(5000)
+  const [positionSize, setPositionSize] = useState(2.0)
+  const [maxHoldBars, setMaxHoldBars] = useState(6)
+  const [trailingStop, setTrailingStop] = useState(true)
+  const [tpMultiplier, setTpMultiplier] = useState(1.5)
   const [trades, setTrades] = useState<any[]>([])
   const [equityCurve, setEquityCurve] = useState<any[]>([])
   const [expandedTrades, setExpandedTrades] = useState(false)
@@ -170,14 +170,14 @@ export default function BacktestPanel() {
           candle_count: candleCount,
           position_size_pct: positionSize / 100,
           symbol: 'BTCUSD',
-          timeframe: '15m',
+          timeframe: '5m',
           initial_balance: 10000,
           max_hold_bars: maxHoldBars,
-          breakeven_threshold: 1.0,
+          breakeven_threshold: 0.5,
           trailing_stop: trailingStop,
           tp_atr_multiplier: tpMultiplier,
-          signal_side_mode: 'invert',
-          avoid_reason_tokens: ['CVD falling'],
+          signal_side_mode: 'normal',
+          avoid_reason_tokens: [],
           adaptive_learning: true,
         }),
       })

@@ -29,8 +29,8 @@ export function MomentumPanel() {
       efficiencyRatio: regime?.efficiency_ratio ?? 0,
       signals,
       signalCount: signals.length,
-      buySignals: signals.filter(s => s.side === 'buy').length,
-      sellSignals: signals.filter(s => s.side === 'sell').length,
+      buySignals: signals.filter(s => s.side === 'long').length,
+      sellSignals: signals.filter(s => s.side === 'short').length,
       avgConfidence: signals.length ? signals.reduce((sum, s) => sum + s.confidence, 0) / signals.length : 0,
       avgRR: signals.length ? signals.reduce((sum, s) => sum + s.risk_reward, 0) / signals.length : 0,
     }

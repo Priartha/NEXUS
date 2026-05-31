@@ -579,7 +579,7 @@ def to_wire(value: Any) -> Any:
     if isinstance(value, tuple):
         return [to_wire(item) for item in value]
     if isinstance(value, set):
-        return [to_wire(item) for item in value]
+        return sorted([to_wire(item) for item in value], key=str)
     if isinstance(value, dict):
         return {key: to_wire(item) for key, item in value.items()}
     return value

@@ -95,7 +95,7 @@ class MultiExchangeAggregator:
         mapping = {
             "binance": sym,
             "coinbase": sym.replace("USDT", "USD").replace("-", ""),
-            "kraken": sym.replace("USDT", "USD").replace("BTC", "XBT"),
+            "kraken": sym.replace("USDT", "USD").replace("BTC", "XBT") if sym.startswith("BTC") else sym.replace("USDT", "USD"),
             "okx": sym,
             "bybit": sym,
         }
@@ -124,18 +124,27 @@ class MultiExchangeAggregator:
         base = config["rest_url"]
         norm_sym = self._normalize_symbol_for(exchange)
 
+        volume_24h = None
         async with httpx.AsyncClient(timeout=5.0, headers={"User-Agent": "NEXUS/1.0"}) as client:
             if exchange == "binance":
                 resp = await client.get(f"{base}{config['ticker_path']}", params={"symbol": norm_sym})
                 resp.raise_for_status()
                 data = resp.json()
                 price = float(data["price"])
+                try:
+                    vol_resp = await client.get(f"{base}/api/v3/ticker/24hr", params={"symbol": norm_sym})
+                    vol_resp.raise_for_status()
+                    vol_data = vol_resp.json()
+                    volume_24h = float(vol_data.get("volume", 0))
+                except Exception:
+                    pass
             elif exchange == "coinbase":
                 path = config["ticker_path"].format(symbol=norm_sym)
                 resp = await client.get(f"{base}{path}")
                 resp.raise_for_status()
                 data = resp.json()
                 price = float(data["price"])
+                volume_24h = float(data.get("volume_24h", 0)) or None
             elif exchange == "kraken":
                 resp = await client.post(f"{base}{config['ticker_path']}", data={"pair": norm_sym})
                 resp.raise_for_status()
@@ -143,6 +152,7 @@ class MultiExchangeAggregator:
                 result_key = next((k for k in data["result"] if k != "last"), None)
                 if result_key:
                     price = float(data["result"][result_key]["c"][0])
+                    volume_24h = float(data["result"][result_key].get("v", [0, 0])[-1]) or None
                 else:
                     raise ValueError("Kraken ticker key not found")
             elif exchange == "okx":
@@ -152,6 +162,7 @@ class MultiExchangeAggregator:
                 if data.get("code") != "0":
                     raise ValueError(f"OKX API error: {data.get('msg')}")
                 price = float(data["data"][0]["last"])
+                volume_24h = float(data["data"][0].get("volCcy24h", 0)) or None
             elif exchange == "bybit":
                 resp = await client.get(f"{base}{config['ticker_path']}", params={"category": "spot", "symbol": norm_sym})
                 resp.raise_for_status()
@@ -159,6 +170,7 @@ class MultiExchangeAggregator:
                 if data.get("retCode") != 0:
                     raise ValueError(f"Bybit API error: {data.get('retMsg')}")
                 price = float(data["result"]["list"][0]["lastPrice"])
+                volume_24h = float(data["result"]["list"][0].get("volume24h", 0)) or None
             else:
                 raise ValueError(f"Unknown exchange: {exchange}")
 
@@ -171,6 +183,7 @@ class MultiExchangeAggregator:
             price=price,
             timestamp_ms=ts,
             latency_ms=latency,
+            volume_24h=volume_24h,
         )
 
     async def get_aggregated_price(self, force_refresh: bool = False) -> AggregatedPrice:
@@ -186,7 +199,12 @@ class MultiExchangeAggregator:
             raise RuntimeError("No exchange prices available")
 
         price_values = [p.price for p in prices]
-        median_price = sorted(price_values)[len(price_values) // 2]
+        sorted_prices = sorted(price_values)
+        n = len(sorted_prices)
+        if n % 2 == 1:
+            median_price = sorted_prices[n // 2]
+        else:
+            median_price = (sorted_prices[n // 2 - 1] + sorted_prices[n // 2]) / 2.0
         mean_price = sum(price_values) / len(price_values)
 
         weights = [p.volume_24h or 1.0 for p in prices]

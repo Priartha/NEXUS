@@ -94,9 +94,11 @@ async def fetch_futures_oi(
     product_id: int = 27,
 ) -> dict:
     ticker = await fetch_ticker(base_url, product_id)
+    oi = ticker.get("open_interest", 0)
+    oi_change_pct = ticker.get("oi_change_pct", ticker.get("change_pct", 0.0))
     return {
-        "open_interest": ticker.get("open_interest", 0),
-        "change_pct": 0.0,
+        "open_interest": oi,
+        "change_pct": oi_change_pct if oi_change_pct is not None else 0.0,
     }
 
 

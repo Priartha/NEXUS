@@ -107,7 +107,7 @@ def _compute_fear_greed(candles: list[Candle], regime: MarketRegime | None) -> t
     if consecutive_up >= 5:
         streak_sentiment = min(consecutive_up / 10.0, 1.0)  # greed from FOMO
     elif consecutive_down >= 5:
-        streak_sentiment = -min(consecutive_down / 10.0, -1.0)  # fear from panic
+        streak_sentiment = -min(consecutive_down / 10.0, 1.0)  # fear from panic
 
     # 5. Volume confirmation
     volumes = [c.volume for c in recent]

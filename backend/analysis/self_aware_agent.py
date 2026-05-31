@@ -11,6 +11,8 @@ A complete autonomous trading intelligence that:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import time
 import uuid
@@ -41,11 +43,11 @@ class MarketPattern:
     timestamp: int
     
     def update_outcome(self, new_outcome: float) -> None:
-        """Bayesian update of pattern reliability."""
+        """Exponential moving average update of pattern reliability."""
         self.sample_count += 1
-        # Running average with decay for recent samples
-        decay = 0.9
-        self.outcome = (self.outcome * decay * (self.sample_count - 1) + new_outcome) / self.sample_count
+        # EMA-style update: recent samples have more weight
+        alpha = 1.0 / self.sample_count  # Decreasing learning rate
+        self.outcome = self.outcome * (1 - alpha) + new_outcome * alpha
         # Update confidence based on sample count
         self.confidence = min(1.0, self.sample_count / 50)
 
@@ -119,7 +121,7 @@ class MarketMemory:
         if hour not in self.cycles_learned:
             self.cycles_learned[hour] = {'bullish': 0, 'bearish': 0, 'range': 0, 'samples': 0}
         
-        change_pct = (candle.close - candle.open) / candle.open * 100
+        change_pct = (candle.close - candle.open) / candle.open * 100 if candle.open > 0 else 0
         if change_pct > 0.5:
             self.cycles_learned[hour]['bullish'] += 1
         elif change_pct < -0.5:
@@ -151,7 +153,8 @@ class MarketMemory:
                 self.winning_trades += 1
         
         # Update pattern knowledge
-        pattern_key = f"{trade.pattern_type}_{hash(str(trade.pattern_features))}"
+        features_str = json.dumps(trade.pattern_features, sort_keys=True, default=str)
+        pattern_key = f"{trade.pattern_type}_{hashlib.md5(features_str.encode()).hexdigest()[:12]}"
         if pattern_key in self.patterns:
             self.patterns[pattern_key].update_outcome(trade.pnl_pct or 0)
         else:
@@ -195,8 +198,9 @@ class MarketMemory:
         for key in features1:
             if key in features2:
                 v1, v2 = features1[key], features2[key]
-                if max(v1, v2) != 0:
-                    similarity = 1 - abs(v1 - v2) / max(abs(v1), abs(v2))
+                max_val = max(abs(v1), abs(v2))
+                if max_val > 1e-10:
+                    similarity = 1 - abs(v1 - v2) / max_val
                     similarities.append(similarity)
         
         return sum(similarities) / len(similarities) if similarities else 0.5
@@ -232,38 +236,45 @@ class MarketMemory:
     
     def _get_pattern_success_rate(self, regime: str) -> float:
         """Calculate pattern success rate for a regime."""
-        regime_trades = [t for t in self.trade_history if t.regime == regime]
+        def _get_regime(t):
+            return t.regime if hasattr(t, 'regime') else (t.get('regime', '') if isinstance(t, dict) else '')
+        def _get_won(t):
+            return t.won if hasattr(t, 'won') else (t.get('won', False) if isinstance(t, dict) else False)
+        regime_trades = [t for t in self.trade_history if _get_regime(t) == regime]
         if len(regime_trades) < 5:
             return 0.5
         
-        wins = sum(1 for t in regime_trades if t.won)
+        wins = sum(1 for t in regime_trades if _get_won(t))
         return wins / len(regime_trades)
     
     def save(self, path: str = "data/market_memory.pkl") -> None:
-        import pickle, os
+        import json, os
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "wb") as f:
-            pickle.dump({
-                "patterns": self.patterns,
-                "trade_history": self.trade_history,
-                "price_levels": list(self.price_levels),
-                "volume_profile": list(self.volume_profile),
-                "regime_history": list(self.regime_history),
-                "total_trades": self.total_trades,
-                "winning_trades": self.winning_trades,
-                "total_pnl": self.total_pnl,
-                "cycles_learned": self.cycles_learned,
-                "day_of_week_behavior": self.day_of_week_behavior,
-                "volatility_states": self.volatility_states,
-            }, f)
+        data = {
+            "patterns": self.patterns,
+            "trade_history": self.trade_history,
+            "price_levels": list(self.price_levels),
+            "volume_profile": list(self.volume_profile),
+            "regime_history": list(self.regime_history),
+            "total_trades": self.total_trades,
+            "winning_trades": self.winning_trades,
+            "total_pnl": self.total_pnl,
+            "cycles_learned": {str(k): v for k, v in self.cycles_learned.items()},
+            "day_of_week_behavior": {str(k): v for k, v in self.day_of_week_behavior.items()},
+            "volatility_states": self.volatility_states,
+        }
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, default=str)
+        os.replace(tmp_path, path)
 
     @classmethod
     def load(cls, path: str = "data/market_memory.pkl") -> "MarketMemory":
-        import pickle
+        import json
         mem = cls()
         try:
-            with open(path, "rb") as f:
-                data = pickle.load(f)
+            with open(path, "r") as f:
+                data = json.load(f)
             mem.patterns = data.get("patterns", {})
             mem.trade_history = data.get("trade_history", [])
             mem.price_levels = deque(data.get("price_levels", []), maxlen=10000)
@@ -272,10 +283,10 @@ class MarketMemory:
             mem.total_trades = data.get("total_trades", 0)
             mem.winning_trades = data.get("winning_trades", 0)
             mem.total_pnl = data.get("total_pnl", 0.0)
-            mem.cycles_learned = data.get("cycles_learned", {})
-            mem.day_of_week_behavior = data.get("day_of_week_behavior", {})
+            mem.cycles_learned = {int(k): v for k, v in data.get("cycles_learned", {}).items()}
+            mem.day_of_week_behavior = {int(k): v for k, v in data.get("day_of_week_behavior", {}).items()}
             mem.volatility_states = data.get("volatility_states", {})
-        except (FileNotFoundError, pickle.UnpicklingError, EOFError):
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
             pass
         return mem
 
@@ -346,8 +357,8 @@ class FeatureExtractor:
         swing_lows = self._find_swing_lows(lows, 10)
         
         current_price = closes[-1]
-        nearest_resistance = min(swing_highs) if swing_highs else current_price * 1.02
-        nearest_support = max(swing_lows) if swing_lows else current_price * 0.98
+        nearest_resistance = min(h for h in swing_highs if h > current_price) if any(h > current_price for h in swing_highs) else (min(swing_highs) if swing_highs else current_price * 1.02)
+        nearest_support = max(l for l in swing_lows if l < current_price) if any(l < current_price for l in swing_lows) else (max(swing_lows) if swing_lows else current_price * 0.98)
         
         # Structure features
         hh_count = len([h for h in swing_highs if h > np.mean(swing_highs)]) if len(swing_highs) > 1 else 0
@@ -857,17 +868,27 @@ class SelfAwareTradingAgent:
 
         long_total, short_total, count = 0.0, 0.0, 0
         for pid, pattern in self.memory.patterns.items():
-            feat = pattern.features
+            # Handle both object and dict formats (pickle vs JSON)
+            if isinstance(pattern, dict):
+                feat = pattern.get('features', {})
+                outcome = pattern.get('outcome', 0)
+            elif hasattr(pattern, 'features'):
+                feat = pattern.features
+                outcome = pattern.outcome
+            else:
+                continue
+            if not isinstance(feat, dict):
+                continue
             overlap = [k for k in ctx if k in feat and isinstance(feat[k], (int, float))]
             if len(overlap) < 5:
                 continue
             sim = sum(1 - abs(ctx[k] - feat[k]) / max(abs(ctx[k]), abs(feat[k]), 0.001) for k in overlap) / len(overlap)
             if sim > 0.6:
                 count += 1
-                if pattern.outcome > 0:
-                    long_total += pattern.outcome * sim
+                if outcome > 0:
+                    long_total += outcome * sim
                 else:
-                    short_total += abs(pattern.outcome) * sim
+                    short_total += abs(outcome) * sim
 
         if count == 0:
             return {'long': 0.0, 'short': 0.0}
@@ -1151,9 +1172,10 @@ class SelfAwareTradingAgent:
         pattern_score = self.memory.get_pattern_reliability(pattern_type, features)
         score += pattern_score * 0.12
         
-        # Regime modifier
+        # Regime modifier - only boost when trend aligns with long direction
         if regime in ['trending', 'trending_volatile']:
-            score += 0.06
+            if features.get('trend_direction', 0) > 0:
+                score += 0.06
         elif regime == 'consolidation':
             score -= 0.08
         
@@ -1206,9 +1228,11 @@ class SelfAwareTradingAgent:
         pattern_score = self.memory.get_pattern_reliability(pattern_type, features)
         score += pattern_score * 0.12
         
-        # Regime modifier
+        # Regime modifier - only boost the direction matching trend
         if regime in ['trending', 'trending_volatile']:
-            score += 0.06
+            # This is the short score method, only boost if trend is bearish
+            if features.get('trend_direction', 0) < 0:
+                score += 0.06
         elif regime == 'consolidation':
             score -= 0.08
         
@@ -1346,39 +1370,49 @@ class SelfAwareTradingAgent:
             'market_hours_knowledge': len(self.memory.cycles_learned),
         }
 
-    def save_state(self, path: str = "data/agent_brain.pkl") -> None:
+    def save_state(self, path: str = "data/agent_brain.json") -> None:
         """Save entire agent state to disk."""
-        import pickle, os
+        import json, os
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        self.memory.save(path.replace("agent_brain.pkl", "market_memory.pkl"))
+        self.memory.save(path.replace("agent_brain.json", "market_memory.pkl"))
         state = {
             "total_decisions": self.total_decisions,
             "correct_decisions": self.correct_decisions,
-            "_decision_ids": self._decision_ids,
-            "_loaded_trade_ids": self._loaded_trade_ids,
+            "_decision_ids": list(self._decision_ids),
+            "_loaded_trade_ids": list(self._loaded_trade_ids),
         }
-        with open(path, "wb") as f:
-            pickle.dump(state, f)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(state, f, default=str)
+        os.replace(tmp_path, path)
 
-    def load_state(self, path: str = "data/agent_brain.pkl") -> bool:
+    def load_state(self, path: str = "data/agent_brain.json") -> bool:
         """Load agent state from disk. Returns True if loaded."""
-        import pickle
-        self.memory = MarketMemory.load(path.replace("agent_brain.pkl", "market_memory.pkl"))
+        import json
+        self.memory = MarketMemory.load(path.replace("agent_brain.json", "market_memory.pkl"))
         try:
-            with open(path, "rb") as f:
-                state = pickle.load(f)
+            with open(path, "r") as f:
+                state = json.load(f)
             self.total_decisions = state.get("total_decisions", 0)
             self.correct_decisions = state.get("correct_decisions", 0)
-            self._decision_ids = state.get("_decision_ids", set())
-            self._loaded_trade_ids = state.get("_loaded_trade_ids", set())
+            self._decision_ids = set(state.get("_decision_ids", []))
+            self._loaded_trade_ids = set(state.get("_loaded_trade_ids", []))
             return True
-        except (FileNotFoundError, pickle.UnpicklingError, EOFError):
+        except (FileNotFoundError, json.JSONDecodeError, ValueError):
             return False
 
 
 # ──────────────────────────────────────────────────────────────
-# Singleton instance
+# Singleton instance (lazy initialization)
 # ──────────────────────────────────────────────────────────────
 
-agent = SelfAwareTradingAgent()
-agent.load_state()  # Restore saved experience if available
+agent: SelfAwareTradingAgent | None = None
+
+
+def get_agent() -> SelfAwareTradingAgent:
+    """Get or create the singleton agent instance."""
+    global agent
+    if agent is None:
+        agent = SelfAwareTradingAgent()
+        agent.load_state()
+    return agent

@@ -35,19 +35,55 @@ const DEFAULT_CONFIG: StrategyConfig = {
   useAdxFilter: true,
   useLimitOrders: true,
   minConfidence: 0.55,
-  signalCooldown: 12,
+  signalCooldown: 6,
   breakevenThreshold: 0.5,
   partialTp1R: 1.0,
   partialTp2R: 1.5,
-  maxHoldBars: 12,
+  maxHoldBars: 6,
   positionSizePct: 2.0,
   maxConcurrent: 1,
 }
 
 const PRESETS: Record<string, { name: string; config: StrategyConfig; description: string }> = {
+  quick_flip: {
+    name: 'Quick Flip (Best)',
+    description: 'Optimized: PF=4.13, +7.31% PnL, 66.7% WR on 5000 candles',
+    config: {
+      stopLossMultiplier: 0.5,
+      adxThreshold: 20.0,
+      useAdxFilter: true,
+      useLimitOrders: true,
+      minConfidence: 0.55,
+      signalCooldown: 6,
+      breakevenThreshold: 0.5,
+      partialTp1R: 1.0,
+      partialTp2R: 1.5,
+      maxHoldBars: 6,
+      positionSizePct: 2.0,
+      maxConcurrent: 1,
+    },
+  },
+  trend_follow: {
+    name: 'Trend Following',
+    description: 'Ride trends with trailing stop (PF=1.60, +3.49%)',
+    config: {
+      stopLossMultiplier: 0.5,
+      adxThreshold: 20.0,
+      useAdxFilter: true,
+      useLimitOrders: true,
+      minConfidence: 0.55,
+      signalCooldown: 12,
+      breakevenThreshold: 1.0,
+      partialTp1R: 1.0,
+      partialTp2R: 2.5,
+      maxHoldBars: 15,
+      positionSizePct: 1.5,
+      maxConcurrent: 1,
+    },
+  },
   combo3: {
-    name: 'Combo3 (Recommended)',
-    description: 'Tight stops, quick exits - Best backtest results (PF=3.17)',
+    name: 'Combo3 (Legacy)',
+    description: 'Previous recommendation (PF=1.01, +0.03%)',
     config: {
       stopLossMultiplier: 0.5,
       adxThreshold: 20.0,
@@ -65,27 +101,9 @@ const PRESETS: Record<string, { name: string; config: StrategyConfig; descriptio
   },
   sl05: {
     name: 'SL0.5 Conservative',
-    description: 'Tight stops with standard exits (PF=1.36)',
+    description: 'Tight stops, longer hold (PF=0.45, -5.69%)',
     config: {
       stopLossMultiplier: 0.5,
-      adxThreshold: 20.0,
-      useAdxFilter: true,
-      useLimitOrders: true,
-      minConfidence: 0.55,
-      signalCooldown: 12,
-      breakevenThreshold: 0.75,
-      partialTp1R: 1.0,
-      partialTp2R: 2.0,
-      maxHoldBars: 25,
-      positionSizePct: 2.0,
-      maxConcurrent: 1,
-    },
-  },
-  wide: {
-    name: 'Wide Stops (Old)',
-    description: 'Previous configuration with wider stops (PF=0.26)',
-    config: {
-      stopLossMultiplier: 2.5,
       adxThreshold: 20.0,
       useAdxFilter: true,
       useLimitOrders: true,
@@ -103,7 +121,7 @@ const PRESETS: Record<string, { name: string; config: StrategyConfig; descriptio
 
 export function StrategyConfigPanel() {
   const [config, setConfig] = useState<StrategyConfig>(DEFAULT_CONFIG)
-  const [activePreset, setActivePreset] = useState<string>('combo3')
+  const [activePreset, setActivePreset] = useState<string>('quick_flip')
   const [saved, setSaved] = useState(false)
 
   const applyPreset = (key: string) => {
@@ -129,7 +147,7 @@ export function StrategyConfigPanel() {
 
   const handleReset = () => {
     setConfig(DEFAULT_CONFIG)
-    setActivePreset('combo3')
+    setActivePreset('quick_flip')
     setSaved(false)
   }
 
@@ -372,7 +390,7 @@ export function StrategyConfigPanel() {
         <AlertTriangle size={14} />
         <div>
           <strong>Important:</strong> Changes to strategy configuration require a backend restart to take effect.
-          The current active configuration uses Combo3 parameters (SL=0.5×, BE@0.5R, TP2=1.5R, Hold=12 bars).
+          The active Quick Flip preset uses: SL=0.5x, BE@0.5R, TP2=1.5R, Hold=6 bars, Trailing Stop ON.
         </div>
       </div>
     </div>

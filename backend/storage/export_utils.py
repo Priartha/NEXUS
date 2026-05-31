@@ -3,22 +3,60 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from typing import Any
 
 from backend.storage.schema import get_conn
 
+VALID_EXPORT_TABLES = {
+    "market_snapshots",
+    "pattern_history",
+    "regime_history",
+    "metrics_history",
+    "candle_archive",
+    "ai_decisions_history",
+    "liquidity_history",
+    "orderbook_history",
+    "performance_daily",
+    "signals",
+    "paper_trades",
+    "backtest_runs",
+    "backtest_trades",
+    "equity_curve",
+    "alerts",
+    "alert_config",
+    "trade_journal_entries",
+    "daily_reports",
+}
+
+_SAFE_IDENTIFIER_RE = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+
+
+def _validate_table(table: str) -> str:
+    if table not in VALID_EXPORT_TABLES:
+        raise ValueError(f"Invalid table name: {table}")
+    return table
+
+
+def _validate_filter_key(key: str) -> str:
+    if not _SAFE_IDENTIFIER_RE.match(key):
+        raise ValueError(f"Invalid filter key: {key}")
+    return key
+
 
 def export_to_csv(table: str, filters: dict[str, Any] | None = None) -> str:
     """Export table data to CSV string."""
+    _validate_table(table)
     conn = get_conn()
     try:
-        query = f"SELECT * FROM {table} WHERE 1=1"
+        query = f"SELECT * FROM [{table}] WHERE 1=1"
         params: list[Any] = []
 
         if filters:
             for key, value in filters.items():
                 if value is not None:
-                    query += f" AND {key}=?"
+                    _validate_filter_key(key)
+                    query += f" AND [{key}]=?"
                     params.append(value)
 
         query += " ORDER BY timestamp DESC LIMIT 10000"
@@ -46,15 +84,17 @@ def export_to_csv(table: str, filters: dict[str, Any] | None = None) -> str:
 
 def export_to_json(table: str, filters: dict[str, Any] | None = None) -> str:
     """Export table data to JSON string."""
+    _validate_table(table)
     conn = get_conn()
     try:
-        query = f"SELECT * FROM {table} WHERE 1=1"
+        query = f"SELECT * FROM [{table}] WHERE 1=1"
         params: list[Any] = []
 
         if filters:
             for key, value in filters.items():
                 if value is not None:
-                    query += f" AND {key}=?"
+                    _validate_filter_key(key)
+                    query += f" AND [{key}]=?"
                     params.append(value)
 
         query += " ORDER BY timestamp DESC LIMIT 10000"
@@ -76,14 +116,4 @@ def export_to_json(table: str, filters: dict[str, Any] | None = None) -> str:
         conn.close()
 
 
-VALID_EXPORT_TABLES = {
-    "market_snapshots",
-    "pattern_history",
-    "regime_history",
-    "metrics_history",
-    "candle_archive",
-    "ai_decisions_history",
-    "liquidity_history",
-    "orderbook_history",
-    "performance_daily",
-}
+

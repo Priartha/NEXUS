@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.analysis.wick_rejection import analyze_wick_rejection
-from backend.analysis.self_aware_agent import SelfAwareTradingAgent, agent as ai_agent
+from backend.analysis.self_aware_agent import SelfAwareTradingAgent, get_agent
 from backend.analysis.ensemble_model import ensemble as ensemble_model
 from backend.analysis.self_optimizer import optimizer as self_optimizer
 from backend.analysis.anomaly_detection import anomaly_detector, adaptive_stop
@@ -238,7 +238,7 @@ class UnifiedScalpEngine:
         if len(candles) < 20:
             ctx = ScalpContext(timestamp=now_ms)
             ctx.ai_brain_active = True
-            ctx.ai_intelligence = ai_agent.get_agent_status()
+            ctx.ai_intelligence = get_agent().get_agent_status()
             return ctx
 
         # ── Data coherence gate ─────────────────────────────────────────
@@ -250,7 +250,7 @@ class UnifiedScalpEngine:
             ctx = ScalpContext(timestamp=now_ms)
             ctx.trade_blocked_reasons = coherence_issues
             ctx.ai_brain_active = True
-            ctx.ai_intelligence = ai_agent.get_agent_status()
+            ctx.ai_intelligence = get_agent().get_agent_status()
             logger.warning(f"Data coherence check failed: {'; '.join(coherence_issues)}")
             return ctx
 
@@ -265,7 +265,7 @@ class UnifiedScalpEngine:
             ctx = ScalpContext(timestamp=now_ms)
             ctx.trade_blocked_reasons = [f"Anomaly: {anomaly.description}"]
             ctx.ai_brain_active = True
-            ctx.ai_intelligence = ai_agent.get_agent_status()
+            ctx.ai_intelligence = get_agent().get_agent_status()
             return ctx
         # Update anomaly detector with new data
         anomaly_detector.update(last_candle_for_anomaly)
@@ -327,7 +327,7 @@ class UnifiedScalpEngine:
             ctx.futures_leverage = settings.futures_leverage
             ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
             ctx.ai_brain_active = True
-            ctx.ai_intelligence = ai_agent.get_agent_status()
+            ctx.ai_intelligence = get_agent().get_agent_status()
             return ctx
 
         long_score, long_reasons = self._confluence_long(
@@ -361,7 +361,7 @@ class UnifiedScalpEngine:
 
         # ── Self-Aware AI Agent is the CENTRAL BRAIN ────────────────────────
         # It receives ALL 15 data sources + price action + memory and makes the final decision
-        agent_result = ai_agent.analyze_enriched(
+        agent_result = get_agent().analyze_enriched(
             candles=ordered, order_flow=order_flow, vwap=vwap, oi=oi,
             funding=funding_rate, sweeps=sweeps, vol_profile=vol_profile,
             rsi_3=rsi_3, kill_active=kill_active, kill_session=kill_session,
@@ -447,7 +447,7 @@ class UnifiedScalpEngine:
             ctx.futures_leverage = settings.futures_leverage
             ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
             ctx.ai_brain_active = True
-            ctx.ai_intelligence = ai_agent.get_agent_status()
+            ctx.ai_intelligence = get_agent().get_agent_status()
             return ctx
 
         # Block signals in consolidation regime - no clear directional edge
@@ -537,7 +537,7 @@ class UnifiedScalpEngine:
         
         # Store AI brain status in context
         ctx.ai_brain_active = True
-        ctx.ai_intelligence = ai_agent.get_agent_status()
+        ctx.ai_intelligence = get_agent().get_agent_status()
         
         return ctx
 
@@ -553,7 +553,7 @@ class UnifiedScalpEngine:
         ctx.futures_leverage = settings.futures_leverage
         ctx.estimated_funding_cost_8h = round(fr.current_rate * 3 * 100, 4) if fr else 0.0
         ctx.ai_brain_active = True
-        ctx.ai_intelligence = ai_agent.get_agent_status()
+        ctx.ai_intelligence = get_agent().get_agent_status()
         return ctx
 
     # ── Data source computations ──

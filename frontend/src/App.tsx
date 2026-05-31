@@ -120,7 +120,11 @@ class RuntimeGuard extends Component<RuntimeGuardProps, RuntimeGuardState> {
 
   componentDidCatch(error: Error) {
     console.error('NEXUS UI runtime error', error)
-    window.setTimeout(() => window.location.reload(), 1500)
+    // Only auto-reload once per session to prevent infinite reload loops
+    if (!sessionStorage.getItem('nexus_error_reloaded')) {
+      sessionStorage.setItem('nexus_error_reloaded', '1')
+      window.setTimeout(() => window.location.reload(), 1500)
+    }
   }
 
   render() {

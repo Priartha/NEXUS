@@ -49,7 +49,7 @@ def compute_t_test(returns: list[float]) -> dict[str, float]:
     return {"t_stat": round(t_stat, 4), "p_value": round(p_value, 4), "mean": round(mean, 6), "std": round(std, 6)}
 
 
-def compute_sharpe_ratio(returns: list[float], risk_free_rate: float = 0.0, periods_per_year: int = 252 * 288) -> float:
+def compute_sharpe_ratio(returns: list[float], risk_free_rate: float = 0.0, periods_per_year: int = 365 * 24 * 12) -> float:
     """Annualized Sharpe ratio."""
     n = len(returns)
     if n < 2:
@@ -82,9 +82,10 @@ def monte_carlo_permutation_test(
     count_better = 0
 
     for _ in range(n_simulations):
-        random.shuffle(combined)
-        shuffled = combined[:n_strat]
-        shuffled_sharpe = compute_sharpe_ratio(shuffled)
+        shuffled = combined[:]
+        random.shuffle(shuffled)
+        shuffled_strat = shuffled[:n_strat]
+        shuffled_sharpe = compute_sharpe_ratio(shuffled_strat)
         if shuffled_sharpe >= observed_sharpe:
             count_better += 1
 
@@ -110,7 +111,7 @@ def deflated_sharpe_ratio(
         mean = sum(returns) / n
         std = math.sqrt(sum((r - mean) ** 2 for r in returns) / (n - 1)) if n > 1 else 1.0
         if std > 0:
-            skewness = sum((r - mean) ** 3 for r in returns) / (n * std ** 3)
+            skewness = (n / ((n - 1) * (n - 2))) * sum((r - mean) ** 3 for r in returns) / std ** 3
         else:
             skewness = 0.0
 
@@ -118,11 +119,13 @@ def deflated_sharpe_ratio(
         mean = sum(returns) / n
         std = math.sqrt(sum((r - mean) ** 2 for r in returns) / (n - 1)) if n > 1 else 1.0
         if std > 0:
-            kurtosis = sum((r - mean) ** 4 for r in returns) / (n * std ** 4)
+            # Excess kurtosis (Fisher's definition, subtracts 3)
+            raw_kurt = sum((r - mean) ** 4 for r in returns) / (n * std ** 4)
+            kurtosis = raw_kurt - 3.0
         else:
-            kurtosis = 3.0
+            kurtosis = 0.0
 
-    var_sr = (1 + 0.5 * sharpe_observed ** 2 - skewness * sharpe_observed + (kurtosis - 3) / 4 * sharpe_observed ** 2) / (n - 1)
+    var_sr = (1 + 0.5 * sharpe_observed ** 2 - skewness * sharpe_observed + kurtosis / 4 * sharpe_observed ** 2) / (n - 1)
     std_sr = math.sqrt(max(var_sr, 1e-10))
 
     expected_max = _expected_max_sharpe(n_trials)
@@ -203,12 +206,12 @@ def confidence_interval(returns: list[float], confidence: float = 0.95) -> tuple
 def min_track_record_length(sharpe: float, confidence: float = 0.95) -> int:
     """
     Minimum track record length (MinTRL) to distinguish Sharpe from zero.
-    Per Lopez de Prado: MinTRL = 1 + (1 - confidence_level) * z / sharpe^2
+    Per Lopez de Prado: MinTRL = (1 + (1 - confidence_level) * z) / sharpe^2
     """
     if sharpe == 0:
         return 999999
     z = _normal_ppf(confidence)
-    min_periods = int(math.ceil((1 + z * sharpe) / (sharpe ** 2)))
+    min_periods = int(math.ceil((1 + (1 - confidence) * z) / (sharpe ** 2)))
     return max(min_periods, 30)
 
 

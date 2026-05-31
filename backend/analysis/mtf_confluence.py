@@ -54,8 +54,10 @@ def compute_mtf_confluence(
         ts = pipeline.metrics.trend_score
         if ts > 0.15:
             lower_tf_bias = "bullish" if lower_tf_bias != "bearish" else "mixed"
+            aligned_count += 1
         elif ts < -0.15:
             lower_tf_bias = "bearish" if lower_tf_bias != "bullish" else "mixed"
+            aligned_count += 1
 
     # Confluence factor: 1.15 if all aligned, 0.85 if conflicting
     if total_count == 0:

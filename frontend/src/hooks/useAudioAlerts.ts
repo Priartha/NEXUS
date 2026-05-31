@@ -36,6 +36,7 @@ export function useAudioAlerts() {
       if (cancelled) return
       try {
         const res = await fetch('/alerts?unread_only=true&limit=5')
+        if (!res.ok) return
         const alerts: Alert[] = await res.json()
         const highSev = alerts.filter(
           (a) => (a.severity === 'high' || a.severity === 'critical') && a.timestamp > lastAlertTs.current

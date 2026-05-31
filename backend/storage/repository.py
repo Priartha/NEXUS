@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from typing import Any
@@ -92,6 +93,24 @@ def save_paper_trade(trade: dict) -> None:
             trade.get("confidence"), trade.get("reason"), trade.get("close_reason"),
         ))
         conn.commit()
+    finally:
+        conn.close()
+
+
+ALLOWED_PAPER_COLS = {"bars_held", "stop_loss", "highest_price", "lowest_price"}
+
+def update_paper_trade(trade_id: str, updates: dict) -> None:
+    cols = {k: v for k, v in updates.items() if k in ALLOWED_PAPER_COLS}
+    if not cols:
+        return
+    set_clause = ", ".join(f"{k}=?" for k in cols)
+    vals = list(cols.values()) + [trade_id]
+    conn = get_conn()
+    try:
+        conn.execute(f"UPDATE paper_trades SET {set_clause} WHERE id=?", vals)
+        conn.commit()
+    except Exception:
+        pass
     finally:
         conn.close()
 

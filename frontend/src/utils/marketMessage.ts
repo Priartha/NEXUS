@@ -136,7 +136,7 @@ const MessageSchema = z.union([
     signals: z.array(z.object({
       id: z.string(),
       timestamp: z.number(),
-      side: z.enum(['buy', 'sell']),
+      side: z.enum(['buy', 'sell', 'long', 'short']),
       entry: z.number(),
       stop_loss: z.number(),
       trailing_stop: z.number().nullable().optional(),

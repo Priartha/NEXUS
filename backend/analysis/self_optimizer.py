@@ -137,10 +137,11 @@ class SelfOptimizationEngine:
         
         # 5. Apply or revert
         if result['improvement'] > 0:
+            params_before = self.params.copy()
             self.params.update(proposed)
             self.attempts.append(OptimizationAttempt(
                 timestamp=int(time.time() * 1000),
-                params_before=self.params.copy(),
+                params_before=params_before,
                 params_after=proposed,
                 backtest_result=result,
                 improvement=result['improvement'],

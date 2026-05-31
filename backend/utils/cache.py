@@ -55,7 +55,7 @@ class TTLCache:
                 if len(self._store) >= self._max_size:
                     oldest_key = min(self._store, key=lambda k: self._store[k].created_at)
                     del self._store[oldest_key]
-            self._store[key] = CacheEntry(value, ttl or self._default_ttl)
+            self._store[key] = CacheEntry(value, ttl if ttl is not None else self._default_ttl)
 
     async def delete(self, key: str) -> bool:
         async with self._lock:
@@ -95,34 +95,55 @@ class TTLCache:
 global_cache = TTLCache(default_ttl=30.0, max_size=500)
 
 
+_CACHE_SENTINEL = object()
+
+
 def cached(prefix: str, ttl: Optional[float] = None):
-    """Decorator to cache async function results."""
+    """Decorator to cache async function results. Caches None results via sentinel."""
     def decorator(func: Callable):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             key = global_cache._make_key(prefix, *args, **kwargs)
             result = await global_cache.get(key)
             if result is not None:
-                return result
+                return result if result is not _CACHE_SENTINEL else None
             result = await func(*args, **kwargs)
-            await global_cache.set(key, result, ttl=ttl)
+            await global_cache.set(key, result if result is not None else _CACHE_SENTINEL, ttl=ttl)
             return result
         return wrapper
     return decorator
 
 
 def cached_sync(prefix: str, ttl: Optional[float] = None):
-    """Decorator to cache synchronous function results."""
+    """Decorator to cache synchronous function results. Caches None results via sentinel."""
     def decorator(func: Callable):
         @wraps(func)
         def wrapper(*args, **kwargs):
+            import threading
             key = global_cache._make_key(prefix, *args, **kwargs)
-            loop = asyncio.get_event_loop()
-            result = loop.run_until_complete(global_cache.get(key))
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(asyncio.run, global_cache.get(key)).result()
+            elif loop:
+                result = loop.run_until_complete(global_cache.get(key))
+            else:
+                result = asyncio.run(global_cache.get(key))
             if result is not None:
-                return result
+                return result if result is not _CACHE_SENTINEL else None
             result = func(*args, **kwargs)
-            loop.run_until_complete(global_cache.set(key, result, ttl=ttl))
+            if loop and loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(asyncio.run, global_cache.set(key, result if result is not None else _CACHE_SENTINEL, ttl=ttl)).result()
+            elif loop:
+                loop.run_until_complete(global_cache.set(key, result if result is not None else _CACHE_SENTINEL, ttl=ttl))
+            else:
+                asyncio.run(global_cache.set(key, result if result is not None else _CACHE_SENTINEL, ttl=ttl))
             return result
         return wrapper
     return decorator

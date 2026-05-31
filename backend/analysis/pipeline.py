@@ -564,9 +564,10 @@ class AnalysisPipeline:
                     self._on_alert(alert)
                 self._alerted_signal_ids.add(sig.id)
 
-        # Prune stale signal IDs to prevent memory growth
+        # Prune stale signal IDs to prevent memory growth (keep last 500)
         if len(self._alerted_signal_ids) > 1000:
-            self._alerted_signal_ids.clear()
+            sorted_ids = sorted(self._alerted_signal_ids)
+            self._alerted_signal_ids = set(sorted_ids[-500:])
 
         if self.regime and self.regime.phase != self._last_regime_phase:
             alert = check_regime_alert(self._last_regime_phase, self.regime.phase)

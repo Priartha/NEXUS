@@ -79,8 +79,9 @@ class RiskManager:
         if risk_amount > max_position_size:
             blockers.append(f"Risk ${risk_amount:.0f} exceeds max position ${max_position_size:.0f}")
 
-        if self.state.daily_trades >= 5:
-            blockers.append("Max daily trades reached (5)")
+        max_daily_trades = getattr(self, 'max_daily_trades', 5)
+        if self.state.daily_trades >= max_daily_trades:
+            blockers.append(f"Max daily trades reached ({max_daily_trades})")
 
         if self.state.daily_pnl <= -self.max_daily_loss:
             blockers.append(f"Daily loss limit hit: ${abs(self.state.daily_pnl):.0f} / ${self.max_daily_loss:.0f}")

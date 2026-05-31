@@ -1,10 +1,7 @@
 """CoinGecko MCP Server - Provides cryptocurrency market data from CoinGecko API."""
 from __future__ import annotations
 
-import asyncio
 import httpx
-import json
-import time
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP

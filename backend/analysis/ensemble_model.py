@@ -46,13 +46,13 @@ class ModelWeight:
         if correct:
             self.correct_predictions += 1
         self.recent_pnl += pnl
-        # Bayesian update with decay
+        # Exponential moving average update with decay
         decay = 0.95
         if self.total_predictions > 5:
             performance = 1.0 if correct else 0.0
             self.current_weight = self.current_weight * decay + performance * (1 - decay)
-            self.current_weight = max(0.1, min(0.6, self.current_weight))
-        # Track regime-specific performance
+            self.current_weight = max(0.05, min(0.70, self.current_weight))
+        # Track regime-specific performance via EMA
         if regime not in self.regime_weights:
             self.regime_weights[regime] = self.base_weight
         regime_perf = 1.0 if correct else 0.0
@@ -326,9 +326,9 @@ class EnsembleModel:
                     score -= 0.06; reasons.append(f"Bearish momentum {recent_return:.1f}%")
             
             # Volume confirmation
-            if len(candles) >= 20:
+            if len(candles) >= 25:
                 recent_vol = np.mean([c.volume for c in candles[-5:]])
-                base_vol = np.mean([c.volume for c in candles[-20:-5]])
+                base_vol = np.mean([c.volume for c in candles[-25:-5]])
                 if base_vol > 0:
                     vol_ratio = recent_vol / base_vol
                     if vol_ratio > 1.5:
@@ -425,8 +425,7 @@ class EnsembleModel:
         pnl_pct: float,
     ) -> None:
         """Record trade outcome and update model weights."""
-        correct = (won and score.direction == 'long' and pnl_pct > 0) or \
-                  (won and score.direction == 'short' and pnl_pct > 0)
+        correct = won and pnl_pct > 0
         
         for name, model in self.models.items():
             model.update(correct, pnl_pct, score.regime)
@@ -466,8 +465,7 @@ class EnsembleModel:
             if len(trades) < 5:
                 continue
             
-            # Simple Bayesian optimization: increase weight for models that
-            # contributed to winning trades
+            # Adjust weights based on win rate
             win_rate = sum(1 for t in trades if t['won']) / len(trades)
             
             if win_rate > 0.55:
@@ -482,7 +480,7 @@ class EnsembleModel:
                 self.models['momentum'].regime_weights[regime] = \
                     self.models['momentum'].regime_weights.get(regime, 0.33) * 0.9
             
-            # Normalize
+            # Normalize weights to sum to 1.0
             total = sum(self.models[n].regime_weights.get(regime, 0.33) for n in self.models)
             if total > 0:
                 for name in self.models:
@@ -510,7 +508,8 @@ class EnsembleModel:
         }
 
     def _save_state(self) -> None:
-        """Save ensemble state to disk."""
+        """Save ensemble state to disk (atomic write)."""
+        import tempfile
         state = {
             'models': {
                 name: {
@@ -529,8 +528,17 @@ class EnsembleModel:
         }
         path = 'data/ensemble_state.json'
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-        with open(path, 'w') as f:
-            json.dump(state, f, indent=2, default=str)
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path) or '.', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w') as f:
+                json.dump(state, f, indent=2, default=str)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def _load_state(self) -> None:
         """Load ensemble state from disk."""

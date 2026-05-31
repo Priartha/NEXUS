@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import httpx
-import json
-import math
 import time
 from typing import Any
 
@@ -271,8 +269,13 @@ async def binance_get_analysis(
     
     avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else sum(gains) / len(gains)
     avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else sum(losses) / len(losses)
-    rs = avg_gain / avg_loss if avg_loss > 0 else 100
-    rsi = 100 - (100 / (1 + rs))
+    if avg_loss == 0:
+        rsi = 100.0 if avg_gain > 0 else 50.0
+    elif avg_gain == 0:
+        rsi = 0.0
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
     
     # Volatility (ATR approximation)
     atr_values = []

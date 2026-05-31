@@ -58,21 +58,31 @@ class RateLimiter:
             now = time.time()
 
             state.requests = [t for t in state.requests if t > now - 60.0]
-            state.requests.append(now)
 
-            if len(state.requests) > config.requests_per_minute:
+            # Prune expired weight
+            one_minute_ago = now - 60.0
+            old_weight = sum(w for t, w in getattr(state, '_weight_log', []) if t <= one_minute_ago)
+            if old_weight > 0:
+                state.total_weight = max(0, state.total_weight - old_weight)
+                state._weight_log = [(t, w) for t, w in getattr(state, '_weight_log', []) if t > one_minute_ago]
+
+            if len(state.requests) >= config.requests_per_minute:
                 self._maybe_warn(endpoint, config, state)
                 return False
 
             recent_1s = [t for t in state.requests if t > now - 1.0]
-            if len(recent_1s) > config.requests_per_second:
+            if len(recent_1s) >= config.requests_per_second:
                 return False
 
             state.total_weight += weight
+            if not hasattr(state, '_weight_log'):
+                state._weight_log = []
+            state._weight_log.append((now, weight))
             if state.total_weight > config.max_weight_per_minute:
                 self._maybe_warn(endpoint, config, state)
                 return False
 
+            state.requests.append(now)
             return True
 
     async def wait_for_slot(self, endpoint: str = "default", weight: int = 1, timeout: float = 10.0) -> bool:

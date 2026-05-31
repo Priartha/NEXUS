@@ -84,6 +84,8 @@ def detect_market_regime(
     if is_structured_trend and is_ema_aligned and is_efficient:
         phase = "trending"
         bias = structure["direction"]
+        if bias == "neutral":
+            bias = "bullish" if emas_aligned_bullish else "bearish" if emas_aligned_bearish else "neutral"
         confidence = min(0.92, 0.55 + efficiency * 0.25 + (0.10 if is_ema_aligned else 0))
         reasons = [
             f"Structure: {structure['pattern']}",

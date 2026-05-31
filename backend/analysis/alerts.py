@@ -6,6 +6,24 @@ from typing import Any
 
 from backend.storage import repository as repo
 
+# Per-alert-type rate tracking: alert_type -> list of unix timestamps
+_alert_timestamps: dict[str, list[float]] = {}
+
+
+def _throttled(alert_type: str) -> bool:
+    """Check if this alert type has exceeded the configured rate limit.
+    Returns True if the alert should be suppressed (throttled)."""
+    config = repo.get_alert_config()
+    max_per_hour = config.get("max_alerts_per_hour", 20)
+    now = time.time()
+    ts_list = _alert_timestamps.get(alert_type, [])
+    ts_list = [t for t in ts_list if now - t < 3600]
+    if len(ts_list) >= max_per_hour:
+        return True
+    ts_list.append(now)
+    _alert_timestamps[alert_type] = ts_list
+    return False
+
 
 def create_alert(
     alert_type: str,
@@ -14,7 +32,9 @@ def create_alert(
     severity: str = "info",
     symbol: str | None = None,
     data: dict | None = None,
-) -> dict:
+) -> dict | None:
+    if _throttled(alert_type):
+        return None
     alert = {
         "id": str(uuid.uuid4()),
         "timestamp": int(time.time() * 1000),

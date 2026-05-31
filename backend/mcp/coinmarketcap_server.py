@@ -2,11 +2,8 @@
 Note: Requires CMC_API_KEY environment variable for authenticated requests."""
 from __future__ import annotations
 
-import asyncio
 import httpx
-import json
 import os
-import time
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -287,7 +284,7 @@ async def cmc_convert_price(
     return {
         "from_symbol": data.get("data", {}).get("symbol"),
         "amount": data.get("data", {}).get("amount"),
-        "converted_amount": _safe_float(quote.get("price")),
+        "converted_amount": _safe_float(quote.get("price")) * amount,
         "converted_currency": convert,
         "price_per_unit": _safe_float(quote.get("price")),
     }

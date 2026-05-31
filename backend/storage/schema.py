@@ -40,7 +40,7 @@ def init_db() -> None:
             side TEXT NOT NULL,
             entry REAL NOT NULL,
             stop_loss REAL NOT NULL,
-            exit_price REAL NOT NULL,
+            exit_price REAL,
             risk_reward REAL NOT NULL,
             confidence REAL NOT NULL,
             reason TEXT NOT NULL,

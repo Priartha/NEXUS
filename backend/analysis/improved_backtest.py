@@ -165,16 +165,17 @@ class ImprovedBacktestEngine:
                 
                 # Check TP1 (50% position)
                 if not trade["tp1_hit"]:
+                    half_commission = trade["commission"] * 0.5
                     if side == "buy" and current.high >= tp1:
                         # Close 50% at TP1
-                        pnl1 = (tp1 - entry) * (qty * 0.5)
+                        pnl1 = (tp1 - entry) * (qty * 0.5) - half_commission
                         trade["tp1_hit"] = True
                         trade["tp1_pnl"] = pnl1
                         trade["remaining_qty"] = qty * 0.5
                         trade["total_pnl"] += pnl1
                         balance += pnl1
                     elif side == "sell" and current.low <= tp1:
-                        pnl1 = (entry - tp1) * (qty * 0.5)
+                        pnl1 = (entry - tp1) * (qty * 0.5) - half_commission
                         trade["tp1_hit"] = True
                         trade["tp1_pnl"] = pnl1
                         trade["remaining_qty"] = qty * 0.5
@@ -185,7 +186,7 @@ class ImprovedBacktestEngine:
                 if bars_held >= self.max_hold_bars:
                     exit_price = current.close
                     remaining_pnl = (exit_price - entry) * trade["remaining_qty"] if side == "buy" else (entry - exit_price) * trade["remaining_qty"]
-                    remaining_pnl -= trade["commission"]
+                    remaining_pnl -= trade["commission"] * 0.5
                     
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
@@ -269,7 +270,7 @@ class ImprovedBacktestEngine:
         returns = [e["account_balance"] / self.initial_balance - 1 for e in equity]
         avg_return = sum(returns) / len(returns) if returns else 0
         std_returns = (sum((r - avg_return) ** 2 for r in returns) / len(returns)) ** 0.5 if len(returns) > 1 else 0
-        sharpe = (avg_return / std_returns * math.sqrt(365)) if std_returns > 0 else 0
+        sharpe = (avg_return / std_returns * math.sqrt(105120)) if std_returns > 0 else 0
         
         max_consecutive_losses = 0
         current_consecutive = 0

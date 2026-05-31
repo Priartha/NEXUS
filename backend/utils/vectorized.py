@@ -35,7 +35,9 @@ def sma(close: np.ndarray, period: int) -> np.ndarray:
     cumsum = np.cumsum(close)
     result = np.empty(len(close))
     result[: period - 1] = np.nan
-    result[period - 1 :] = (cumsum[period - 1 :] - np.concatenate(([0], cumsum[: -period + 1]))) / period
+    result[period - 1] = cumsum[period - 1] / period
+    if len(close) > period:
+        result[period:] = (cumsum[period:] - cumsum[:-period]) / period
     return result
 
 
@@ -130,17 +132,15 @@ def vwap(high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarra
 
 
 def returns(close: np.ndarray) -> np.ndarray:
-    """Simple returns - vectorized."""
-    if len(close) < 2:
-        return np.array([])
-    return np.diff(close) / close[:-1]
+    """Calculate simple returns from close prices. Guards against zero prices."""
+    safe_close = np.where(close == 0, np.nan, close)
+    return np.diff(safe_close) / np.where(safe_close[:-1] == 0, np.nan, safe_close[:-1])
 
 
 def log_returns(close: np.ndarray) -> np.ndarray:
-    """Log returns - vectorized."""
-    if len(close) < 2:
-        return np.array([])
-    return np.diff(np.log(close))
+    """Calculate log returns from close prices. Guards against zero/negative prices."""
+    safe_close = np.where(close <= 0, np.nan, close)
+    return np.diff(np.log(safe_close))
 
 
 def rolling_volatility(close: np.ndarray, period: int = 20) -> np.ndarray:
@@ -157,8 +157,9 @@ def rolling_volatility(close: np.ndarray, period: int = 20) -> np.ndarray:
 def drawdown(close: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Compute drawdown series and max drawdown - vectorized."""
     cummax = np.maximum.accumulate(close)
-    drawdown_series = (close - cummax) / cummax
-    max_drawdown = np.min(drawdown_series)
+    safe_cummax = np.where(cummax == 0, np.nan, cummax)
+    drawdown_series = (close - cummax) / safe_cummax
+    max_drawdown = np.nanmin(drawdown_series)
     return drawdown_series, max_drawdown
 
 

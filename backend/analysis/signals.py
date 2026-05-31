@@ -522,14 +522,26 @@ def _trend_signals(
     if confidence < 0.55:
         return None
 
-    # Entry/Stop/Target with dynamic RR for trend
-    entry = closed_candle.close
+    # ── FIX: Entry at retracement level, NOT at closed candle close ──────────
+    # Root cause: buying the close of a completed pullback candle means the
+    # pullback has already finished — market reverses from here.
+    # Fix: enter at the EMA or FVG level where the pullback originated.
     if direction == "buy":
-        stop = entry - atr14 * 1.5
-        target = entry + (entry - stop) * reward_multiple
+        # Enter near EMA20 (pullback target) or below close for retracement
+        entry_target = min(ema20, ema50)
+        if entry_target < closed_candle.low:
+            entry_target = closed_candle.open
+        entry = max(entry_target, closed_candle.low)
+        stop = min(entry - atr14 * 1.5, ema50 - atr14 * 0.5)
+        target = entry + abs(entry - stop) * reward_multiple
     else:
-        stop = entry + atr14 * 1.5
-        target = entry - (stop - entry) * reward_multiple
+        # Enter near EMA20 (pullback target) or above close for bounce
+        entry_target = max(ema20, ema50)
+        if entry_target > closed_candle.high:
+            entry_target = closed_candle.open
+        entry = min(entry_target, closed_candle.high)
+        stop = max(entry + atr14 * 1.5, ema50 + atr14 * 0.5)
+        target = entry - abs(stop - entry) * reward_multiple
 
     risk = abs(entry - stop)
     if risk < atr14 * 0.8 or risk > atr14 * 3.0:
@@ -602,9 +614,13 @@ def _range_signals(
         if not _is_reversal_candle(closed_candle, prev_candle, "buy"):
             return None
             
-        entry = closed_candle.close
-        stop = support - atr14 * 0.5  # Below support
-        target = support + range_size * 0.5  # Target middle of range
+        # ── FIX: Entry at support level, NOT at bounce candle close ──
+        # Root cause: buying the close of a bounce off support means the
+        # bounce already happened — buy at support, not after the move.
+        entry = min(closed_candle.close, support + atr14 * 0.3)
+        entry = max(entry, support - atr14 * 0.1)
+        stop = support - atr14 * 0.5
+        target = support + range_size * 0.5
         
     else:
         # Sell near resistance
@@ -621,9 +637,11 @@ def _range_signals(
         if not _is_reversal_candle(closed_candle, prev_candle, "sell"):
             return None
             
-        entry = closed_candle.close
-        stop = resistance + atr14 * 0.5  # Above resistance
-        target = resistance - range_size * 0.5  # Target middle of range
+        # ── FIX: Entry at resistance level, NOT at rejection candle close ──
+        entry = max(closed_candle.close, resistance - atr14 * 0.3)
+        entry = min(entry, resistance + atr14 * 0.1)
+        stop = resistance + atr14 * 0.5
+        target = resistance - range_size * 0.5
     
     # Check regime allows range trading
     if regime:
@@ -636,7 +654,7 @@ def _range_signals(
         vol_reason = f"Exhaustion volume ({vol_mult:.1f}x)"
     
     # Confidence based on boundary proximity and RSI
-    boundary_proximity = 1.0 - abs(closed_candle.close - (support if direction == "buy" else resistance)) / boundary_tolerance
+    boundary_proximity = max(0.0, 1.0 - abs(closed_candle.close - (support if direction == "buy" else resistance)) / boundary_tolerance)
     rsi_score = 1.0 - abs(rsi_val - (25 if direction == "buy" else 75)) / 50.0
     rsi_score = max(0, rsi_score)
     

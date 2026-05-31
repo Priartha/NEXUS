@@ -16,7 +16,7 @@ import uuid
 from typing import Any
 
 from backend.analysis.risk_manager import RiskManager
-from backend.analysis.self_aware_agent import agent as ai_agent
+from backend.analysis.self_aware_agent import get_agent
 from backend.models.types import Candle, TradeSignal
 from backend.storage import repository as repo
 
@@ -210,7 +210,7 @@ class PaperTradingEngine:
                 exit_price = candle.close
                 pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
                 commission = trade.get("commission", 0)
-                funding_cost = bars_held * self.funding_rate_per_8h * entry * qty
+                funding_cost = self.funding_rate_per_8h * entry * qty
                 pnl -= commission + funding_cost
                 pnl_pct = pnl / (entry * qty) * 100 if entry * qty else 0
                 repo.close_paper_trade(trade["id"], exit_price, round(pnl, 2), round(pnl_pct, 4), "max_hold_exceeded")
@@ -218,7 +218,7 @@ class PaperTradingEngine:
                 events.append({"type": "trade_closed", "trade_id": trade["id"], "exit_price": exit_price, "pnl": round(pnl, 2), "reason": "max_hold_exceeded"})
                 continue
 
-            funding_cost = bars_held * self.funding_rate_per_8h * entry * qty
+            funding_cost = self.funding_rate_per_8h * entry * qty
 
             if side == "buy":
                 highest = max(trade.get("highest_price", entry), candle.high)
@@ -261,7 +261,7 @@ class PaperTradingEngine:
 
                 try:
                     enriched_features = trade.get("enriched_features")
-                    ai_agent.record_trade_outcome(
+                    get_agent().record_trade_outcome(
                         signal={
                             "signal": side.upper(),
                             "entry": entry,

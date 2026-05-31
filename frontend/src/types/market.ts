@@ -276,7 +276,7 @@ export interface AiIctDecision {
 export interface TradeSignal {
   id: string
   timestamp: number
-  side: 'buy' | 'sell'
+  side: 'long' | 'short'
   entry: number
   stop_loss: number
   trailing_stop?: number | null
@@ -540,7 +540,7 @@ export interface PaperTrade {
   signal_id?: string
   symbol: string
   timeframe: string
-  side: 'buy' | 'sell'
+  side: 'long' | 'short'
   entry_price: number
   stop_loss: number
   take_profit: number
@@ -718,7 +718,7 @@ export function formatPrice(value?: number | null): string {
 }
 
 export function formatTimestamp(timestampMs?: number | null): string {
-  if (!timestampMs) return '--'
+  if (timestampMs == null || timestampMs === 0) return '--'
   return new Intl.DateTimeFormat(undefined, {
     hour: '2-digit',
     minute: '2-digit',
@@ -743,6 +743,7 @@ export interface ScalpFunding {
   timestamp: number
   current_rate: number
   projected_8h: number
+  annualized_rate: number
   next_reset_ms: number
   is_extreme: boolean
   contrarian_bias: string
@@ -822,7 +823,16 @@ export interface ScalpSignal {
   max_hold_minutes: number
   status: string
   entry_triggered: boolean
+  score: number
+  expected_move: number
+  side: string
+  entry: number
+  stop_loss: number
+  exit_price: number
+  model: string
   partial_exit_pct: number
+  funding_impact_pct: number
+  enriched_features?: Record<string, unknown> | null
 }
 
 export interface ScalpWickRejection {

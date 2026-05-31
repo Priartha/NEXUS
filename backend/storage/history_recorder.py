@@ -139,26 +139,32 @@ class HistoryRecorder:
             # Regime
             regime = state.get("regime", {})
             if regime.get("phase"):
-                regime["timestamp"] = now_ms
-                save_regime(regime)
+                regime_copy = {**regime, "timestamp": now_ms}
+                save_regime(regime_copy)
 
             # Metrics
             metrics = state.get("metrics", {})
             if metrics:
-                metrics["timestamp"] = now_ms
-                metrics["symbol"] = state.get("symbol", "BTCUSDT")
-                metrics["timeframe"] = state.get("timeframe", "5m")
-                metrics["price"] = state.get("price")
-                save_metrics(metrics)
+                metrics_copy = {
+                    **metrics,
+                    "timestamp": now_ms,
+                    "symbol": state.get("symbol", "BTCUSDT"),
+                    "timeframe": state.get("timeframe", "5m"),
+                    "price": state.get("price"),
+                }
+                save_metrics(metrics_copy)
 
             # Patterns
             for pattern in state.get("patterns", []):
-                pattern["timestamp"] = now_ms
-                pattern["symbol"] = state.get("symbol", "BTCUSDT")
-                pattern["timeframe"] = state.get("timeframe", "5m")
-                pattern["session"] = state.get("session")
-                pattern["regime_phase"] = regime.get("phase")
-                save_pattern(pattern)
+                pattern_copy = {
+                    **pattern,
+                    "timestamp": now_ms,
+                    "symbol": state.get("symbol", "BTCUSDT"),
+                    "timeframe": state.get("timeframe", "5m"),
+                    "session": state.get("session"),
+                    "regime_phase": regime.get("phase"),
+                }
+                save_pattern(pattern_copy)
 
             # AI Decision
             ai = state.get("ai_decision", {})
@@ -173,18 +179,24 @@ class HistoryRecorder:
                     ai.get("take_profit"),
                 )
                 if marker != self._last_ai_decision_marker:
-                    ai["timestamp"] = now_ms
-                    ai["symbol"] = state.get("symbol", "BTCUSDT")
-                    ai["timeframe"] = state.get("timeframe", "5m")
-                    save_ai_decision(ai)
+                    ai_copy = {
+                        **ai,
+                        "timestamp": now_ms,
+                        "symbol": state.get("symbol", "BTCUSDT"),
+                        "timeframe": state.get("timeframe", "5m"),
+                    }
+                    save_ai_decision(ai_copy)
                     self._last_ai_decision_marker = marker
 
             # Liquidity events
             for event in state.get("liquidity_events", []):
-                event["timestamp"] = now_ms
-                event["symbol"] = state.get("symbol", "BTCUSDT")
-                event["timeframe"] = state.get("timeframe", "5m")
-                save_liquidity_event(event)
+                event_copy = {
+                    **event,
+                    "timestamp": now_ms,
+                    "symbol": state.get("symbol", "BTCUSDT"),
+                    "timeframe": state.get("timeframe", "5m"),
+                }
+                save_liquidity_event(event_copy)
 
             # Orderbook snapshot
             ob = state.get("orderbook", {})
