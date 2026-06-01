@@ -560,8 +560,10 @@ class AnalysisPipeline:
                         'exit_price': trade.get('exit_price', 0),
                     }
                     # Record in ensemble for weight learning
-                    if self.scalp_context and self.scalp_context.signals:
-                        ss = self.scalp_context.signals[0]
+                    # Use trade_data directly instead of scalp_context so outcomes
+                    # are recorded even when the scalp context has been cleared
+                    # (cooldown, SL gate, stale signal gate, etc.).
+                    if trade_data['direction'] != 'unknown':
                         from backend.analysis.ensemble_model import EnsembleScore
                         ens_score = EnsembleScore(
                             direction=trade_data['direction'],
