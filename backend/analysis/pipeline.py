@@ -42,6 +42,7 @@ from backend.models.types import (
     OrderbookDepthLevel,
     OrderbookImbalance,
     PriceProjection,
+    ScalpContext,
     SpreadDynamics,
     Swing,
     TradeSignal,
@@ -400,6 +401,30 @@ class AnalysisPipeline:
             if self._last_scalp_context.signals:
                 display_ctx = self._last_scalp_context
 
+        # ── Stale Signal Gate ───────────────────────────────────────────
+        # A signal is stale if its SL or TP was already hit by the market,
+        # or if its time limit has expired. When stale, we clear both the
+        # display context and the cache so the old signal disappears.
+        if display_ctx and display_ctx.signals and closed_candles:
+            valid_signals: list[ScalpSignal] = []
+            for sig in display_ctx.signals:
+                now_ms = int(time.time() * 1000)
+                expired = sig.time_limit_ms > 0 and now_ms > sig.time_limit_ms
+                is_long = "LONG" in sig.signal_type
+                sl_hit = False
+                tp_hit = False
+                if is_long:
+                    sl_hit = any(c.low <= sig.sl_level for c in closed_candles[-20:])
+                    tp_hit = any(c.high >= sig.target_1 for c in closed_candles[-10:])
+                else:
+                    sl_hit = any(c.high >= sig.sl_level for c in closed_candles[-20:])
+                    tp_hit = any(c.low <= sig.target_1 for c in closed_candles[-10:])
+                if not sl_hit and not tp_hit and not expired:
+                    valid_signals.append(sig)
+            if len(valid_signals) != len(display_ctx.signals):
+                display_ctx = ScalpContext(timestamp=display_ctx.timestamp)
+                self._last_scalp_context = None
+
         # Convert scalping signals to TradeSignal for system compatibility
         scalp_signals_as_trade: list[TradeSignal] = []
         if display_ctx and display_ctx.signals:
@@ -515,8 +540,13 @@ class AnalysisPipeline:
                     self.scalp_risk.record_trade_open(ev.get("trade"))
                 elif ev["type"] == "trade_closed":
                     self.scalp_risk.record_trade_close(ev.get("pnl", 0))
-                    # Feed closed trade to ensemble model and self-optimizer
+                    # Notify scalp engine when a trade is stopped out
+                    reason = ev.get("reason", "")
                     trade = ev.get("trade", {})
+                    side = trade.get("side", "")
+                    if reason == "stop_loss" and side and hasattr(self, 'scalp_engine'):
+                        self.scalp_engine.record_sl_hit(side)
+                    # Feed closed trade to ensemble model and self-optimizer
                     trade_data = {
                         'direction': trade.get('side', 'unknown'),
                         'regime': trade.get('regime', self.regime.phase if self.regime else 'unknown'),

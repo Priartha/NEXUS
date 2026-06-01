@@ -138,6 +138,13 @@ class UnifiedScalpEngine:
         self._last_aggregated_spread_pct: float = 0.0
         self._last_exchange_count: int = 0
         self.anomaly_detector = MarketAnomalyDetector()
+        # SL breach tracking — prevents showing new signals after previous SL was hit
+        self._last_sl_level: float = 0.0
+        self._last_sl_side: str = ""
+        self._last_sl_signal_ts: int = 0
+        self._sl_breached: bool = False
+        self._sl_breached_at_ms: int = 0
+        self._sl_cooldown_ms: int = 15 * 60 * 1000  # 15m cooldown after SL hit
 
     def ingest_quote(self, q: MarketQuote) -> None:
         self._quotes.append(q)
@@ -219,6 +226,39 @@ class UnifiedScalpEngine:
             issues.append(f"Stale candles: last candle {stale_ms//60000}m ago")
 
         return issues
+
+    def record_sl_hit(self, side: str) -> None:
+        self._sl_breached = True
+        self._sl_breached_at_ms = int(time.time() * 1000)
+        logger.info("Scalp SL breach recorded for side=%s — blocking same-direction signals for %d minutes",
+                     side, self._sl_cooldown_ms // 60000)
+
+    def _previous_sl_breached(self, candles: list[Candle], now_ms: int) -> str:
+        if not self._last_sl_level or not self._last_sl_side or not self._last_sl_signal_ts:
+            return ""
+        if not candles:
+            return ""
+        latest = max(c.timestamp for c in candles)
+        age_ms = latest - self._last_sl_signal_ts
+        if age_ms > self._sl_cooldown_ms:
+            return ""
+        recent = [c for c in candles if c.timestamp >= self._last_sl_signal_ts - 300000]
+        if self._last_sl_side == "long":
+            if any(c.low <= self._last_sl_level for c in recent):
+                self._sl_breached = True
+                self._sl_breached_at_ms = now_ms
+                return "long"
+        elif self._last_sl_side == "short":
+            if any(c.high >= self._last_sl_level for c in recent):
+                self._sl_breached = True
+                self._sl_breached_at_ms = now_ms
+                return "short"
+        return ""
+
+    def _sl_cooldown_active(self, now_ms: int, side: str, check_ts: int) -> bool:
+        effective_cooldown = max(self._sl_cooldown_ms, self._signal_cooldown_ms * 2)
+        elapsed = now_ms - self._sl_breached_at_ms
+        return elapsed < effective_cooldown
 
     def compute(
         self,
@@ -302,6 +342,12 @@ class UnifiedScalpEngine:
         self._cs_advisory = cs_advisory
         for b in severe_cs:
             logger.warning("Common sense block: %s", b)
+
+        # ── SL Breach Gate ─────────────────────────────────────────────
+        # If the previous scalp signal's SL was hit by price, block new
+        # signals in the same direction to avoid re-entry into a losing setup.
+        breached_side = self._previous_sl_breached(ordered, now_ms)
+        self._sl_breached = bool(breached_side)
 
         # ── Hard signal blockers ──
         blockers = self._filters(ordered, funding, funding_rate, futures_context)
@@ -420,11 +466,21 @@ class UnifiedScalpEngine:
             winning_reasons.extend(ensemble_result.reasons[:3])
             edge = abs(blended_long - 0.5) * 2
 
+        # ── SL Breach Cooldown ──────────────────────────────────────────
+        # After a previous signal's SL was hit, block new same-direction
+        # signals for the cooldown period to avoid re-entering a losing setup.
+        sl_blocker = ""
+        if self._last_sl_side == winning_side and self._sl_cooldown_active(now_ms, winning_side, self._sl_breached_at_ms):
+            remaining = (self._sl_cooldown_ms - (now_ms - self._sl_breached_at_ms)) // 60000
+            sl_blocker = f"SL breach cooldown: {remaining}m remaining for {winning_side}"
+
         quality_blockers = self._signal_quality_blockers(
             ordered, winning_side, winning_score, 1.0 - winning_score if agent_has_signal else (short_score if winning_side == "long" else long_score),
             regime, threshold, winning_reasons,
             adaptive_edge=adaptive_params.get('min_edge', settings.scalp_min_directional_edge),
         )
+        if sl_blocker:
+            quality_blockers.append(sl_blocker)
 
         if quality_blockers:
             ctx = ScalpContext(
@@ -514,6 +570,15 @@ class UnifiedScalpEngine:
             elif short_score >= threshold and short_score > long_score:
                 signals.append(self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate, candle=last_candle))
                 self._last_signal_ts = cooldown_ts
+
+        # Track last signal SL for breach detection on next cycle
+        if signals and len(signals) > 0:
+            sig = signals[-1]
+            self._last_sl_level = sig.sl_level
+            self._last_sl_side = "long" if "LONG" in sig.signal_type else "short"
+            self._last_sl_signal_ts = cooldown_ts
+            self._sl_breached = False
+            self._sl_breached_at_ms = 0
 
         ctx = ScalpContext(
             timestamp=now_ms,
