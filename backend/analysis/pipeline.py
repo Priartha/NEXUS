@@ -422,7 +422,8 @@ class AnalysisPipeline:
                 if not sl_hit and not tp_hit and not expired:
                     valid_signals.append(sig)
             if len(valid_signals) != len(display_ctx.signals):
-                display_ctx = ScalpContext(timestamp=display_ctx.timestamp)
+                ai_brain = display_ctx.ai_intelligence or getattr(self.scalp_context, 'ai_intelligence', None)
+                display_ctx = ScalpContext(timestamp=display_ctx.timestamp, ai_intelligence=ai_brain)
                 self._last_scalp_context = None
 
         # Convert scalping signals to TradeSignal for system compatibility
