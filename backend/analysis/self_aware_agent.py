@@ -1069,7 +1069,9 @@ class SelfAwareTradingAgent:
             self.correct_decisions += 1
 
     def _record_decision(self, signal: dict, candle_timestamp: int, timeframe: str = "5m") -> None:
-        """Count one actionable AI decision per closed candle and side."""
+        """Deduplicate analysis cycles — no longer increments total_decisions.
+        The agent's decisions/accuracy now reflect only actual trade outcomes
+        recorded via record_trade_outcome(), not every candle analysis cycle."""
         from backend.analysis.ids import stable_id
         sig = signal.get("signal", "")
         direction = "long" if sig == "LONG" else "short"
@@ -1079,7 +1081,6 @@ class SelfAwareTradingAgent:
         if decision_id in self._decision_ids:
             return
         self._decision_ids.add(decision_id)
-        self.total_decisions += 1
 
         # NOTE: Prediction is recorded in unified_scalp.py compute() using
         # the actual ScalpSignal ID — NOT here — to guarantee ID consistency
@@ -1333,9 +1334,13 @@ class SelfAwareTradingAgent:
             )
             self.memory.add_trade(memory)
             self._loaded_trade_ids.add(trade_id)
-            self.total_decisions = max(self.total_decisions, self.memory.total_trades)
-            self.correct_decisions = max(self.correct_decisions, self.memory.winning_trades)
             loaded += 1
+        # Sync decision counters from memory to discard any inflation from
+        # the old _record_decision() path (which counted every candle analysis
+        # as a decision). Now only actual trade outcomes count.
+        if loaded > 0:
+            self.total_decisions = self.memory.total_trades
+            self.correct_decisions = self.memory.winning_trades
         return loaded
 
     @staticmethod
@@ -1389,10 +1394,12 @@ class SelfAwareTradingAgent:
         try:
             with open(path, "r") as f:
                 state = json.load(f)
-            self.total_decisions = state.get("total_decisions", 0)
-            self.correct_decisions = state.get("correct_decisions", 0)
             self._decision_ids = set(state.get("_decision_ids", []))
             self._loaded_trade_ids = set(state.get("_loaded_trade_ids", []))
+            # Sync counters from memory to discard any inflation from the
+            # old _record_decision() path that counted every candle as a decision.
+            self.total_decisions = self.memory.total_trades
+            self.correct_decisions = self.memory.winning_trades
             return True
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             return False
