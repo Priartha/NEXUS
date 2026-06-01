@@ -579,6 +579,16 @@ class UnifiedScalpEngine:
             self._last_sl_signal_ts = cooldown_ts
             self._sl_breached = False
             self._sl_breached_at_ms = 0
+            # Record prediction using the actual signal ID so paper trading
+            # outcomes can be matched back to this prediction.
+            from backend.analysis.model_tracker import model_tracker
+            model_tracker.record_prediction(
+                signal_id=sig.id,
+                timeframe=timeframe,
+                predicted_direction=self._last_sl_side,
+                predicted_grade=sig.confidence,
+                predicted_confidence=sig.score,
+            )
 
         ctx = ScalpContext(
             timestamp=now_ms,

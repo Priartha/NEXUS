@@ -1081,15 +1081,9 @@ class SelfAwareTradingAgent:
         self._decision_ids.add(decision_id)
         self.total_decisions += 1
 
-        if sig in ("LONG", "SHORT"):
-            from backend.analysis.model_tracker import model_tracker
-            model_tracker.record_prediction(
-                signal_id=decision_id,
-                timeframe=timeframe,
-                predicted_direction=direction,
-                predicted_grade=signal.get("pattern_type", "unknown"),
-                predicted_confidence=signal.get("confidence", 0.5),
-            )
+        # NOTE: Prediction is recorded in unified_scalp.py compute() using
+        # the actual ScalpSignal ID — NOT here — to guarantee ID consistency
+        # between prediction and trade outcome lookup.
     
     def _detect_regime(self, candles: list[Candle]) -> str:
         """Detect current market regime from price action."""

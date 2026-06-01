@@ -534,6 +534,7 @@ class AnalysisPipeline:
             events = self._paper_trading.evaluate_signals(
                 signals, candle, symbol=store.symbol, timeframe=store.timeframe,
                 mtf_confluence=mtf,
+                regime=self.regime.phase if self.regime else "unknown",
             )
             for ev in events:
                 if ev["type"] == "trade_opened":

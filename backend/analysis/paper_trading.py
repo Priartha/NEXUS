@@ -67,6 +67,7 @@ class PaperTradingEngine:
         symbol: str = "BTC/USDT",
         timeframe: str = "5m",
         mtf_confluence: dict | None = None,
+        regime: str = "unknown",
     ) -> list[dict]:
         if not self.enabled:
             return []
@@ -167,6 +168,7 @@ class PaperTradingEngine:
             "slippage_pct": round(slippage / best.entry * 100 if best.entry > 0 else 0, 4),
             "commission": round(commission, 2),
             "funding_rate": self.funding_rate_per_8h,
+            "regime": regime,
             "enriched_features": getattr(best, 'enriched_features', None),
         }
         repo.save_paper_trade(trade)
@@ -290,7 +292,7 @@ class PaperTradingEngine:
                                 **(enriched_features if isinstance(enriched_features, dict) else {}),
                             },
                             "enriched_features": enriched_features if isinstance(enriched_features, dict) else None,
-                            "regime": "unknown",
+                            "regime": trade.get("regime", "unknown"),
                             "reason": trade.get("reason", ""),
                         },
                         exit_price=exit_price,
