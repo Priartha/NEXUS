@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { DollarSign, TrendingUp, TrendingDown, Activity, BarChart3, Play, Square, RefreshCw } from 'lucide-react'
+import { DollarSign, TrendingUp, TrendingDown, Activity, BarChart3, Play, Square, RefreshCw, CheckCircle2 } from 'lucide-react'
 import type { PaperTrade } from '../types/market'
 import { useChartStore } from '../store/chartStore'
 
@@ -116,6 +116,13 @@ export default function PaperTradingPanel() {
               <strong className="pt-stat-val red">{stats.losing_trades}</strong>
             </div>
           </div>
+          <div className="pt-stat">
+            <CheckCircle2 size={13} />
+            <div>
+              <span className="pt-stat-label">Closed</span>
+              <strong className="pt-stat-val">{stats.closed_trades}</strong>
+            </div>
+          </div>
         </div>
       )}
 
@@ -166,6 +173,7 @@ export default function PaperTradingPanel() {
               const pnl = t.pnl ?? 0
               return (
                 <div key={i} className={`pt-closed-row ${pnl >= 0 ? 'green' : 'red'}`}>
+                  <span className="pt-c-status">CLOSED</span>
                   <span className="pt-c-side">{t.side?.toUpperCase()}</span>
                   <span className="pt-c-entry">${t.entry_price?.toFixed(0)}</span>
                   <span className="pt-c-exit">${t.exit_price?.toFixed(0)}</span>

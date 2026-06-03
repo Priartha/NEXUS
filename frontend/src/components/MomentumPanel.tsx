@@ -1,8 +1,8 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
+import { TrendingUp, TrendingDown, Activity, BarChart3, Zap } from 'lucide-react'
 import { useChartStore } from '../store/chartStore'
-import { Zap, TrendingUp, TrendingDown, Activity, BarChart3 } from 'lucide-react'
 
-export function MomentumPanel() {
+export const MomentumPanel = memo(function MomentumPanel() {
   const metrics = useChartStore((state) => state.metrics)
   const signals = useChartStore((state) => state.signals)
   const regime = useChartStore((state) => state.regime)
@@ -198,4 +198,4 @@ export function MomentumPanel() {
       )}
     </div>
   )
-}
+})

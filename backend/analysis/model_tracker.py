@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -36,7 +37,7 @@ class PredictionRecord:
 class ModelMetrics:
     total_predictions: int = 0
     correct_predictions: int = 0
-    accuracy: float = 0.0
+    accuracy: float | None = None
     avg_confidence: float = 0.0
     avg_return_when_correct: float = 0.0
     avg_return_when_wrong: float = 0.0
@@ -84,6 +85,20 @@ class ModelPerformanceTracker:
                 )
             """)
             conn.commit()
+            # Clean stale predictions that never received an outcome
+            deleted = conn.execute(
+                "DELETE FROM model_predictions WHERE actual_direction = '' AND timestamp < ?",
+                (int(time.time() * 1000) - 3600000,),
+            ).rowcount
+            if deleted:
+                logger.info("Cleaned %d stale model predictions (no outcome)", deleted)
+            # Retention: remove completed predictions older than 90 days
+            deleted_old = conn.execute(
+                "DELETE FROM model_predictions WHERE actual_direction != '' AND timestamp < ?",
+                (int(time.time() * 1000) - 90 * 86400000,),
+            ).rowcount
+            if deleted_old:
+                logger.info("Cleaned %d old completed predictions (>90 days)", deleted_old)
         finally:
             conn.close()
 
@@ -98,6 +113,20 @@ class ModelPerformanceTracker:
         """Record a new model prediction."""
         conn = get_conn()
         try:
+            conn.execute("""
+                INSERT OR IGNORE INTO model_predictions
+                (id, timestamp, timeframe, predicted_direction, predicted_grade,
+                 predicted_confidence, actual_direction, actual_return, was_correct, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, '', 0, 0, ?)
+            """, (
+                signal_id, int(time.time() * 1000), timeframe,
+                predicted_direction, predicted_grade, predicted_confidence,
+                int(time.time() * 1000),
+            ))
+            conn.commit()
+        except sqlite3.OperationalError:
+            self._init_db()
+            conn = get_conn()
             conn.execute("""
                 INSERT OR IGNORE INTO model_predictions
                 (id, timestamp, timeframe, predicted_direction, predicted_grade,
@@ -135,6 +164,8 @@ class ModelPerformanceTracker:
                 WHERE id=?
             """, (actual_direction, actual_return, was_correct, hold_period_bars, signal_id))
             conn.commit()
+        except sqlite3.OperationalError:
+            self._init_db()
         finally:
             conn.close()
 
@@ -260,7 +291,7 @@ class ModelPerformanceTracker:
                 "timestamp": int(time.time() * 1000),
             })
 
-        if metrics.accuracy < 0.40 and metrics.total_predictions > 20:
+        if metrics.accuracy is not None and metrics.accuracy < 0.40 and metrics.total_predictions > 20:
             alerts.append({
                 "type": "low_accuracy",
                 "severity": "critical",

@@ -477,6 +477,88 @@ def _compute_trap_risk(candles: list[Candle], psychology_signals: list[Psycholog
     return min(max(risk, 0.0), 1.0)
 
 
+def _detect_cvd_divergence(candles: list[Candle]) -> list[PsychologySignal]:
+    """Detect hidden / regular CVD divergence between price and volume delta.
+
+    Proxy CVD = volume * ((close - open) / (high - low)) gives a rough
+    estimate of net buying (+) vs selling (-) pressure per candle.
+    When price makes higher highs but proxy CVD makes lower highs = bearish divergence.
+    When price makes lower lows but proxy CVD makes higher lows = bullish divergence.
+    """
+    signals = []
+    if len(candles) < 30:
+        return signals
+
+    recent = candles[-30:]
+    closes = [c.close for c in recent]
+    highs = [c.high for c in recent]
+    lows = [c.low for c in recent]
+
+    # Compute proxy CVD per candle: signed volume delta
+    cvd_values = []
+    for c in recent:
+        rng = c.high - c.low
+        if rng > 0:
+            delta = (c.close - c.open) / rng  # -1 to +1
+            cvd_values.append(c.volume * delta)
+        else:
+            cvd_values.append(0.0)
+
+    # Cumulative CVD
+    cum_cvd = []
+    running = 0.0
+    for v in cvd_values:
+        running += v
+        cum_cvd.append(running)
+
+    last_15_closes = closes[-15:]
+    last_15_cvd = cum_cvd[-15:]
+
+    # Bullish divergence: price makes lower low, CVD makes higher low
+    ll_idx = last_15_closes.index(min(last_15_closes))
+    hl_idx = last_15_cvd.index(min(last_15_cvd))
+    if ll_idx > 0 and hl_idx > 0:
+        price_ll = last_15_closes[ll_idx]
+        cvd_ll = last_15_cvd[hl_idx]
+        if (price_ll < last_15_closes[0] and cvd_ll > last_15_cvd[0] and
+                last_15_cvd[-1] > cvd_ll * 1.02):
+            strength = min(abs(last_15_closes[-1] - price_ll) / price_ll * 100, 1.0)
+            signals.append(PsychologySignal(
+                id=f"cvd_bull_div_{recent[-1].timestamp}",
+                timestamp=recent[-1].timestamp,
+                type="smart_money_entry",
+                side="bullish",
+                intensity=strength,
+                confidence=0.70,
+                description="Bullish CVD divergence: price lower low, volume delta higher low",
+                price_level=closes[-1],
+                reason="Smart money buying into weakness — hidden accumulation"
+            ))
+
+    # Bearish divergence: price makes higher high, CVD makes lower high
+    hh_idx = last_15_closes.index(max(last_15_closes))
+    lh_idx = last_15_cvd.index(max(last_15_cvd))
+    if hh_idx > 0 and lh_idx > 0:
+        price_hh = last_15_closes[hh_idx]
+        cvd_hh = last_15_cvd[lh_idx]
+        if (price_hh > last_15_closes[0] and cvd_hh < last_15_cvd[0] and
+                last_15_cvd[-1] < cvd_hh * 0.98):
+            strength = min(abs(price_hh - last_15_closes[-1]) / price_hh * 100, 1.0)
+            signals.append(PsychologySignal(
+                id=f"cvd_bear_div_{recent[-1].timestamp}",
+                timestamp=recent[-1].timestamp,
+                type="smart_money_exit",
+                side="bearish",
+                intensity=strength,
+                confidence=0.70,
+                description="Bearish CVD divergence: price higher high, volume delta lower high",
+                price_level=closes[-1],
+                reason="Smart money distributing into strength — hidden distribution"
+            ))
+
+    return signals
+
+
 def _compute_conviction(candles: list[Candle]) -> float:
     """Compute how reliable/convincing the current price action is."""
     if len(candles) < 20:
@@ -613,12 +695,13 @@ def detect_market_psychology(
     smart_money_activity, sm_signals = _detect_smart_money_activity(candles)
     emotional_state, emotion_signals = _detect_emotional_extremes(candles)
     trap_signals = _detect_retail_traps(candles, liquidity_events)
+    cvd_signals = _detect_cvd_divergence(candles)
     psychological_levels = _find_psychological_levels(candles)
     trap_risk = _compute_trap_risk(candles, trap_signals)
     conviction = _compute_conviction(candles)
 
     # Combine all signals
-    all_signals = sm_signals + emotion_signals + trap_signals
+    all_signals = sm_signals + emotion_signals + trap_signals + cvd_signals
 
     # Generate summary
     summary_parts = []

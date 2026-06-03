@@ -2,34 +2,27 @@ import { Component, useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   AlertTriangle,
+  BarChart2,
+  Bell,
   Brain,
   BrainCircuit,
+  Compass,
   Crosshair,
-  Eye,
+  Cpu,
+  Database,
+  Globe,
   Gauge,
+  Layers,
   Orbit,
+  Radar,
   RefreshCw,
+  Settings,
+  Shield,
   Target,
+  Timer,
   TrendingDown,
   TrendingUp,
   Zap,
-  Layers,
-  BarChart2,
-  Waves,
-  Flame,
-  Compass,
-  Shield,
-  Cpu,
-  GitBranch,
-  ArrowUpRight,
-  ArrowDownRight,
-  Minus,
-  Radar,
-  Timer,
-  Settings,
-  Globe,
-  Database,
-  Bell,
 } from 'lucide-react'
 import './App.css'
 import { Chart } from './components/Chart'
@@ -50,6 +43,8 @@ import { ScalpingPanel } from './components/ScalpingPanel'
 import SignalLogPanel from './components/SignalLogPanel'
 import { AIBrainPanel } from './components/AIBrainPanel'
 import { AiLabPanel } from './components/AiLabPanel'
+import { PatternsPanel } from './components/PatternsPanel'
+import { SESSION_COLORS } from './components/panelConstants'
 
 import AlertsPanel from './components/AlertsPanel'
 import BacktestPanel from './components/BacktestPanel'
@@ -63,7 +58,7 @@ import {
   formatTimestamp,
 } from './types/market'
 
-type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab'
+export type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab'
 const PANEL_VIEWS: readonly PanelView[] = [
   'signals',
   'scalp',
@@ -87,21 +82,6 @@ const PANEL_VIEWS: readonly PanelView[] = [
   'db-status',
   'psychology',
 ]
-
-const SESSION_COLORS: Record<string, string> = {
-  asian: '#8ab4f8',
-  london: '#f59f43',
-  ny: '#1fe3a3',
-  ny_close: '#ff5b6b',
-}
-
-const REGIME_COLORS: Record<string, string> = {
-  accumulation: '#1fe3a3',
-  distribution: '#ff5b6b',
-  consolidation: '#8ab4f8',
-  range_bound: '#f59f43',
-  trending: '#ffffff',
-}
 
 type RuntimeGuardProps = {
   children: ReactNode
@@ -172,17 +152,12 @@ function AppShell() {
   const feedMessage = useChartStore((state) => state.feedMessage)
   const stats = useChartStore((state) => state.stats)
   const orderbook = useChartStore((state) => state.orderbook)
-  const fvgs = useChartStore((state) => state.fvgs)
-  const orderBlocks = useChartStore((state) => state.orderBlocks)
-  const liquidity = useChartStore((state) => state.liquidity)
   const scalpContext = useChartStore((state) => state.scalpContext)
   const scalpRisk = useChartStore((state) => state.scalpRisk)
 
   const ctx = btcPatterns ?? DEMO_PATTERNS
   const patterns = ctx?.patterns ?? []
-  const behaviors = ctx?.investor_behaviors ?? []
   const patternSignal = ctx?.pattern_signal ?? 'neutral'
-  const isDemo = !btcPatterns
 
   const latest = candles.at(-1)
   const previous = candles.at(-2)
@@ -240,46 +215,12 @@ function AppShell() {
   const [panelView, setPanelView] = useState<PanelView>('signals')
   const latestLiquidityEvent = liquidityEvents.at(-1)
 
-  const topBehaviors = useMemo(
-    () => [...behaviors].sort((a, b) => b.confidence - a.confidence).slice(0, 4),
-    [behaviors],
-  )
-  const bullishCount = patterns.filter((p) => p.direction === 'bullish').length
-  const bearishCount = patterns.filter((p) => p.direction === 'bearish').length
-  const neutralCount = patterns.filter((p) => p.direction === 'neutral').length
-  const avgConfidence = patterns.length
-    ? patterns.reduce((s, p) => s + p.confidence, 0) / patterns.length
-    : 0
-  const avgScore = patterns.length
-    ? patterns.reduce((s, p) => s + p.score, 0) / patterns.length
-    : 0
-  const activeFvgs = fvgs.filter((f) => !f.is_filled)
-  const activeOBs = orderBlocks.filter((ob) => !ob.is_breaker)
-  const activeLiquidity = liquidity.filter((l) => !l.swept)
   const sessionColor = SESSION_COLORS[ctx?.session ?? ''] ?? '#888'
-  const regimeColor = REGIME_COLORS[regime?.phase ?? ''] ?? '#888'
+
   const obImbalances = orderbook?.imbalances ?? []
   const obAccumulations = orderbook?.accumulations ?? []
   const obSpreadDynamics = orderbook?.spread_dynamics ?? []
   const obDepthLevels = orderbook?.depth_levels ?? []
-
-  const [patternFilter, setPatternFilter] = useState<'all' | 'bullish' | 'bearish' | 'neutral'>('all')
-  const [patternView, setPatternView] = useState<'cards' | 'grid'>('cards')
-
-  const filteredPatterns = useMemo(() => {
-    const sorted = [...patterns].sort((a, b) => b.score - a.score)
-    if (patternFilter === 'all') return sorted
-    return sorted.filter((p) => p.direction === patternFilter)
-  }, [patterns, patternFilter])
-
-  const patternBias = useMemo(() => {
-    if (bullishCount === 0 && bearishCount === 0) return 'neutral'
-    const total = bullishCount + bearishCount
-    const bullRatio = bullishCount / total
-    if (bullRatio > 0.65) return 'bullish'
-    if (bullRatio < 0.35) return 'bearish'
-    return 'neutral'
-  }, [bullishCount, bearishCount])
 
   const fallbackSR = useMemo(() => {
     const recent = candles.slice(-48)
@@ -708,338 +649,8 @@ function AppShell() {
             </div>
           )}
 
-          {/* ─── PATTERNS TAB - COMPLETELY REDESIGNED ─ */}
-          {panelView === 'patterns' && (
-            <div className="panel-content">
-              {/* Pattern Overview Dashboard */}
-              <section className="pattern-overview">
-                <div className="pattern-overview-header">
-                  <h2><Radar size={14} /> Pattern Intelligence</h2>
-                  <div className="pattern-view-toggles">
-                    <button
-                      className={`pattern-view-btn ${patternView === 'cards' ? 'active' : ''}`}
-                      onClick={() => setPatternView('cards')}
-                      title="Card view"
-                    >
-                      <Layers size={12} />
-                    </button>
-                    <button
-                      className={`pattern-view-btn ${patternView === 'grid' ? 'active' : ''}`}
-                      onClick={() => setPatternView('grid')}
-                      title="Grid view"
-                    >
-                      <BarChart2 size={12} />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Quick Stats Row */}
-                <div className="pattern-quick-stats">
-                  <div className="pq-stat">
-                    <div className="pq-stat-icon"><Layers size={14} /></div>
-                    <div className="pq-stat-info">
-                      <span className="pq-stat-value">{patterns.length}</span>
-                      <span className="pq-stat-label">Patterns</span>
-                    </div>
-                  </div>
-                  <div className="pq-stat">
-                    <div className="pq-stat-icon"><Eye size={14} /></div>
-                    <div className="pq-stat-info">
-                      <span className="pq-stat-value">{behaviors.length}</span>
-                      <span className="pq-stat-label">Behaviors</span>
-                    </div>
-                  </div>
-                  <div className="pq-stat">
-                    <div className="pq-stat-icon"><Zap size={14} /></div>
-                    <div className="pq-stat-info">
-                      <span className="pq-stat-value">{activeFvgs.length}</span>
-                      <span className="pq-stat-label">Active FVGs</span>
-                    </div>
-                  </div>
-                  <div className="pq-stat">
-                    <div className="pq-stat-icon"><Shield size={14} /></div>
-                    <div className="pq-stat-info">
-                      <span className="pq-stat-value">{activeOBs.length}</span>
-                      <span className="pq-stat-label">Order Blocks</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Bias Meter */}
-                <div className="pattern-bias-meter">
-                  <div className="bias-label">
-                    <span>Pattern Bias</span>
-                    <span className={`bias-badge ${patternBias}`}>
-                      {patternBias === 'bullish' ? <ArrowUpRight size={12} /> : patternBias === 'bearish' ? <ArrowDownRight size={12} /> : <Minus size={12} />}
-                      {patternBias.toUpperCase()}
-                    </span>
-                  </div>
-                  <div className="bias-bar">
-                    <div className="bias-fill-bullish" style={{ width: `${patterns.length > 0 ? (bullishCount / patterns.length) * 100 : 33}%` }} />
-                    <div className="bias-fill-neutral" style={{ width: `${patterns.length > 0 ? (neutralCount / patterns.length) * 100 : 34}%` }} />
-                    <div className="bias-fill-bearish" style={{ width: `${patterns.length > 0 ? (bearishCount / patterns.length) * 100 : 33}%` }} />
-                  </div>
-                  <div className="bias-legend">
-                    <span className="legend-item"><span className="legend-dot bullish" /> Bullish ({bullishCount})</span>
-                    <span className="legend-item"><span className="legend-dot neutral" /> Neutral ({neutralCount})</span>
-                    <span className="legend-item"><span className="legend-dot bearish" /> Bearish ({bearishCount})</span>
-                  </div>
-                </div>
-
-                {/* Scores Summary */}
-                <div className="pattern-scores-row">
-                  <div className="score-chip bullish">
-                    <span className="score-chip-label">Bull Score</span>
-                    <span className="score-chip-value">{(ctx?.bullish_pattern_score ?? 0).toFixed(3)}</span>
-                  </div>
-                  <div className="score-chip bearish">
-                    <span className="score-chip-label">Bear Score</span>
-                    <span className="score-chip-value">{(ctx?.bearish_pattern_score ?? 0).toFixed(3)}</span>
-                  </div>
-                  <div className="score-chip">
-                    <span className="score-chip-label">Avg Conf</span>
-                    <span className="score-chip-value">{(avgConfidence * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="score-chip">
-                    <span className="score-chip-label">Avg Score</span>
-                    <span className="score-chip-value">{(avgScore * 100).toFixed(0)}%</span>
-                  </div>
-                </div>
-
-                {/* Context Grid */}
-                <div className="context-grid">
-                  <div className="context-item">
-                    <span className="ctx-label">Session</span>
-                    <strong className="ctx-value" style={{ color: sessionColor }}>{ctx?.session ?? '--'}</strong>
-                  </div>
-                  <div className="context-item">
-                    <span className="ctx-label">Regime</span>
-                    <strong className="ctx-value" style={{ color: regimeColor }}>{regime?.phase.replaceAll('_', ' ') ?? '--'}</strong>
-                  </div>
-                  <div className="context-item">
-                    <span className="ctx-label">Volatility</span>
-                    <strong className="ctx-value">{ctx?.volatility_regime ?? '--'}</strong>
-                  </div>
-                  <div className="context-item">
-                    <span className="ctx-label">Signal</span>
-                    <strong className={`ctx-value ${patternSignal}`}>{patternSignal}</strong>
-                  </div>
-                </div>
-
-                {isDemo && (
-                  <div className="demo-notice">
-                    <Zap size={11} /> No live data — showing example patterns. Connect backend for real analysis.
-                  </div>
-                )}
-              </section>
-
-              {/* ICT Pattern Zones */}
-              {(activeFvgs.length > 0 || activeOBs.length > 0 || activeLiquidity.length > 0) && (
-                <section className="pattern-zones-section">
-                  <h2><GitBranch size={13} /> ICT Pattern Zones</h2>
-
-                  {/* FVG Zone */}
-                  {activeFvgs.length > 0 && (
-                    <div className="zone-group">
-                      <div className="zone-group-header">
-                        <span className="zone-group-icon fvg-icon"><Zap size={11} /></span>
-                        <span className="zone-group-title">Fair Value Gaps</span>
-                        <span className="zone-group-count">{activeFvgs.length}</span>
-                      </div>
-                      <div className="zone-items">
-                        {activeFvgs.slice(-4).reverse().map((fvg) => (
-                          <div key={fvg.id} className={`zone-item ${fvg.direction}`}>
-                            <div className="zone-item-head">
-                              <span className="zone-item-dir">{fvg.direction === 'bullish' ? '▲ Bull FVG' : '▼ Bear FVG'}</span>
-                              <span className="zone-item-range">${formatPrice(fvg.bottom)} - ${formatPrice(fvg.top)}</span>
-                            </div>
-                            <div className="zone-item-bar">
-                              <div className={`zone-item-fill ${fvg.direction}`} style={{ width: `${Math.min(100, ((fvg.top - fvg.bottom) / (fvg.top || 1)) * 10000)}%` }} />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Order Block Zone */}
-                  {activeOBs.length > 0 && (
-                    <div className="zone-group">
-                      <div className="zone-group-header">
-                        <span className="zone-group-icon ob-icon"><Shield size={11} /></span>
-                        <span className="zone-group-title">Order Blocks</span>
-                        <span className="zone-group-count">{activeOBs.length}</span>
-                      </div>
-                      <div className="zone-items">
-                        {activeOBs.slice(-4).reverse().map((ob) => (
-                          <div key={ob.id} className={`zone-item ${ob.direction}`}>
-                            <div className="zone-item-head">
-                              <span className="zone-item-dir">{ob.direction === 'bullish' ? '▲ Bull OB' : '▼ Bear OB'}{ob.is_breaker ? ' [BREAKER]' : ''}</span>
-                              <span className="zone-item-range">${formatPrice(ob.bottom)} - ${formatPrice(ob.top)}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Liquidity Zone */}
-                  {activeLiquidity.length > 0 && (
-                    <div className="zone-group">
-                      <div className="zone-group-header">
-                        <span className="zone-group-icon liq-icon"><Target size={11} /></span>
-                        <span className="zone-group-title">Liquidity Levels</span>
-                        <span className="zone-group-count">{activeLiquidity.length}</span>
-                      </div>
-                      <div className="zone-items">
-                        {activeLiquidity.slice(-4).reverse().map((liq) => (
-                          <div key={liq.id} className={`zone-item ${liq.kind === 'equal_high' ? 'bearish' : 'bullish'}`}>
-                            <div className="zone-item-head">
-                              <span className="zone-item-dir">{liq.kind === 'equal_high' ? '▼ EQH' : '▲ EQL'}</span>
-                              <span className="zone-item-range">${formatPrice(liq.price)} ({liq.touch_count} touches)</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </section>
-              )}
-
-              {/* Fractal Clusters */}
-              {(ctx?.fractal_clusters?.length ?? 0) > 0 && (
-                <section>
-                  <h2><Waves size={13} /> Fractal Clusters</h2>
-                  <div className="cluster-pills">
-                    {ctx!.fractal_clusters.map((c) => (
-                      <span key={c} className="pill fractal-pill">{c.replace('near_pivot_', '$')}</span>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {/* Movement Patterns */}
-              {filteredPatterns.length > 0 && (
-                <section>
-                  <div className="section-header-with-filter">
-                    <h2><Flame size={13} /> Movement Patterns</h2>
-                    <div className="pattern-filter-btns">
-                      {(['all', 'bullish', 'bearish', 'neutral'] as const).map((f) => (
-                        <button
-                          key={f}
-                          className={`filter-btn ${patternFilter === f ? 'active' : ''} ${f}`}
-                          onClick={() => setPatternFilter(f)}
-                        >
-                          {f === 'all' ? 'All' : f === 'bullish' ? '▲ Bull' : f === 'bearish' ? '▼ Bear' : '— Neutral'}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {patternView === 'cards' ? (
-                    <div className="card-list pattern-card-list">
-                      {filteredPatterns.map((p) => (
-                        <div key={p.id} className={`pattern-card ${p.direction} ${p.completed ? 'completed' : ''}`}>
-                          <div className="pattern-card-header">
-                            <div className="pattern-card-icon">
-                              {p.direction === 'bullish' ? <TrendingUp size={14} /> : p.direction === 'bearish' ? <TrendingDown size={14} /> : <Orbit size={14} />}
-                            </div>
-                            <div className="pattern-card-info">
-                              <span className="pattern-card-name">{p.name.replaceAll('_', ' ')}</span>
-                              <span className="pattern-card-meta">
-                                <span className={`pattern-card-dir ${p.direction}`}>{p.direction}</span>
-                                {p.completed && <span className="pattern-card-completed">completed</span>}
-                              </span>
-                            </div>
-                            <div className="pattern-card-scores">
-                              <div className="pattern-score-badge">
-                                <span className="psb-label">Score</span>
-                                <span className="psb-value">{(p.score * 100).toFixed(0)}%</span>
-                              </div>
-                            </div>
-                          </div>
-                          <div className="pattern-card-progress">
-                            <div className="pattern-progress-track">
-                              <div className={`pattern-progress-fill ${p.direction}`} style={{ width: `${p.confidence * 100}%` }} />
-                            </div>
-                            <span className="pattern-conf-label">{(p.confidence * 100).toFixed(0)}% confidence</span>
-                          </div>
-                          <p className="pattern-card-desc">{p.description}</p>
-                          {p.candle_count > 0 && (
-                            <div className="pattern-card-footer">
-                              <span><Timer size={10} /> {p.candle_count} candles</span>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="pattern-grid-view">
-                      {filteredPatterns.map((p) => (
-                        <div key={p.id} className={`pattern-grid-card ${p.direction}`}>
-                          <div className="pgc-icon">
-                            {p.direction === 'bullish' ? <TrendingUp size={16} /> : p.direction === 'bearish' ? <TrendingDown size={16} /> : <Orbit size={16} />}
-                          </div>
-                          <div className="pgc-name">{p.name.replaceAll('_', ' ')}</div>
-                          <div className="pgc-score">{(p.score * 100).toFixed(0)}%</div>
-                          <div className="pgc-conf">{(p.confidence * 100).toFixed(0)}%</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              )}
-
-              {/* Investor Behaviors */}
-              {topBehaviors.length > 0 && (
-                <section>
-                  <h2><Cpu size={13} /> Investor Behavior</h2>
-                  <div className="card-list">
-                    {topBehaviors.map((b) => (
-                      <div key={b.id} className={`behavior-card ${b.side} ${b.is_active ? 'active' : ''}`}>
-                        <div className="behavior-card-header">
-                          <div className="behavior-card-icon">
-                            {b.side === 'bullish' ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
-                          </div>
-                          <div className="behavior-card-info">
-                            <span className="behavior-card-type">{b.behavior_type.replaceAll('_', ' ')}</span>
-                            <span className="behavior-card-meta">
-                              <span className={`behavior-side-badge ${b.side}`}>{b.side}</span>
-                              {b.is_active && <span className="behavior-active-badge">active</span>}
-                            </span>
-                          </div>
-                          <div className="behavior-card-confidence">
-                            <div className="behavior-conf-ring" style={{ '--conf': b.confidence } as React.CSSProperties}>
-                              <span>{(b.confidence * 100).toFixed(0)}%</span>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="behavior-card-progress">
-                          <div className="behavior-progress-track">
-                            <div className={`behavior-progress-fill ${b.side}`} style={{ width: `${b.confidence * 100}%` }} />
-                          </div>
-                          <span className="behavior-intensity-label">Intensity: {(b.intensity * 100).toFixed(0)}%</span>
-                        </div>
-                        <p className="behavior-card-desc">{b.description}</p>
-                        {b.price_level != null && (
-                          <div className="behavior-card-footer">
-                            <span><Target size={10} /> ${formatPrice(b.price_level)}</span>
-                            {b.volume_ratio != null && <span><BarChart2 size={10} /> {b.volume_ratio.toFixed(1)}× vol</span>}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {patterns.length === 0 && behaviors.length === 0 && (
-                <section>
-                  <p className="empty-state">No active patterns detected. Waiting for sufficient candle data.</p>
-                </section>
-              )}
-            </div>
-          )}
+          {/* ─── PATTERNS TAB ─ */}
+          {panelView === 'patterns' && <PatternsPanel />}
 
           {/* ─── TRADES (Paper Trading) TAB ──────────── */}
           {panelView === 'trades' && (

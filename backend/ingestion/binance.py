@@ -110,8 +110,7 @@ async def start_binance_stream(
             logger.info(f"Connecting to Binance WebSocket: {stream_url}")
             async with websockets.connect(
                 stream_url,
-                ping_interval=20,
-                ping_timeout=10,
+                ping_interval=None,
                 close_timeout=5,
                 max_queue=1024,
             ) as websocket:

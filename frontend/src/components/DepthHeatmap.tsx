@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 import type { OrderbookDepthLevel } from '../types/market'
 import { formatPrice } from '../types/market'
 
@@ -6,7 +6,7 @@ interface Props {
   depthLevels: OrderbookDepthLevel[]
 }
 
-export default function DepthHeatmap({ depthLevels }: Props) {
+const DepthHeatmap = memo(function DepthHeatmap({ depthLevels }: Props) {
   const maxSaturation = useMemo(
     () => Math.max(...depthLevels.map((d) => d.saturation), 0.01),
     [depthLevels],
@@ -54,4 +54,6 @@ export default function DepthHeatmap({ depthLevels }: Props) {
       </div>
     </div>
   )
-}
+})
+
+export default DepthHeatmap

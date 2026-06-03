@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from typing import Any, Callable
 
@@ -93,6 +94,14 @@ class AnalysisPipeline:
 
         # Thread safety for async execution
         self._lock = asyncio.Lock()
+
+        # Pattern discovery throttle — full re-clustering is expensive (650+ patterns)
+        # and only needs to happen every ~60s, not on every snapshot cycle.
+        self._last_pattern_discovery_ms: int = 0
+        self._pattern_discovery_interval_ms: int = 60_000
+
+        # One-shot seeding of pattern intelligence engine.
+        self._pattern_seeded: bool = False
 
         # Unified scalping engine — PRIMARY signal source
         self.scalp_engine = UnifiedScalpEngine()
@@ -214,6 +223,11 @@ class AnalysisPipeline:
             regime=self.regime,
         )
         self._btc_patterns_ts = candles[-1].timestamp
+        # Inject pattern intelligence into btc_patterns context
+        self._inject_pattern_intel()
+
+        # Pre-seed pattern intelligence engine with historical data
+        self._seed_pattern_intel(candles)
 
         # Orderbook analysis - always run
         self.ob_imbalances = self.orderbook_analyzer.detect_imbalances()
@@ -285,12 +299,11 @@ class AnalysisPipeline:
         self.ob_spread_dynamics = self.orderbook_analyzer.detect_spread_dynamics()
         self.ob_depth_levels = self.orderbook_analyzer.detect_depth_saturation()
         if self.quote_history:
-            latest_quote = list(self.quote_history)[-1]
+            latest_quote = self.quote_history[-1]
             self.ob_imbalances = self.orderbook_analyzer.update_imbalances(self.ob_imbalances, latest_quote)
         
-        # Update accumulation status if we have quotes
         if self.quote_history:
-            latest_quote = list(self.quote_history)[-1] if self.quote_history else None
+            latest_quote = self.quote_history[-1]
             self.ob_accumulations = self.orderbook_analyzer.update_accumulation_status(
                 self.ob_accumulations, latest, latest_quote
             )
@@ -353,10 +366,11 @@ class AnalysisPipeline:
                     regime=self.regime,
                 )
                 self._btc_patterns_ts = closed_candles[-1].timestamp
-        # Refresh accumulations status with latest candle data
+                # Inject discovered patterns from PatternIntelligenceEngine into BtcPatternContext
+                self._inject_pattern_intel()
         if self.quote_history:
             latest_candle = closed_candles[-1] if closed_candles else None
-            latest_quote = list(self.quote_history)[-1] if self.quote_history else None
+            latest_quote = self.quote_history[-1]
             if latest_candle and latest_quote:
                 self.ob_accumulations = self.orderbook_analyzer.update_accumulation_status(
                     self.ob_accumulations, latest_candle, latest_quote
@@ -400,6 +414,23 @@ class AnalysisPipeline:
         if display_ctx and not display_ctx.signals and self._last_scalp_context is not None:
             if self._last_scalp_context.signals:
                 display_ctx = self._last_scalp_context
+
+        # Run pattern discovery periodically — clustering is expensive
+        # (650+ patterns), so throttle to every ~60s. Injection into
+        # btc_patterns is cheap and uses the already-discovered cache, so
+        # we do it every cycle to keep the UI live.
+        try:
+            from backend.analysis.self_aware_agent import get_agent
+            pi = get_agent().pattern_intel
+            now_ms = int(time.time() * 1000)
+            if now_ms - self._last_pattern_discovery_ms >= self._pattern_discovery_interval_ms:
+                pi.discover_patterns()
+                self._last_pattern_discovery_ms = now_ms
+            # Cheap: re-emit the already-discovered patterns into the
+            # btc_patterns context with decayed stats.
+            self._inject_pattern_intel()
+        except Exception:
+            pass
 
         # ── Stale Signal Gate ───────────────────────────────────────────
         # A signal is stale if its SL or TP was already hit by the market,
@@ -518,6 +549,8 @@ class AnalysisPipeline:
                 "ensemble": ensemble_model.get_stats(),
                 "self_optimizer": self_optimizer.get_status(),
                 "anomaly_detector": self.scalp_engine.anomaly_detector.get_status(),
+                "trading_psychology": self._agent_psychology_status(),
+                "pattern_intel": self._agent_pattern_intel(),
             },
         }
         if include_candles:
@@ -719,6 +752,101 @@ class AnalysisPipeline:
             }
             for c in closed
         ]
+
+    def _seed_pattern_intel(self, candles: list[Candle]) -> None:
+        """Pre-seed pattern intelligence engine with historical candle data.
+
+        Only runs once (guarded by self._pattern_seeded) to prevent
+        repeated flooding of the segment hash set across multiple
+        full-recalculate cycles.
+        """
+        if self._pattern_seeded or len(candles) < 20:
+            return
+        self._pattern_seeded = True
+        try:
+            from backend.analysis.self_aware_agent import get_agent
+            pi = get_agent().pattern_intel
+            # Slide through historical candles in overlapping segments
+            for i in range(8, len(candles) - 4):
+                segment = candles[:i + 1]
+                lookahead = candles[i + 1:i + 5]
+                # Only record when segment has a closed lookahead
+                if len(lookahead) >= 4:
+                    pi.record_candles(segment, lookahead=lookahead)
+            logger.info("Pattern intelligence seeded with %d segments", len(pi.segments))
+            # Run initial discovery
+            discovered = pi.discover_patterns()
+            if discovered:
+                logger.info("Pattern intelligence discovered %d patterns from historical data", len(discovered))
+        except Exception:
+            logger.exception("Failed to seed pattern intelligence")
+
+    def _inject_pattern_intel(self) -> None:
+        """Inject PatternIntelligenceEngine discovered patterns into btc_patterns context.
+
+        Uses the cached `_discovered` set (populated by the throttled
+        `discover_patterns()` call in snapshot) — does NOT re-run clustering
+        on every cycle, which is too expensive to do per-snapshot.
+        """
+        if self.btc_patterns is None:
+            return
+        try:
+            from backend.analysis.self_aware_agent import get_agent
+            from backend.models.types import BtcPattern
+            pi = get_agent().pattern_intel
+            patterns = list(pi._discovered.values())
+            now_ms = int(time.time() * 1000)
+            # Clear previous injection — this runs every snapshot cycle
+            # and must not accumulate duplicates between candle resets.
+            self.btc_patterns.patterns.clear()
+            self.btc_patterns.bullish_pattern_score = 0.0
+            self.btc_patterns.bearish_pattern_score = 0.0
+            for dp in patterns:
+                # Use effective (decay-adjusted) stats for filtering and scoring
+                eff_conf = pi._effective_confidence(dp) if hasattr(pi, '_effective_confidence') else dp.confidence
+                eff_wr = pi._effective_win_rate(dp) if hasattr(pi, '_effective_win_rate') else dp.win_rate
+                eff_ret = pi._effective_avg_return(dp) if hasattr(pi, '_effective_avg_return') else dp.avg_return
+                decay = pi._decay_factor(dp.last_seen) if hasattr(pi, '_decay_factor') else 1.0
+
+                if dp.occurrences < 3 or eff_conf < 0.3:
+                    continue
+                p = BtcPattern(
+                    id=dp.pattern_id,
+                    timestamp=int(dp.last_seen),
+                    name=f"AI_{dp.direction.upper()}_{eff_wr:.0%}",
+                    direction=dp.direction,
+                    confidence=eff_conf,
+                    score=eff_wr,
+                    description=f"Discovered pattern: {dp.occurrences} occurrences, {eff_wr:.0%} effective win rate, avg return {eff_ret:.2%}, decay {decay:.0%}",
+                    candle_count=8,
+                    completed=True,
+                )
+                self.btc_patterns.patterns.append(p)
+                if dp.direction == "bullish":
+                    self.btc_patterns.bullish_pattern_score += eff_conf * eff_wr * 0.1
+                elif dp.direction == "bearish":
+                    self.btc_patterns.bearish_pattern_score += eff_conf * eff_wr * 0.1
+            # Recompute pattern signal
+            if self.btc_patterns.bullish_pattern_score > self.btc_patterns.bearish_pattern_score:
+                self.btc_patterns.pattern_signal = "bullish"
+            elif self.btc_patterns.bearish_pattern_score > self.btc_patterns.bullish_pattern_score:
+                self.btc_patterns.pattern_signal = "bearish"
+        except Exception:
+            pass
+
+    def _agent_psychology_status(self) -> dict:
+        try:
+            from backend.analysis.self_aware_agent import get_agent
+            return get_agent().get_agent_status().get("psychology", {})
+        except Exception:
+            return {}
+
+    def _agent_pattern_intel(self) -> dict:
+        try:
+            from backend.analysis.self_aware_agent import get_agent
+            return get_agent().get_agent_status().get("pattern_intel", {})
+        except Exception:
+            return {}
 
     def _metrics_payload(self) -> dict | None:
         if not self.metrics:

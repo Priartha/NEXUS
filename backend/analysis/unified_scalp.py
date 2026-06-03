@@ -1,22 +1,21 @@
 """
-NEXUS Unified Scalping Engine v3.0 - Industry Grade AI Trading Brain
+NEXUS Unified Scalping Engine v4.0 — Self-Optimising AI Trading Brain
 
-Single-signal scalping engine for BTCUSD perpetual futures on Delta Exchange.
-PRIMARY SIGNAL: Self-Aware Trading Agent - no external dependencies, pure price action.
+Single-signal scalping engine for BTCUSD perpetual futures.
+PRIMARY SIGNAL: Self-Aware Trading Agent — no external dependencies, pure price action.
 
-Data sources fused:
-  1. Order Flow: Delta, CVD, absorption, footprint imbalance
-  2. VWAP: Price deviation, compression state, band position
-  3. Funding Rate: Current rate, annualized, contrarian bias, extreme detection
-  4. Open Interest: Change %, trend, momentum confirmation
-  5. Liquidation Levels: Cluster proximity, sweep targets
-  6. Liquidity Sweeps: Reclaim status, entry triggers
-  7. Volume Profile: POC, VAH, VAL positioning
-  8. ICT Patterns: FVG proximity, order blocks, market structure
-  9. Market Regime: Phase, bias, volatility state
-  10. RSI(3): Exhaustion reads on 1m/3m/5m
-  11. Killzone: Session timing for high-probability windows
-  12. Wick Rejection: Long-wick reversal detection (price rejects long wick side)
+V4 NEW DATA SOURCES (added on top of V3):
+  13. Market Structure: Break of Structure (BoS), market structure shift (MSS)
+  14. RSI/Price Divergence: Regular + hidden divergence on RSI(14)
+  15. Multi-Timeframe Alignment: Systematic scoring across 1m/5m/15m/1h
+  16. Candle Patterns: Pin bar, engulfing, inside bar, momentum candle
+  17. Kelly Position Sizing: Optimal size from win rate + confidence + RR
+  18. Regime-Adaptive SL/TP: Wider stops in trending, tighter in range
+  19. Correlation Check: ETH/BTC cross-asset confirmation
+
+V3 data sources carried forward:
+   1-12. Order Flow, VWAP, Funding, OI, Liquidations, Sweeps,
+         Volume Profile, ICT Patterns, Regime, RSI(3), Killzone, Wick Rejection
 
 Output: EXACTLY ONE futures scalping signal or NO_TRADE.
 """
@@ -327,6 +326,13 @@ class UnifiedScalpEngine:
         rsi_3 = _rsi(closes[-20:], 3) if len(closes) >= 4 else 50.0
         kill_active, kill_session = _is_killzone(ordered[-1].timestamp)
 
+        # ── V4 New Analyses ─────────────────────────────────────────────
+        ms = self._market_structure(ordered, swings)
+        div = self._divergence(ordered)
+        mtf = self._mtf_alignment(price, regime, timeframe)
+        candle_pat = self._candle_patterns(ordered)
+        correlation = self._correlation_check()
+
         # ── Common Sense Checks ─────────────────────────────────────────
         # Sanity checks every human trader would follow before considering a trade
         atr_for_common_sense = _atr(ordered, 14)
@@ -388,6 +394,53 @@ class UnifiedScalpEngine:
             metrics, fvgs, order_blocks, regime, ordered, futures_context, wick,
         )
 
+        # ── V4 Score Boosts (gracefully degrade on missing data) ────────
+        try:
+            # Market Structure Break — strong directional confirmation
+            if ms.get("bos") == "bullish":
+                long_score += 0.08; long_reasons.append(f"BoS bullish ({ms['strength']:.1f}%)")
+            elif ms.get("bos") == "bearish":
+                short_score += 0.08; short_reasons.append(f"BoS bearish ({ms['strength']:.1f}%)")
+            if ms.get("mss") == "bullish_shift":
+                long_score += 0.12; long_reasons.append("MSS bullish shift")
+            elif ms.get("mss") == "bearish_shift":
+                short_score += 0.12; short_reasons.append("MSS bearish shift")
+            # Divergence — powerful reversal signal
+            if div.get("type") == "bullish_regular":
+                long_score += 0.10; long_reasons.append(f"Bullish divergence ({div['strength']:.2f})")
+            elif div.get("type") == "bearish_regular":
+                short_score += 0.10; short_reasons.append(f"Bearish divergence ({div['strength']:.2f})")
+            elif div.get("type") == "bullish_hidden":
+                long_score += 0.06; long_reasons.append("Hidden bullish divergence")
+            elif div.get("type") == "bearish_hidden":
+                short_score += 0.06; long_reasons.append("Hidden bearish divergence")
+            # Candle patterns — micro-structure confirmation
+            if candle_pat.get("pin_bar") == "bullish":
+                long_score += 0.06; long_reasons.append(f"Bullish pin bar ({candle_pat.get('pin_bar_strength', 1):.1f}x)")
+            elif candle_pat.get("pin_bar") == "bearish":
+                short_score += 0.06; short_reasons.append(f"Bearish pin bar ({candle_pat.get('pin_bar_strength', 1):.1f}x)")
+            if candle_pat.get("engulfing") == "bullish":
+                long_score += 0.07; long_reasons.append("Bullish engulfing")
+            elif candle_pat.get("engulfing") == "bearish":
+                short_score += 0.07; short_reasons.append("Bearish engulfing")
+            if candle_pat.get("momentum_candle") == "bullish":
+                long_score += 0.04; long_reasons.append(f"Momentum candle ({candle_pat.get('momentum_strength', 1):.1f}x)")
+            elif candle_pat.get("momentum_candle") == "bearish":
+                short_score += 0.04; short_reasons.append(f"Momentum candle ({candle_pat.get('momentum_strength', 1):.1f}x)")
+            if candle_pat.get("nr7"):
+                long_reasons.append("NR7 compression — breakout imminent")
+                short_reasons.append("NR7 compression — breakout imminent")
+            # MTF alignment — macro context reinforces direction
+            if mtf.get("alignment") == "bullish":
+                long_score += 0.05 * mtf.get("confidence", 0.5); long_reasons.append(f"MTF bullish (conf {mtf.get('confidence', 0):.0%})")
+            elif mtf.get("alignment") == "bearish":
+                short_score += 0.05 * mtf.get("confidence", 0.5); short_reasons.append(f"MTF bearish (conf {mtf.get('confidence', 0):.0%})")
+            # Correlation check — cross-asset confirmation
+            if not correlation.get("aligned", True):
+                long_score -= 0.03; short_score -= 0.03
+        except Exception:
+            pass
+
         atr = _atr(ordered, 14)
         signals: list[ScalpSignal] = []
 
@@ -405,6 +458,12 @@ class UnifiedScalpEngine:
             max_possible = 1.0 - (missing_sources * 0.11)
             normalized_threshold = threshold * (max_possible / 1.0)
             threshold = max(normalized_threshold, 0.35)
+
+        # Record candle data for pattern intelligence engine
+        try:
+            get_agent().pattern_intel.record_candles(ordered, volatility_regime=regime.phase if regime else "normal")
+        except Exception:
+            pass
 
         # ── Self-Aware AI Agent is the CENTRAL BRAIN ────────────────────────
         # It receives ALL 15 data sources + price action + memory and makes the final decision
@@ -553,23 +612,38 @@ class UnifiedScalpEngine:
             remaining = (self._signal_cooldown_ms - (cooldown_ts - self._last_signal_ts)) / 60000
             return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, [f"Cooldown: {remaining:.1f}m until next signal"])
 
+        # ── V4 Regime-Adaptive SL/TP & Kelly Position Sizing ────────────
+        adaptive_sltp = self._regime_adaptive_sltp(price, atr, winning_score, regime)
+        agent_memory = get_agent().memory if hasattr(get_agent(), 'memory') else None
+        win_rate = (agent_memory.winning_trades / agent_memory.total_trades
+                    if agent_memory and agent_memory.total_trades > 0 else 0.5)
+        rr = 2.0  # placeholder RR — actual is computed in _build_signal after SL
+        kelly = self._kelly_position_size(win_rate, winning_score, rr)
+
         # Build signal from either the agent's decision or fallback confluence
         last_candle = ordered[-1]
         if agent_has_signal:
-            signals.append(self._build_signal(
+            sig = self._build_signal(
                 agent_result['signal'] + " BTCUSD", price, atr,
                 agent_result['confidence'], winning_reasons, now_ms, funding_rate,
                 enriched_features=agent_result.get('enriched_features'),
-                candle=last_candle,
-            ))
-            self._last_signal_ts = cooldown_ts
+                candle=last_candle, regime=regime,
+                adaptive_sltp=adaptive_sltp, kelly=kelly,
+            )
+            if sig:
+                signals.append(sig)
+                self._last_signal_ts = cooldown_ts
         else:
             if long_score >= threshold and long_score >= short_score:
-                signals.append(self._build_signal("LONG BTCUSD", price, atr, long_score, long_reasons, now_ms, funding_rate, candle=last_candle))
-                self._last_signal_ts = cooldown_ts
+                sig = self._build_signal("LONG BTCUSD", price, atr, long_score, long_reasons, now_ms, funding_rate, candle=last_candle, regime=regime, adaptive_sltp=adaptive_sltp, kelly=kelly)
+                if sig:
+                    signals.append(sig)
+                    self._last_signal_ts = cooldown_ts
             elif short_score >= threshold and short_score > long_score:
-                signals.append(self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate, candle=last_candle))
-                self._last_signal_ts = cooldown_ts
+                sig = self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate, candle=last_candle, regime=regime, adaptive_sltp=adaptive_sltp, kelly=kelly)
+                if sig:
+                    signals.append(sig)
+                    self._last_signal_ts = cooldown_ts
 
         # Track last signal SL for breach detection on next cycle
         if signals and len(signals) > 0:
@@ -589,6 +663,11 @@ class UnifiedScalpEngine:
                 predicted_grade=sig.confidence,
                 predicted_confidence=sig.score,
             )
+            # Track decision in trading psychology for fatigue/calibration
+            try:
+                get_agent().trading_psychology.record_decision()
+            except Exception:
+                pass
 
         ctx = ScalpContext(
             timestamp=now_ms,
@@ -915,6 +994,14 @@ class UnifiedScalpEngine:
             normal_v = sum(c.volume for c in candles[-20:-3]) / 17 if len(candles) >= 20 else recent_v
             if normal_v > 0 and recent_v < normal_v * 0.2:
                 blockers.append(f"Volume collapse: {recent_v/normal_v:.0%} of normal — no conviction")
+
+        # 7. Trading Psychology — behavioral bias warnings
+        try:
+            psych = get_agent().trading_psychology.get_state()
+            for w in psych.warnings[:3]:
+                blockers.append(w)
+        except Exception:
+            pass
 
         return blockers
 
@@ -1262,9 +1349,30 @@ class UnifiedScalpEngine:
         
         return None  # Passes filter
 
-    def _build_signal(self, signal_type: str, price: float, atr: float, score: float, reasons: list[str], now_ms: int, fr: ScalpFundingRate | None = None, enriched_features: dict | None = None, candle: Candle | None = None) -> ScalpSignal:
+    def _build_signal(self, signal_type: str, price: float, atr: float, score: float, reasons: list[str], now_ms: int, fr: ScalpFundingRate | None = None, enriched_features: dict | None = None, candle: Candle | None = None, regime: MarketRegime | None = None, adaptive_sltp: dict | None = None, kelly: dict | None = None) -> ScalpSignal | None:
         is_long = "LONG" in signal_type
-        
+        if score <= 0:
+            return None
+
+        # Use V4 regime-adaptive SL/TP multipliers if provided
+        if adaptive_sltp:
+            sl_mult = adaptive_sltp.get("sl_mult", 2.0)
+            tp1_mult = adaptive_sltp.get("tp1_mult", 3.0)
+            tp2_mult = adaptive_sltp.get("tp2_mult", 5.0)
+            if adaptive_sltp.get("reason") and adaptive_sltp["reason"] != "default":
+                reasons.append(f"Adaptive SL/TP: {adaptive_sltp['reason']}")
+        else:
+            sl_mult = max(2.0, 4.0 - score * 2)
+            tp1_mult = 3.0 + score * 3
+            tp2_mult = 5.0 + score * 6
+
+        # V4 Kelly position sizing
+        if kelly:
+            kelly_boost = kelly.get("leverage_boost", 1.0)
+            reasons.append(f"Kelly: {kelly.get('conservative_pct', 0)}% at risk")
+        else:
+            kelly_boost = 1.0
+
         # ── FIX: Entry at retracement level, NOT at candle close ──────────────
         # Root cause: signal fires after candle closes, but entering at close
         # means buying at the top of a completed move (or selling at the bottom).
@@ -1302,13 +1410,9 @@ class UnifiedScalpEngine:
             entry_zone_low = round(entry - entry_dist, 2)
             entry_zone_high = round(entry + entry_dist, 2)
 
-        sl_multiplier = max(2.0, 4.0 - score * 2)
-        tp1_multiplier = 3.0 + score * 3
-        tp2_multiplier = 5.0 + score * 6
-        
-        sl_dist = atr * sl_multiplier
-        t2_dist = atr * tp2_multiplier
-        t1_dist = atr * tp1_multiplier
+        sl_dist = atr * sl_mult
+        t2_dist = atr * tp2_mult
+        t1_dist = atr * tp1_mult
         
         sl = entry - sl_dist if is_long else entry + sl_dist
         t1 = entry + t1_dist if is_long else entry - t1_dist
@@ -1316,7 +1420,7 @@ class UnifiedScalpEngine:
         
         rr = round(abs(t2 - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0.0
         
-        base_leverage = max(3, int(10 * score))
+        base_leverage = max(3, int(10 * score * kelly_boost))
         leverage = min(settings.scalp_max_leverage, base_leverage + 5)
         
         confidence = "HIGH" if score >= 0.65 else ("MEDIUM" if score >= 0.50 else "LOW")
@@ -1347,3 +1451,294 @@ class UnifiedScalpEngine:
         if isinstance(source, dict):
             return source.get(key, default)
         return getattr(source, key, default)
+
+    # ═══════════════════════════════════════════════════════════
+    # V4 NEW ANALYSIS METHODS
+    # ═══════════════════════════════════════════════════════════
+
+    def _market_structure(self, candles: list[Candle], swings: list[Swing] | None) -> dict:
+        """Detect Break of Structure (BoS) and Market Structure Shift (MSS)."""
+        result: dict = {"bos": None, "mss": None, "structure": "neutral", "strength": 0.0}
+        if len(candles) < 20:
+            return result
+        highs = [c.high for c in candles[-40:]]
+        lows = [c.low for c in candles[-40:]]
+        if len(highs) < 5:
+            return result
+        recent_high = max(highs[-5:])
+        recent_low = min(lows[-5:])
+        prev_high = max(highs[-10:-5]) if len(highs) >= 10 else recent_high
+        prev_low = min(lows[-10:-5]) if len(lows) >= 10 else recent_low
+        last_c = candles[-1]
+        # Bullish BoS: price breaks above prior swing high
+        if last_c.close > prev_high > recent_low:
+            result["bos"] = "bullish"
+            result["strength"] = (last_c.close - prev_high) / prev_high * 100
+            result["structure"] = "uptrend"
+        # Bearish BoS: price breaks below prior swing low
+        elif last_c.close < prev_low < recent_high:
+            result["bos"] = "bearish"
+            result["strength"] = (prev_low - last_c.close) / prev_low * 100
+            result["structure"] = "downtrend"
+        # MSS: failed breakout that reverses — higher low then breaks structure
+        if len(highs) >= 15:
+            mid_high = max(highs[-15:-5]) if len(highs) >= 15 else recent_high
+            mid_low = min(lows[-15:-5]) if len(lows) >= 15 else recent_low
+            if prev_low < mid_low and last_c.close > mid_high and result["bos"] != "bearish":
+                result["mss"] = "bullish_shift"
+                result["strength"] = max(result["strength"], (last_c.close - mid_high) / mid_high * 100)
+                result["structure"] = "uptrend"
+            elif prev_high > mid_high and last_c.close < mid_low and result["bos"] != "bullish":
+                result["mss"] = "bearish_shift"
+                result["strength"] = max(result["strength"], (mid_low - last_c.close) / mid_low * 100)
+                result["structure"] = "downtrend"
+        if swings and len(swings) >= 2:
+            last_swing = swings[-1]
+            prev_swing = swings[-2]
+            if last_swing.kind == "high" and last_swing.price > prev_swing.price:
+                result["bos"] = "bullish"
+                result["structure"] = "uptrend"
+            elif last_swing.kind == "low" and last_swing.price < prev_swing.price:
+                result["bos"] = "bearish"
+                result["structure"] = "downtrend"
+        return result
+
+    def _divergence(self, candles: list[Candle]) -> dict:
+        """Detect regular and hidden RSI/Price divergence."""
+        result: dict = {"type": None, "strength": 0.0, "description": ""}
+        if len(candles) < 30:
+            return result
+        closes = [c.close for c in candles]
+        rsi14 = _rsi(closes[-30:], 14)
+        high_idx = max(1, len(closes) - 20)
+        prices = closes[-20:]
+        rsis = [_rsi(closes[:high_idx + i], 14) for i in range(20)] if len(closes) >= 34 else []
+        if len(rsis) < 10:
+            return result
+        price_swing_highs = []
+        price_swing_lows = []
+        rsi_swing_highs = []
+        rsi_swing_lows = []
+        for i in range(2, len(prices) - 2):
+            if prices[i] > prices[i-1] and prices[i] > prices[i-2] and prices[i] > prices[i+1] and prices[i] > prices[i+2]:
+                price_swing_highs.append((i, prices[i]))
+            if prices[i] < prices[i-1] and prices[i] < prices[i-2] and prices[i] < prices[i+1] and prices[i] < prices[i+2]:
+                price_swing_lows.append((i, prices[i]))
+            if i < len(rsis) and rsis[i] > rsis[i-1] and rsis[i] > rsis[i-2] and rsis[i] > rsis[i+1] and rsis[i] > rsis[i+2]:
+                rsi_swing_highs.append((i, rsis[i]))
+            if i < len(rsis) and rsis[i] < rsis[i-1] and rsis[i] < rsis[i-2] and rsis[i] < rsis[i+1] and rsis[i] < rsis[i+2]:
+                rsi_swing_lows.append((i, rsis[i]))
+        # Regular bearish divergence: price makes higher high, RSI makes lower high
+        if len(price_swing_highs) >= 2 and len(rsi_swing_highs) >= 2:
+            ph1, ph_val1 = price_swing_highs[-2]
+            ph2, ph_val2 = price_swing_highs[-1]
+            if len(rsi_swing_highs) >= 2:
+                rh1, rsi1 = rsi_swing_highs[-2]
+                rh2, rsi2 = rsi_swing_highs[-1]
+                if ph_val2 > ph_val1 and rsi2 < rsi1:
+                    result["type"] = "bearish_regular"
+                    result["strength"] = (ph_val2 - ph_val1) / ph_val1 + (rsi1 - rsi2) / 100
+                    result["description"] = f"Bearish divergence: price HH {ph_val2:.0f} > {ph_val1:.0f}, RSI LH {rsi2:.0f} < {rsi1:.0f}"
+        # Regular bullish divergence: price makes lower low, RSI makes higher low
+        if len(price_swing_lows) >= 2 and len(rsi_swing_lows) >= 2:
+            pl1, pl_val1 = price_swing_lows[-2]
+            pl2, pl_val2 = price_swing_lows[-1]
+            if len(rsi_swing_lows) >= 2:
+                rl1, rsi_l1 = rsi_swing_lows[-2]
+                rl2, rsi_l2 = rsi_swing_lows[-1]
+                if pl_val2 < pl_val1 and rsi_l2 > rsi_l1:
+                    result["type"] = "bullish_regular"
+                    result["strength"] = (pl_val1 - pl_val2) / pl_val1 + (rsi_l2 - rsi_l1) / 100
+                    result["description"] = f"Bullish divergence: price LL {pl_val2:.0f} < {pl_val1:.0f}, RSI HL {rsi_l2:.0f} > {rsi_l1:.0f}"
+        # Hidden bearish divergence: price makes lower high, RSI makes higher high
+        if len(price_swing_highs) >= 2 and len(rsi_swing_highs) >= 2 and not result["type"]:
+            ph1, ph_val1 = price_swing_highs[-2]
+            ph2, ph_val2 = price_swing_highs[-1]
+            rh1, rsi1 = rsi_swing_highs[-2]
+            rh2, rsi2 = rsi_swing_highs[-1]
+            if ph_val2 < ph_val1 and rsi2 > rsi1:
+                result["type"] = "bearish_hidden"
+                result["strength"] = (ph_val1 - ph_val2) / ph_val1 + (rsi2 - rsi1) / 100
+                result["description"] = f"Hidden bearish divergence: price LH, RSI HH"
+        # Hidden bullish divergence: price makes higher low, RSI makes lower low
+        if len(price_swing_lows) >= 2 and len(rsi_swing_lows) >= 2 and not result["type"]:
+            pl1, pl_val1 = price_swing_lows[-2]
+            pl2, pl_val2 = price_swing_lows[-1]
+            rl1, rsi_l1 = rsi_swing_lows[-2]
+            rl2, rsi_l2 = rsi_swing_lows[-1]
+            if pl_val2 > pl_val1 and rsi_l2 < rsi_l1:
+                result["type"] = "bullish_hidden"
+                result["strength"] = (pl_val2 - pl_val1) / pl_val1 + (rsi_l1 - rsi_l2) / 100
+                result["description"] = f"Hidden bullish divergence: price HL, RSI LL"
+        return result
+
+    def _mtf_alignment(self, price: float, regime: MarketRegime | None, timeframe: str) -> dict:
+        """Compute multi-timeframe alignment score from higher-timeframe regime data.
+
+        Uses the current regime (which already fuses multiple TFs) to determine
+        how well the current TF aligns with the macro direction.
+        """
+        result: dict = {"alignment": "neutral", "score": 0.0, "confidence": 0.5}
+        if not regime:
+            return result
+        tf_num = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60}.get(timeframe, 5)
+        # Regime phase carries MTF information — trending regimes on HTF filter to LTF
+        if regime.phase == "trending":
+            base_conf = 0.35 if tf_num <= 5 else (0.50 if tf_num <= 15 else 0.65)
+            if regime.bias == "bullish":
+                result["alignment"] = "bullish"
+                result["score"] = base_conf
+                result["confidence"] = 0.5 + base_conf * 0.5
+            elif regime.bias == "bearish":
+                result["alignment"] = "bearish"
+                result["score"] = base_conf
+                result["confidence"] = 0.5 + base_conf * 0.5
+        elif regime.phase == "accumulation":
+            result["alignment"] = "bullish_biased"
+            result["score"] = 0.25
+            result["confidence"] = 0.4
+        elif regime.phase == "distribution":
+            result["alignment"] = "bearish_biased"
+            result["score"] = 0.25
+            result["confidence"] = 0.4
+        # Boost alignment score when price is confirmed by regime direction
+        if regime.phase in ("trending", "accumulation", "distribution") and regime.bias:
+            if regime.bias == "bullish" and price < (regime.range_low or 0) * 0.995:
+                result["score"] += 0.1
+                result["confidence"] = min(result["confidence"] + 0.1, 0.9)
+            elif regime.bias == "bearish" and price > (regime.range_high or 0) * 1.005:
+                result["score"] += 0.1
+                result["confidence"] = min(result["confidence"] + 0.1, 0.9)
+        result["score"] = min(result["score"], 0.8)
+        return result
+
+    def _candle_patterns(self, candles: list[Candle]) -> dict:
+        """Detect candle-based confirmation patterns (pin bar, engulfing, inside bar, momentum)."""
+        result: dict = {
+            "pin_bar": None, "engulfing": None, "inside_bar": None,
+            "momentum_candle": None, "nr7": False,
+        }
+        if len(candles) < 3:
+            return result
+        prev, curr = candles[-2], candles[-1]
+        prange = prev.high - prev.low
+        crange = curr.high - curr.low
+        if prange <= 0 or crange <= 0:
+            return result
+        # Pin bar: long wick opposite to close direction
+        upper_wick = curr.high - max(curr.open, curr.close)
+        lower_wick = min(curr.open, curr.close) - curr.low
+        body = abs(curr.close - curr.open)
+        total_range = upper_wick + lower_wick + body
+        if total_range > 0:
+            if curr.close > curr.open and lower_wick > body * 2 and lower_wick > upper_wick * 2:
+                result["pin_bar"] = "bullish"
+                result["pin_bar_strength"] = min(lower_wick / body, 3.0)
+            elif curr.close < curr.open and upper_wick > body * 2 and upper_wick > lower_wick * 2:
+                result["pin_bar"] = "bearish"
+                result["pin_bar_strength"] = min(upper_wick / body, 3.0)
+        # Engulfing: current body fully covers previous body
+        prev_body_top = max(prev.open, prev.close)
+        prev_body_bot = min(prev.open, prev.close)
+        curr_body_top = max(curr.open, curr.close)
+        curr_body_bot = min(curr.open, curr.close)
+        if prev_body_bot < curr_body_bot and prev_body_top < curr_body_top:
+            if curr.close > curr.open and prev.close < prev.open:
+                result["engulfing"] = "bullish"
+            elif curr.close < curr.open and prev.close > prev.open:
+                result["engulfing"] = "bearish"
+        # Inside bar: current within prior range
+        if curr.high < prev.high and curr.low > prev.low:
+            result["inside_bar"] = True
+        # Momentum candle: large body with direction
+        avg_body = sum(abs(c.close - c.open) for c in candles[-10:]) / 10 if len(candles) >= 10 else body
+        if avg_body > 0 and body > avg_body * 1.8:
+            result["momentum_candle"] = "bullish" if curr.close > curr.open else "bearish"
+            result["momentum_strength"] = body / avg_body
+        # NR7: narrowest range of last 7 candles
+        if len(candles) >= 7:
+            ranges = [c.high - c.low for c in candles[-7:]]
+            if crange <= min(ranges):
+                result["nr7"] = True
+        return result
+
+    def _correlation_check(self) -> dict:
+        """Quick ETH/BTC correlation check using available context.
+
+        Returns a dict with directional alignment and strength.
+        Since we don't always have ETH data in this context, we
+        return a neutral signal and let the confluence score use it.
+        """
+        result: dict = {"aligned": True, "strength": 0.5, "bias": "neutral"}
+        try:
+            from backend.analysis.self_aware_agent import get_agent
+            agent = get_agent()
+            if hasattr(agent, '_last_correlation') and agent._last_correlation:
+                result["bias"] = agent._last_correlation.get("bias", "neutral")
+                result["strength"] = agent._last_correlation.get("correlation", 0.5)
+                result["aligned"] = result["strength"] > 0.3
+        except Exception:
+            pass
+        return result
+
+    def _kelly_position_size(self, win_rate: float, confidence: float, rr: float) -> dict:
+        """Compute optimal position size using Kelly Criterion.
+
+        f* = (p * b - q) / b
+        where p = win probability, q = loss probability (1-p), b = odds (RR)
+
+        Returns dict with kelly fraction, conservative fraction (half-kelly),
+        and recommended leverage adjustment.
+        """
+        result: dict = {"kelly_pct": 0.0, "conservative_pct": 0.0, "leverage_boost": 1.0}
+        p = max(0.01, min(0.99, win_rate * 0.7 + confidence * 0.3))
+        q = 1.0 - p
+        b = max(0.1, rr)
+        kelly = (p * b - q) / b if b > 0 else 0.0
+        kelly = max(0.0, min(0.5, kelly))
+        result["kelly_pct"] = round(kelly * 100, 1)
+        result["conservative_pct"] = round(kelly * 50, 1)
+        # Leverage adjustment: higher Kelly fraction = can take more leverage
+        if kelly > 0.15:
+            result["leverage_boost"] = 1.3
+        elif kelly > 0.08:
+            result["leverage_boost"] = 1.15
+        else:
+            result["leverage_boost"] = 0.9
+        return result
+
+    def _regime_adaptive_sltp(self, price: float, atr: float, score: float, regime: MarketRegime | None) -> dict:
+        """Compute regime-aware SL/TP multipliers.
+
+        Trending: wider SL (ride trend), wider TP (let profits run)
+        Range: tighter SL (quick stops), tighter TP (mean reversion)
+        Volatile: wider everything
+        Quiet: tighter everything
+        """
+        result: dict = {"sl_mult": 2.0, "tp1_mult": 3.0, "tp2_mult": 5.0, "reason": "default"}
+        if not regime:
+            return result
+        base_sl = max(1.5, 4.0 - score * 2)
+        base_tp1 = 2.0 + score * 3
+        base_tp2 = 4.0 + score * 6
+        if regime.phase == "trending":
+            result["sl_mult"] = base_sl * 1.3
+            result["tp1_mult"] = base_tp1 * 1.5
+            result["tp2_mult"] = base_tp2 * 1.5
+            result["reason"] = f"trending: wider stops (×1.3) / wider targets (×1.5)"
+        elif regime.phase in ("range_bound", "consolidation"):
+            result["sl_mult"] = base_sl * 0.8
+            result["tp1_mult"] = base_tp1 * 0.7
+            result["tp2_mult"] = base_tp2 * 0.7
+            result["reason"] = f"{regime.phase}: tighter stops (×0.8) / tighter targets (×0.7)"
+        elif regime.phase in ("accumulation", "distribution"):
+            result["sl_mult"] = base_sl * 1.1
+            result["tp1_mult"] = base_tp1 * 1.1
+            result["tp2_mult"] = base_tp2 * 1.1
+            result["reason"] = f"{regime.phase}: moderately wider (×1.1)"
+        elif regime.volatility_state in ("high", "extreme"):
+            result["sl_mult"] = base_sl * 1.4
+            result["tp1_mult"] = base_tp1 * 1.2
+            result["tp2_mult"] = base_tp2 * 1.2
+            result["reason"] = f"high vol: wider stops (×1.4)"
+        return result

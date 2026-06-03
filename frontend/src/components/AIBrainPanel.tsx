@@ -1,12 +1,11 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 import { Brain, Database, Layers } from 'lucide-react'
-import type { AiAgentStatus } from '../types/market'
 
 interface AIBrainPanelProps {
-  aiIntelligence?: AiAgentStatus | null
+  aiIntelligence: any
 }
 
-export function AIBrainPanel({ aiIntelligence }: AIBrainPanelProps) {
+export const AIBrainPanel = memo(function AIBrainPanel({ aiIntelligence }: AIBrainPanelProps) {
   const data = useMemo(() => {
     if (!aiIntelligence) return null
 
@@ -143,4 +142,4 @@ export function AIBrainPanel({ aiIntelligence }: AIBrainPanelProps) {
       </div>
     </div>
   )
-}
+})

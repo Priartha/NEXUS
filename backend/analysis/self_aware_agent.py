@@ -142,9 +142,14 @@ class MarketMemory:
         )
         self.day_of_week_behavior[dow]['samples'] += 1
         
+    MAX_TRADE_HISTORY = 500
+    MAX_PATTERNS = 1000
+
     def add_trade(self, trade: TradeMemory) -> None:
         """Add trade to memory and learn."""
         self.trade_history.append(trade)
+        if len(self.trade_history) > self.MAX_TRADE_HISTORY:
+            self.trade_history = self.trade_history[-self.MAX_TRADE_HISTORY:]
         self.total_trades += 1
         
         if trade.pnl_pct is not None:
@@ -168,6 +173,10 @@ class MarketMemory:
                 sample_count=1,
                 timestamp=trade.timestamp
             )
+        # Keep patterns dict bounded — evict lowest sample_count when over limit
+        if len(self.patterns) > self.MAX_PATTERNS:
+            sorted_pats = sorted(self.patterns.items(), key=lambda x: x[1].sample_count, reverse=True)[:self.MAX_PATTERNS]
+            self.patterns = dict(sorted_pats)
     
     def get_pattern_reliability(self, pattern_type: str, features: dict) -> float:
         """Get reliability score for a pattern."""
@@ -506,6 +515,14 @@ class SelfAwareTradingAgent:
         self.correct_decisions = 0
         self._decision_ids: set[str] = set()
         self._loaded_trade_ids: set[str] = set()
+
+        # Trading psychology engine — behavioral bias detection & correction
+        from backend.analysis.trading_psychology import TradingPsychologyEngine
+        self.trading_psychology = TradingPsychologyEngine()
+
+        # Pattern intelligence engine — self-learning pattern discovery
+        from backend.analysis.pattern_intelligence import PatternIntelligenceEngine
+        self.pattern_intel = PatternIntelligenceEngine()
         
     def analyze_market(self, candles: list[Candle], timeframe: str = "5m") -> dict:
         """Primary analysis method - extracts all intelligence from price."""
@@ -528,6 +545,12 @@ class SelfAwareTradingAgent:
         regime = self._detect_regime(candles)
         
         market_intel = self.memory.get_market_intelligence(hour, regime)
+
+        # Record candle segment for pattern intelligence and analyze
+        volatilities = {"high": "elevated", "low": "low"}
+        vol_regime = volatilities.get(features.get("volatility_state", "normal"), "normal")
+        self.pattern_intel.record_candles(candles, volatility_regime=vol_regime)
+        pattern_analysis = self.pattern_intel.analyze_current(candles)
         
         # Calculate signal scores
         long_score = self._calculate_long_score(features, market_intel, regime)
@@ -537,7 +560,7 @@ class SelfAwareTradingAgent:
         edge = abs(long_score - short_score)
         
         if edge < 0.1:
-            return {
+            result = {
                 'signal': 'WAIT',
                 'reason': 'No clear directional edge',
                 'confidence': 0.5,
@@ -545,7 +568,11 @@ class SelfAwareTradingAgent:
                 'short_score': short_score,
                 'features': features,
                 'market_intel': market_intel,
+                'pattern_intel': pattern_analysis,
             }
+            if pattern_analysis.get("outlook") != "neutral" and pattern_analysis.get("confidence", 0) > 0.6:
+                result["reason"] += f" | Pattern: {pattern_analysis['outlook']} ({pattern_analysis['confidence']:.0%})"
+            return result
         
         winning_side = 'LONG' if long_score > short_score else 'SHORT'
         winning_score = max(long_score, short_score)
@@ -590,6 +617,7 @@ class SelfAwareTradingAgent:
             'features': features,
             'market_intel': market_intel,
             'regime': regime,
+            'pattern_intel': pattern_analysis,
         }
         self._record_decision(signal, candles[-1].timestamp, timeframe)
         
@@ -1035,6 +1063,12 @@ class SelfAwareTradingAgent:
             score += pattern_score * 0.06
             reasons.append(f"Pattern reliability {pattern_score:.2f}")
 
+        # ── Trading psychology adjustment ──
+        psych_state = self.trading_psychology.get_state()
+        psych_score, psych_reasons = self.trading_psychology.adjust_score(score, psych_state)
+        score = psych_score
+        reasons.extend(psych_reasons)
+
         score = min(0.95, max(0.05, score))
         return score, reasons
 
@@ -1068,6 +1102,14 @@ class SelfAwareTradingAgent:
         if won:
             self.correct_decisions += 1
 
+        # Feed outcome to trading psychology engine
+        self.trading_psychology.record_trade_outcome(
+            direction=signal.get("signal", "unknown"),
+            confidence=signal.get("features", {}).get("confidence", 0.5),
+            pnl_pct=pnl_pct,
+            won=won,
+        )
+
     def _record_decision(self, signal: dict, candle_timestamp: int, timeframe: str = "5m") -> None:
         """Deduplicate analysis cycles — no longer increments total_decisions.
         The agent's decisions/accuracy now reflect only actual trade outcomes
@@ -1081,6 +1123,12 @@ class SelfAwareTradingAgent:
         if decision_id in self._decision_ids:
             return
         self._decision_ids.add(decision_id)
+        # Keep runtime set bounded — prune oldest if > 1000 entries
+        if len(self._decision_ids) > 1000:
+            self._decision_ids = set(list(self._decision_ids)[-500:])
+
+        # Track decision for fatigue detection in trading psychology
+        self.trading_psychology.record_decision()
 
         # NOTE: Prediction is recorded in unified_scalp.py compute() using
         # the actual ScalpSignal ID — NOT here — to guarantee ID consistency
@@ -1362,13 +1410,42 @@ class SelfAwareTradingAgent:
         return f"{side}_paper_trade"
     
     def get_agent_status(self) -> dict:
-        """Get agent learning status."""
+        """Get agent learning, psychology & pattern intelligence status."""
+        psych = self.trading_psychology.get_state()
+        pi = self.pattern_intel.get_state()
         return {
             'decisions': self.total_decisions,
             'accuracy': self.correct_decisions / self.total_decisions if self.total_decisions > 0 else 0,
             'memory_stats': self.memory.get_statistics(),
             'patterns_learned': len(self.memory.patterns),
             'market_hours_knowledge': len(self.memory.cycles_learned),
+            'psychology': {
+                'overconfidence_penalty': round(psych.overconfidence_penalty, 3),
+                'revenge_chase_penalty': round(psych.revenge_chase_penalty, 3),
+                'loss_aversion_penalty': round(psych.loss_aversion_penalty, 3),
+                'decision_fatigue_penalty': round(psych.decision_fatigue_penalty, 3),
+                'confidence_calibration': round(psych.confidence_calibration, 3),
+                'consecutive_wins': self.trading_psychology._consecutive_wins,
+                'consecutive_losses': self.trading_psychology._consecutive_losses,
+                'recent_decisions_1h': psych.recent_decisions_1h,
+                'warnings': psych.warnings,
+            },
+            'pattern_intel': {
+                'discovered_patterns': len(pi.discovered_patterns),
+                'total_segments': pi.total_segments_analyzed,
+                'patterns_data': [{
+                    'pattern_id': dp.pattern_id[:12],
+                    'direction': dp.direction,
+                    'win_rate': dp.win_rate,
+                    'effective_win_rate': round(self.pattern_intel._effective_win_rate(dp), 3),
+                    'occurrences': dp.occurrences,
+                    'confidence': dp.confidence,
+                    'effective_confidence': round(self.pattern_intel._effective_confidence(dp), 3),
+                    'avg_return': dp.avg_return,
+                    'effective_avg_return': round(self.pattern_intel._effective_avg_return(dp), 4),
+                    'decay_factor': round(self.pattern_intel._decay_factor(dp.last_seen), 3),
+                } for dp in sorted(pi.discovered_patterns, key=lambda x: x.confidence, reverse=True)[:10]],
+            },
         }
 
     def save_state(self, path: str = "data/agent_brain.json") -> None:
@@ -1394,8 +1471,11 @@ class SelfAwareTradingAgent:
         try:
             with open(path, "r") as f:
                 state = json.load(f)
-            self._decision_ids = set(state.get("_decision_ids", []))
-            self._loaded_trade_ids = set(state.get("_loaded_trade_ids", []))
+            raw_ids = state.get("_decision_ids", [])
+            # Limit stale IDs to prevent memory bloat from old bug
+            self._decision_ids = set(raw_ids[-500:]) if len(raw_ids) > 1000 else set(raw_ids)
+            raw_loaded = state.get("_loaded_trade_ids", [])
+            self._loaded_trade_ids = set(raw_loaded[-500:]) if len(raw_loaded) > 1000 else set(raw_loaded)
             # Sync counters from memory to discard any inflation from the
             # old _record_decision() path that counted every candle as a decision.
             self.total_decisions = self.memory.total_trades

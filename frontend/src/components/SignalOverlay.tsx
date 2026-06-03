@@ -26,7 +26,8 @@ interface SignalLine {
   width: number
 }
 
-export function SignalOverlay({ chart, series, width, height, version, signals }: SignalOverlayProps) {
+import { memo } from 'react'
+export const SignalOverlay = memo(function SignalOverlay({ chart, series, width, height, version, signals }: SignalOverlayProps) {
   void version
 
   if (!chart || !series || width <= 0 || height <= 0) return null
@@ -102,4 +103,4 @@ export function SignalOverlay({ chart, series, width, height, version, signals }
       ))}
     </div>
   )
-}
+})

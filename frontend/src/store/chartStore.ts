@@ -112,6 +112,35 @@ function saveCache(state: { signals: unknown; scalpContext: unknown; scalpRisk: 
   } catch {}
 }
 
+// Throttle high-frequency slow-changing slices. The backend pushes btc_patterns
+// on every snapshot (multiple per second) but discovered patterns and the bias
+// score only change meaningfully every few seconds. Throttling these prevents
+// the heavy patterns panel from re-rendering dozens of times per second and
+// causing UI lag.
+const THROTTLE_MS = 1500
+let lastBtcPatternsUpdateMs = 0
+let pendingBtcPatterns: BtcPatternContext | null = null
+let hasPendingBtcPatterns = false
+let btcPatternsFlushTimer: ReturnType<typeof setTimeout> | null = null
+let btcPatternsCommit: ((next: BtcPatternContext | null) => void) | null = null
+
+function scheduleBtcPatternsCommit(next: BtcPatternContext | null) {
+  pendingBtcPatterns = next
+  hasPendingBtcPatterns = true
+  if (btcPatternsFlushTimer) return
+  const elapsed = Date.now() - lastBtcPatternsUpdateMs
+  const delay = Math.max(0, THROTTLE_MS - elapsed)
+  btcPatternsFlushTimer = setTimeout(() => {
+    btcPatternsFlushTimer = null
+    if (hasPendingBtcPatterns && btcPatternsCommit) {
+      lastBtcPatternsUpdateMs = Date.now()
+      btcPatternsCommit(pendingBtcPatterns)
+    }
+    pendingBtcPatterns = null
+    hasPendingBtcPatterns = false
+  }, delay)
+}
+
 export const useChartStore = create<ChartStore>((set) => {
   const cached = loadCache()
   return {
@@ -251,7 +280,13 @@ export const useChartStore = create<ChartStore>((set) => {
       if (message.regime !== undefined) next.regime = message.regime
       if (message.sentiment !== undefined) next.sentiment = message.sentiment
       if (message.ai_ict !== undefined) next.aiIct = message.ai_ict
-      if (message.btc_patterns !== undefined) next.btcPatterns = message.btc_patterns
+      if (message.btc_patterns !== undefined) {
+        // Throttle: capture closure to commit throttled value
+        btcPatternsCommit = (value) => {
+          set((s) => ({ ...s, btcPatterns: value }))
+        }
+        scheduleBtcPatternsCommit(message.btc_patterns)
+      }
       if (message.psychology !== undefined) next.psychology = message.psychology
       if (message.readability !== undefined) next.readability = message.readability
       if (message.orderbook !== undefined) next.orderbook = message.orderbook

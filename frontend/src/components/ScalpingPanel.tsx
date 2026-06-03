@@ -1,20 +1,8 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
+import { Activity, AlertTriangle, BarChart3, Clock, Crosshair, Layers, Shield, Target, TrendingDown, TrendingUp, Zap } from 'lucide-react'
 import { useChartStore } from '../store/chartStore'
-import {
-  Crosshair,
-  TrendingUp,
-  TrendingDown,
-  Activity,
-  Shield,
-  AlertTriangle,
-  Clock,
-  Target,
-  Zap,
-  BarChart3,
-  Layers,
-} from 'lucide-react'
 
-export function ScalpingPanel() {
+export const ScalpingPanel = memo(function ScalpingPanel() {
   const scalp = useChartStore((state) => state.scalpContext)
   const scalpRisk = useChartStore((state) => state.scalpRisk)
 
@@ -412,4 +400,4 @@ export function ScalpingPanel() {
       )}
     </div>
   )
-}
+})

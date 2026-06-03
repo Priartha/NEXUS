@@ -6428,6 +6428,7 @@
 .scalping-panel :is(.signal-type, .signal-confidence, .sweep-side, .sweep-strength, .liq-price, .liq-distance, .liq-strength),
 .pt-trade-side,
 .pt-c-side,
+.pt-c-status,
 .bt-t-side,
 .bt-hdr-badge,
 .alert-row-sev,
@@ -6450,6 +6451,12 @@
   line-height: 1.2;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.pt-c-status {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
 }
 
 .acp-toggle,
