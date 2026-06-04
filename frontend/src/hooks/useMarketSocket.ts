@@ -16,6 +16,8 @@ export function useMarketSocket() {
   const reconnectTimerRef = useRef<number | null>(null)
   const heartbeatRef = useRef<number | null>(null)
   const socketWatchdogRef = useRef<number | null>(null)
+  const animationFrameRef = useRef<number | null>(null)
+  const pendingLiveMessageRef = useRef<ReturnType<typeof parseMarketMessage> | null>(null)
   const retryRef = useRef(1000)
   const lastMessageAtRef = useRef(0)
   const snapshotAppliedRef = useRef(false)
@@ -23,10 +25,35 @@ export function useMarketSocket() {
 
   const reconnect = useCallback(() => {
     websocketRef.current?.close()
+    if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
+    if (heartbeatRef.current) window.clearInterval(heartbeatRef.current)
+    if (socketWatchdogRef.current) window.clearInterval(socketWatchdogRef.current)
+    if (animationFrameRef.current) window.cancelAnimationFrame(animationFrameRef.current)
+    reconnectTimerRef.current = null
+    heartbeatRef.current = null
+    socketWatchdogRef.current = null
+    animationFrameRef.current = null
+    pendingLiveMessageRef.current = null
     snapshotAppliedRef.current = false
     lastMessageAtRef.current = 0
     setSession((value) => value + 1)
   }, [])
+
+  const applyLiveMessage = useCallback((message: ReturnType<typeof parseMarketMessage>) => {
+    if (!message) return
+    if (message.update_type !== 'tick' && message.update_type !== 'quote') {
+      applyMessage(message)
+      return
+    }
+    pendingLiveMessageRef.current = message
+    if (animationFrameRef.current !== null) return
+    animationFrameRef.current = window.requestAnimationFrame(() => {
+      animationFrameRef.current = null
+      const pending = pendingLiveMessageRef.current
+      pendingLiveMessageRef.current = null
+      if (pending) applyMessage(pending)
+    })
+  }, [applyMessage])
 
   // HTTP snapshot - runs once per session
   useEffect(() => {
@@ -118,7 +145,7 @@ export function useMarketSocket() {
           return
         }
 
-        applyMessage(parsed)
+          applyLiveMessage(parsed)
       } catch (error) {
         console.warn('[WS] Parse error:', error)
       }
@@ -129,6 +156,8 @@ export function useMarketSocket() {
     ws.onclose = () => {
       if (heartbeatRef.current) clearInterval(heartbeatRef.current)
       if (socketWatchdogRef.current) clearInterval(socketWatchdogRef.current)
+      heartbeatRef.current = null
+      socketWatchdogRef.current = null
       setConnectionStatus('closed')
       scheduleReconnect()
     }
@@ -154,9 +183,14 @@ export function useMarketSocket() {
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
       if (heartbeatRef.current) clearInterval(heartbeatRef.current)
       if (socketWatchdogRef.current) clearInterval(socketWatchdogRef.current)
+      if (animationFrameRef.current) window.cancelAnimationFrame(animationFrameRef.current)
+      heartbeatRef.current = null
+      socketWatchdogRef.current = null
+      animationFrameRef.current = null
+      pendingLiveMessageRef.current = null
       ws.close()
     }
-  }, [applyMessage, selectedTimeframe, setConnectionStatus, session])
+  }, [applyLiveMessage, applyMessage, selectedTimeframe, setConnectionStatus, session, reconnect])
 
   return { reconnect }
 }

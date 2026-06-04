@@ -3,6 +3,7 @@ import {
   Activity,
   AlertTriangle,
   BarChart2,
+  BarChart3,
   Bell,
   Brain,
   BrainCircuit,
@@ -13,6 +14,7 @@ import {
   Globe,
   Gauge,
   Layers,
+  MessageSquare,
   Orbit,
   Radar,
   RefreshCw,
@@ -22,6 +24,7 @@ import {
   Timer,
   TrendingDown,
   TrendingUp,
+  Users,
   Zap,
 } from 'lucide-react'
 import './App.css'
@@ -49,6 +52,12 @@ import { SESSION_COLORS } from './components/panelConstants'
 import AlertsPanel from './components/AlertsPanel'
 import BacktestPanel from './components/BacktestPanel'
 import PaperTradingPanel from './components/PaperTradingPanel'
+import { PositionManagerPanel } from './components/PositionManagerPanel'
+import { HMMRegimePanel } from './components/HMMRegimePanel'
+import { OnChainPanel } from './components/OnChainPanel'
+import { NLPSentimentPanel } from './components/NLPSentimentPanel'
+import { TransformerForecastPanel } from './components/TransformerForecastPanel'
+import { MLDashboardPanel } from './components/MLDashboardPanel'
 import { useAudioAlerts } from './hooks/useAudioAlerts'
 import { useMarketSocket } from './hooks/useMarketSocket'
 import { useChartStore } from './store/chartStore'
@@ -58,7 +67,7 @@ import {
   formatTimestamp,
 } from './types/market'
 
-export type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab'
+export type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab' | 'position' | 'hmm' | 'onchain' | 'nlp' | 'forecast' | 'ml-dash'
 const PANEL_VIEWS: readonly PanelView[] = [
   'signals',
   'scalp',
@@ -73,6 +82,12 @@ const PANEL_VIEWS: readonly PanelView[] = [
   'backtest',
   'forward',
   'log',
+  'position',
+  'ml-dash',
+  'hmm',
+  'nlp',
+  'forecast',
+  'onchain',
   'alerts',
   'alert-config',
   'analytics',
@@ -468,6 +483,42 @@ function AppShell() {
                     Log
                   </>
                 )}
+                {view === 'position' && (
+                  <>
+                    <Target size={11} />
+                    Positions
+                  </>
+                )}
+                {view === 'ml-dash' && (
+                  <>
+                    <Cpu size={11} />
+                    ML
+                  </>
+                )}
+                {view === 'hmm' && (
+                  <>
+                    <Activity size={11} />
+                    Regime
+                  </>
+                )}
+                {view === 'nlp' && (
+                  <>
+                    <MessageSquare size={11} />
+                    NLP
+                  </>
+                )}
+                {view === 'forecast' && (
+                  <>
+                    <BarChart3 size={11} />
+                    Forecast
+                  </>
+                )}
+                {view === 'onchain' && (
+                  <>
+                    <Users size={11} />
+                    OnChain
+                  </>
+                )}
                 {view === 'forward' && (
                   <>
                     <Activity size={11} />
@@ -859,6 +910,43 @@ function AppShell() {
               <SignalLogPanel />
             </div>
           )}
+
+          {panelView === 'position' && (
+            <div className="panel-content">
+              <PositionManagerPanel />
+            </div>
+          )}
+
+          {panelView === 'ml-dash' && (
+            <div className="panel-content">
+              <MLDashboardPanel />
+            </div>
+          )}
+
+          {panelView === 'hmm' && (
+            <div className="panel-content">
+              <HMMRegimePanel />
+            </div>
+          )}
+
+          {panelView === 'nlp' && (
+            <div className="panel-content">
+              <NLPSentimentPanel />
+            </div>
+          )}
+
+          {panelView === 'forecast' && (
+            <div className="panel-content">
+              <TransformerForecastPanel />
+            </div>
+          )}
+
+          {panelView === 'onchain' && (
+            <div className="panel-content">
+              <OnChainPanel />
+            </div>
+          )}
+
           </div>
         </aside>
       </section>

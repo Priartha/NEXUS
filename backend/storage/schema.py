@@ -12,10 +12,17 @@ _local = threading.local()
 
 def get_conn() -> sqlite3.Connection:
     existing = getattr(_local, "_conn", None)
-    if existing is not None:
+    existing_path = getattr(_local, "_path", None)
+    current_path = str(DB_PATH.resolve())
+    if existing is not None and existing_path == current_path:
         try:
             existing.execute("SELECT 1")
             return existing
+        except sqlite3.Error:
+            pass
+    elif existing is not None:
+        try:
+            existing.close()
         except sqlite3.Error:
             pass
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -25,6 +32,7 @@ def get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
     _local._conn = conn
+    _local._path = current_path
     return conn
 
 
@@ -409,3 +417,6 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+        if getattr(_local, "_conn", None) is conn:
+            _local._conn = None
+            _local._path = None

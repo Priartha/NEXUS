@@ -34,6 +34,9 @@ from backend.analysis.self_aware_agent import SelfAwareTradingAgent, get_agent
 from backend.analysis.ensemble_model import ensemble as ensemble_model
 from backend.analysis.self_optimizer import optimizer as self_optimizer
 from backend.analysis.anomaly_detection import MarketAnomalyDetector, adaptive_stop
+from backend.analysis.cvd_divergence import cvd_divergence_detector
+from backend.analysis.funding_strategy import funding_strategy
+from backend.analysis.adaptive_sltp import adaptive_sltp as adaptive_sltp_engine
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
@@ -311,10 +314,26 @@ class UnifiedScalpEngine:
         self.anomaly_detector.update(last_candle_for_anomaly)
 
         ordered = sorted(candles, key=lambda c: c.timestamp)
+        self._last_candles = ordered
+        self._last_liq_levels = getattr(futures_context, 'liquidation_clusters', []) if futures_context else []
         closes = [c.close for c in ordered]
         price = closes[-1]
 
         order_flow = self._order_flow(ordered)
+
+        # Feed order flow to CVD divergence detector
+        if order_flow:
+            cvd_divergence_detector.ingest(ordered[-1].timestamp, price, order_flow.cvd)
+
+        # Detect CVD divergences
+        cvd_divs = cvd_divergence_detector.detect()
+
+        # Compute funding rate strategy signal
+        funding_strat_signal = funding_strategy.compute(
+            self._cur_funding, price,
+            regime.phase if regime else None,
+        )
+
         funding = self._funding(now_ms)
         funding_rate = self._funding_rate(now_ms, futures_context)
         oi = self._open_interest(futures_context)
@@ -413,7 +432,23 @@ class UnifiedScalpEngine:
             elif div.get("type") == "bullish_hidden":
                 long_score += 0.06; long_reasons.append("Hidden bullish divergence")
             elif div.get("type") == "bearish_hidden":
-                short_score += 0.06; long_reasons.append("Hidden bearish divergence")
+                short_score += 0.06; short_reasons.append("Hidden bearish divergence")
+            # CVD Divergence — strongest orderflow reversal signal
+            for cvd_div in cvd_divs:
+                if cvd_div.divergence_type == "bullish_regular":
+                    long_score += 0.15 * cvd_div.strength; long_reasons.append(f"CVD bullish divergence ({cvd_div.strength:.0%})")
+                elif cvd_div.divergence_type == "bearish_regular":
+                    short_score += 0.15 * cvd_div.strength; short_reasons.append(f"CVD bearish divergence ({cvd_div.strength:.0%})")
+                elif cvd_div.divergence_type == "bullish_hidden":
+                    long_score += 0.10 * cvd_div.strength; long_reasons.append(f"CVD hidden bullish divergence ({cvd_div.strength:.0%})")
+                elif cvd_div.divergence_type == "bearish_hidden":
+                    short_score += 0.10 * cvd_div.strength; short_reasons.append(f"CVD hidden bearish divergence ({cvd_div.strength:.0%})")
+            # Funding strategy boost
+            if funding_strat_signal and funding_strat_signal.direction != "neutral":
+                if funding_strat_signal.direction == "long":
+                    long_score += 0.12 * funding_strat_signal.strength; long_reasons.append(f"Funding strategy long (z={funding_strat_signal.zscore:.1f})")
+                elif funding_strat_signal.direction == "short":
+                    short_score += 0.12 * funding_strat_signal.strength; short_reasons.append(f"Funding strategy short (z={funding_strat_signal.zscore:.1f})")
             # Candle patterns — micro-structure confirmation
             if candle_pat.get("pin_bar") == "bullish":
                 long_score += 0.06; long_reasons.append(f"Bullish pin bar ({candle_pat.get('pin_bar_strength', 1):.1f}x)")
@@ -477,7 +512,7 @@ class UnifiedScalpEngine:
             timeframe=timeframe,
         )
 
-        # ── Ensemble Model: 3-model blend (microstructure + ICT + momentum) ──
+        # ── Ensemble Model: 4-model blend (microstructure + ICT + momentum + XGBoost) ──
         micro_score, micro_reasons = ensemble_model.score_microstructure(
             order_flow, vwap, oi, funding_rate, price, regime_phase,
         )
@@ -487,9 +522,29 @@ class UnifiedScalpEngine:
         momentum_score, momentum_reasons = ensemble_model.score_momentum(
             rsi_3, ordered, kill_active, kill_session, metrics, wick,
         )
+        # XGBoost scoring — ML-based directional prediction
+        xgb_score_val = 0.5
+        xgb_reasons: list[str] = []
+        try:
+            from backend.analysis.xgboost_model import xgboost_model
+            from backend.storage.feature_store import feature_store
+            fv = feature_store.get_feature_vector(ordered[-1].timestamp, settings.symbol, timeframe)
+            if fv:
+                xgb_pred = xgboost_model.predict(ordered[-1].timestamp, fv)
+                if xgb_pred.direction == "long":
+                    xgb_score_val = 0.5 + xgb_pred.probability * 0.5
+                    xgb_reasons.append(f"ML bullish ({xgb_pred.probability:.1%})")
+                elif xgb_pred.direction == "short":
+                    xgb_score_val = 0.5 - xgb_pred.probability * 0.5
+                    xgb_reasons.append(f"ML bearish ({xgb_pred.probability:.1%})")
+                else:
+                    xgb_reasons.append(f"ML neutral ({xgb_pred.probability:.1%})")
+        except Exception:
+            pass
         ensemble_result = ensemble_model.combine(
             micro_score, ict_score, momentum_score, regime_phase,
             micro_reasons, ict_reasons, momentum_reasons,
+            xgboost_score=xgb_score_val, xgboost_reasons=xgb_reasons,
         )
 
         # ── Blend Agent + Ensemble (60% agent, 40% ensemble) ──
@@ -1354,17 +1409,42 @@ class UnifiedScalpEngine:
         if score <= 0:
             return None
 
-        # Use V4 regime-adaptive SL/TP multipliers if provided
-        if adaptive_sltp:
-            sl_mult = adaptive_sltp.get("sl_mult", 2.0)
-            tp1_mult = adaptive_sltp.get("tp1_mult", 3.0)
-            tp2_mult = adaptive_sltp.get("tp2_mult", 5.0)
-            if adaptive_sltp.get("reason") and adaptive_sltp["reason"] != "default":
-                reasons.append(f"Adaptive SL/TP: {adaptive_sltp['reason']}")
-        else:
-            sl_mult = max(2.0, 4.0 - score * 2)
-            tp1_mult = 3.0 + score * 3
-            tp2_mult = 5.0 + score * 6
+        # Use V5 adaptive SL/TP from AdaptiveSLTPEngine (volatility quantile)
+        try:
+            from backend.analysis.adaptive_sltp import adaptive_sltp as asltp
+            candles_for_adaptive = getattr(self, '_last_adaptive_candles', None)
+            if not candles_for_adaptive:
+                candles_for_adaptive = getattr(self, '_last_candles', [])
+            if candles_for_adaptive:
+                liq_levels = [lvl.price for lvl in getattr(self, '_last_liq_levels', [])] if hasattr(self, '_last_liq_levels') else None
+                asltp_result = asltp.compute(
+                    candles=candles_for_adaptive,
+                    side="long" if is_long else "short",
+                    entry_price=price,
+                    confidence=score,
+                    regime=regime,
+                    liquidity_levels=liq_levels,
+                )
+                sl_mult = asltp_result.sl_atr_multiple
+                tp1_mult = asltp_result.tp_atr_multiple
+                tp2_mult = asltp_result.tp_atr_multiple * 1.5
+                reasons.append(asltp_result.description)
+            else:
+                sl_mult = max(2.0, 4.0 - score * 2)
+                tp1_mult = 3.0 + score * 3
+                tp2_mult = 5.0 + score * 6
+        except Exception:
+            # Fallback to V4 adaptive SL/TP
+            if adaptive_sltp:
+                sl_mult = adaptive_sltp.get("sl_mult", 2.0)
+                tp1_mult = adaptive_sltp.get("tp1_mult", 3.0)
+                tp2_mult = adaptive_sltp.get("tp2_mult", 5.0)
+                if adaptive_sltp.get("reason") and adaptive_sltp["reason"] != "default":
+                    reasons.append(f"Adaptive SL/TP: {adaptive_sltp['reason']}")
+            else:
+                sl_mult = max(2.0, 4.0 - score * 2)
+                tp1_mult = 3.0 + score * 3
+                tp2_mult = 5.0 + score * 6
 
         # V4 Kelly position sizing
         if kelly:

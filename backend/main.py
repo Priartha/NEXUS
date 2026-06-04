@@ -51,6 +51,19 @@ from backend.storage.history_repository import get_candles_with_source
 from backend.analysis.daily_reports import daily_reporter
 from backend.utils.cache import global_cache, CACHE_TTLS, invalidate_pattern
 
+# Phase 2/3 ML module imports
+from backend.analysis.xgboost_model import xgboost_model
+from backend.analysis.hmm_regime import hmm_classifier
+from backend.analysis.sentiment_nlp import nlp_sentiment
+from backend.analysis.transformer_forecaster import transformer_forecaster
+from backend.analysis.rl_sizing import rl_sizing
+from backend.analysis.funding_strategy import funding_strategy
+from backend.analysis.adaptive_sltp import adaptive_sltp
+from backend.analysis.cvd_divergence import cvd_divergence_detector
+from backend.analysis.position_manager import position_manager
+from backend.storage.feature_store import feature_store
+from backend.analysis.pipeline_async import async_pipeline
+
 paper_trading = PaperTradingEngine()
 risk_manager = RiskManager()
 symbol_scanner = MultiSymbolScanner()
@@ -156,6 +169,13 @@ for timeframe, pipeline in pipelines.items():
     pipeline.set_store_reference(stores[timeframe])
 ai_ict_reviews = {timeframe: None for timeframe in supported_timeframes}
 
+# ML background task handles
+xgboost_task: asyncio.Task | None = None
+nlp_task: asyncio.Task | None = None
+onchain_task: asyncio.Task | None = None
+pipeline_task: asyncio.Task | None = None
+cross_exchange_task: asyncio.Task | None = None
+
 import hmac
 
 def require_api_key(request: Request, x_api_key: str | None = Header(default=None)) -> None:
@@ -256,6 +276,14 @@ async def lifespan(app: FastAPI):
     # Self-optimization loop (daily auto-research)
     auto_research_task = asyncio.create_task(auto_research_loop())
 
+    # Phase 2/3 ML background tasks
+    global xgboost_task, nlp_task, onchain_task, pipeline_task, cross_exchange_task
+    xgboost_task = asyncio.create_task(xgboost_train_loop())
+    nlp_task = asyncio.create_task(refresh_nlp_loop())
+    onchain_task = asyncio.create_task(refresh_onchain_loop())
+    cross_exchange_task = asyncio.create_task(refresh_cross_exchange_loop())
+    pipeline_task = asyncio.create_task(pipeline_health_loop())
+
     try:
         yield
     finally:
@@ -265,7 +293,9 @@ async def lifespan(app: FastAPI):
         model_monitor_task.cancel()
         db_backup_task.cancel()
         me_task.cancel()
-        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task, me_task):
+        for task in (xgboost_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task):
+            task.cancel()
+        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task, me_task, auto_research_task, xgboost_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task):
             try:
                 await task
             except asyncio.CancelledError:
@@ -1236,7 +1266,11 @@ async def chart_ws(websocket: WebSocket, tf: str = settings.timeframe, api_key: 
             await websocket.receive_text()
     except asyncio.TimeoutError:
         logger.error(f"WebSocket snapshot_async timed out for {timeframe} - pipeline lock or thread pool contention")
-        await websocket.close(code=1011)
+        try:
+            await websocket.close(code=1011)
+        except RuntimeError as exc:
+            if "close message has been sent" not in str(exc):
+                raise
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for timeframe {timeframe}")
     except RuntimeError as exc:
@@ -1292,6 +1326,22 @@ def _valid_timeframe(timeframe: str) -> str:
     if timeframe not in supported_timeframes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {timeframe}. Supported: {list(supported_timeframes)}")
     return timeframe
+
+
+def _latest_market_price(timeframe: str | None = None) -> float | None:
+    tf = timeframe or settings.timeframe
+    try:
+        tf = _valid_timeframe(tf)
+    except HTTPException:
+        tf = settings.timeframe
+    store = stores.get(tf)
+    if store is None:
+        return None
+    candle = store.live_candle or store.latest_closed()
+    if candle is None:
+        return None
+    price = float(candle.close)
+    return price if price > 0 else None
 
 
 def _attach_realtime_context(payload: dict, timeframe: str) -> dict:
@@ -1614,6 +1664,136 @@ async def refresh_futures_loop() -> None:
         except Exception:
             logger.exception("futures context refresh failed")
         await asyncio.sleep(settings.futures_funding_refresh_seconds)
+
+
+# ─── Phase 2/3 ML Background Loops ─────────────────────
+
+
+async def xgboost_train_loop() -> None:
+    """Periodically retrain the XGBoost model on new data."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            if xgboost_model.should_retrain():
+                primary_tf = _valid_timeframe(settings.timeframe)
+                store = stores.get(primary_tf)
+                candles = store.get_closed_candles() if store else []
+                result = xgboost_model.train(candles, primary_tf, settings.symbol)
+                if result:
+                    logger.info(f"XGBoost train: {result.get('status', 'ok')} - {result.get('accuracy', 0):.3f}")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("xgboost train loop failed")
+        await asyncio.sleep(3600)
+
+
+async def refresh_nlp_loop() -> None:
+    """Refresh NLP sentiment from external sources."""
+    await asyncio.sleep(5)
+    while True:
+        try:
+            result = await nlp_sentiment.compute()
+            if result:
+                await manager.broadcast({
+                    "update_type": "nlp_sentiment",
+                    "symbol": settings.symbol,
+                    "nlp_sentiment": {
+                        "aggregate_score": result.score,
+                        "aggregate_label": result.label,
+                        "confidence": result.confidence,
+                        "source_count": result.source_count,
+                        "finbert_score": result.finbert_score,
+                        "vader_score": result.vader_score,
+                        "fear_greed_index": result.fear_greed_index,
+                        "weighted_score": result.weighted_score,
+                        "description": result.description,
+                    },
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("nlp sentiment refresh failed")
+        await asyncio.sleep(300)
+
+
+async def refresh_onchain_loop() -> None:
+    """Refresh on-chain metrics periodically."""
+    await asyncio.sleep(10)
+    while True:
+        try:
+            from backend.ingestion.onchain import onchain_provider
+            # Refresh provider first (async)
+            try:
+                await onchain_provider.refresh()
+            except Exception:
+                pass
+            # Get current price from primary store if available
+            try:
+                primary_tf = _valid_timeframe(settings.timeframe)
+                store = stores.get(primary_tf)
+                btc_price = store.last_close if store and hasattr(store, "last_close") and store.last_close else 0
+                if btc_price == 0 and store and store.candles:
+                    btc_price = store.candles[-1].close
+            except Exception:
+                btc_price = 0
+            signal = onchain_provider.get_signal(btc_price or 0)
+            await manager.broadcast({
+                "update_type": "onchain",
+                "symbol": settings.symbol,
+                "onchain": signal,
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("onchain refresh failed")
+        await asyncio.sleep(600)
+
+
+async def refresh_cross_exchange_loop() -> None:
+    """Refresh cross-exchange data periodically."""
+    await asyncio.sleep(3)
+    while True:
+        try:
+            from backend.ingestion.cross_exchange import cross_exchange
+            snapshot = await cross_exchange.refresh()
+            if snapshot and snapshot.median_price > 0:
+                basis = cross_exchange.detect_basis()
+                await manager.broadcast({
+                    "update_type": "cross_exchange",
+                    "symbol": settings.symbol,
+                    "cross_exchange": {
+                        "median_price": snapshot.median_price,
+                        "spread_pct": snapshot.spread_pct,
+                        "exchange_count": snapshot.exchange_count,
+                        "basis_signals": [
+                            {"description": s.description, "basis_pct": s.basis_pct, "strength": s.strength}
+                            for s in basis[:3]
+                        ],
+                    },
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("cross-exchange refresh failed")
+        await asyncio.sleep(15)
+
+
+async def pipeline_health_loop() -> None:
+    """Run the async pipeline and broadcast health."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            health = async_pipeline.get_health()
+            await manager.broadcast({
+                "update_type": "pipeline_health",
+                "pipeline": health,
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("pipeline health loop failed")
+        await asyncio.sleep(60)
 
 
 async def refresh_multi_exchange_loop() -> None:
@@ -1979,6 +2159,273 @@ async def cache_clear(prefix: str | None = None) -> dict:
         return {"ok": True, "cleared": count, "prefix": prefix}
     await global_cache.clear()
     return {"ok": True, "cleared": "all"}
+
+
+# ─── Phase 2/3 ML API Endpoints ─────────────────────────
+
+
+@app.get("/ml/xgboost/state")
+async def xgboost_state() -> dict:
+    """Get current XGBoost model state."""
+    return xgboost_model.get_state()
+
+
+@app.post("/ml/xgboost/train")
+async def xgboost_train() -> dict:
+    """Manually trigger XGBoost retraining."""
+    try:
+        primary_tf = _valid_timeframe(settings.timeframe)
+        store = stores.get(primary_tf)
+        candles = store.get_closed_candles() if store else []
+        result = xgboost_model.train(candles, primary_tf, settings.symbol)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/features/store")
+async def feature_store_stats() -> dict:
+    """Get feature store statistics."""
+    return feature_store.get_state()
+
+
+@app.get("/funding/strategy/state")
+async def funding_strategy_state() -> dict:
+    """Get funding strategy current state."""
+    return funding_strategy.get_state()
+
+
+@app.get("/hmm/regime")
+async def hmm_regime_state() -> dict:
+    """Get HMM regime classifier state."""
+    return hmm_classifier.get_state()
+
+
+@app.get("/nlp/sentiment")
+async def nlp_sentiment_endpoint() -> dict:
+    """Get NLP sentiment analysis."""
+    try:
+        result = await nlp_sentiment.compute()
+        if result is None:
+            return {"error": "No sentiment data available"}
+        return {
+            "aggregate_score": result.score,
+            "aggregate_label": result.label,
+            "confidence": result.confidence,
+            "source_count": result.source_count,
+            "finbert_score": result.finbert_score,
+            "vader_score": result.vader_score,
+            "fear_greed_index": result.fear_greed_index,
+            "weighted_score": result.weighted_score,
+            "description": result.description,
+            "timestamp": result.timestamp,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/transformer/forecast")
+async def transformer_forecast_endpoint(candles: int = Query(100, ge=20, le=500)) -> dict:
+    """Get transformer multi-horizon forecast."""
+    primary_tf = _valid_timeframe(settings.timeframe)
+    store = stores.get(primary_tf)
+    if not store:
+        return {"current_price": 0.0, "model_ready": False, "horizons": [], "reason": "no_store"}
+    candle_list = store.get_closed_candles()[-candles:]
+    if len(candle_list) < 20:
+        current_price = candle_list[-1].close if candle_list else 0.0
+        return {"current_price": current_price, "model_ready": False, "horizons": [], "reason": "insufficient_data"}
+    current_price = candle_list[-1].close
+    try:
+        forecasts = transformer_forecaster.predict(candle_list, current_price)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Forecast failed: {e}")
+    return {
+        "current_price": current_price,
+        "model_ready": transformer_forecaster._is_trained if hasattr(transformer_forecaster, "_is_trained") else False,
+        "horizons": [
+            {
+                "horizon": f.horizon,
+                "horizon_bars": f.horizon_bars,
+                "predicted_direction": f.predicted_direction,
+                "predicted_return_pct": f.predicted_return_pct,
+                "confidence": f.confidence,
+                "entry_price": f.entry_price,
+                "target_price": f.target_price,
+                "stop_price": f.stop_price,
+                "description": f.description,
+            }
+            for f in forecasts
+        ],
+    }
+
+
+@app.get("/rl/sizing")
+async def rl_sizing_state() -> dict:
+    """Get RL position sizing agent state."""
+    return rl_sizing.get_state()
+
+
+@app.get("/position/status")
+async def position_status() -> dict:
+    """Get position manager state and open positions."""
+    return position_manager.get_state()
+
+
+@app.post("/position/open")
+async def position_open(request: Request) -> dict:
+    """Open a new position."""
+    body = await request.json()
+    side = body.get("side", "long")
+    size = body.get("size")
+    leverage = body.get("leverage", 1)
+    stop_loss = body.get("stop_loss")
+    take_profit = body.get("take_profit")
+    current_price = _latest_market_price()
+    if current_price is None or current_price <= 0:
+        raise HTTPException(status_code=409, detail="No live market price available for position entry")
+    try:
+        result = position_manager.open_position(
+            symbol=settings.symbol, side=side, size=size,
+            entry_price=current_price, leverage=leverage,
+            stop_loss=stop_loss, take_profit=take_profit,
+        )
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/position/close")
+async def position_close() -> dict:
+    """Close the current open position."""
+    try:
+        open_positions = position_manager.get_open_positions()
+        if not open_positions:
+            return {"status": "ok", "result": {"success": False, "error": "No open positions"}}
+        current_price = _latest_market_price()
+        if current_price is None or current_price <= 0:
+            raise HTTPException(status_code=409, detail="No live market price available for position close")
+        pos_id = open_positions[0].id
+        result = position_manager.close_position(position_id=pos_id, price=current_price, reason="manual")
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/onchain/metrics")
+async def onchain_metrics() -> dict:
+    """Get latest on-chain metrics."""
+    from backend.ingestion.onchain import onchain_provider
+    try:
+        btc_price = _latest_market_price() or 0.0
+        if btc_price > 0:
+            await onchain_provider.refresh(btc_price=btc_price)
+        signal = onchain_provider.get_signal(btc_price)
+        history = onchain_provider.get_recent_history(n=10)
+        snapshots = [
+            {
+                "timestamp": s.timestamp,
+                "mvrv_z_score": s.mvrv_zscore,
+                "exchange_flow_balance": s.exchange_net_flow,
+                "whale_tx_count": s.whale_tx_count,
+                "sopr": s.sopr,
+                "active_addresses": s.active_addresses,
+                "transaction_count": s.transaction_count,
+                "hash_rate": s.hash_rate,
+            }
+            for s in history
+        ]
+        state = onchain_provider.get_state()
+        return {
+            "signal": signal,
+            "history": snapshots,
+            "sources_loaded": [state.get("source", "none")],
+            "state": state,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/cross-exchange/state")
+async def cross_exchange_state() -> dict:
+    """Get cross-exchange aggregator state."""
+    from backend.ingestion.cross_exchange import cross_exchange
+    return cross_exchange.get_state()
+
+
+@app.get("/cross-exchange/snapshot")
+async def cross_exchange_snapshot() -> dict:
+    """Get latest cross-exchange snapshot."""
+    from backend.ingestion.cross_exchange import cross_exchange
+    try:
+        snap = await cross_exchange.refresh()
+        return {
+            "median_price": snap.median_price,
+            "mean_price": snap.mean_price,
+            "min_price": snap.min_price,
+            "max_price": snap.max_price,
+            "spread_pct": snap.spread_pct,
+            "volume_weighted_price": snap.volume_weighted_price,
+            "total_volume_24h": snap.total_volume_24h,
+            "exchange_count": snap.exchange_count,
+            "timestamp": snap.timestamp,
+            "exchanges": [
+                {
+                    "exchange": t.exchange,
+                    "last": t.last,
+                    "bid": t.bid,
+                    "ask": t.ask,
+                    "funding_rate": t.funding_rate,
+                    "volume_24h": t.volume_24h,
+                }
+                for t in snap.tickers
+            ],
+            "basis_signals": [
+                {"description": s.description, "basis_pct": s.basis_pct, "strength": s.strength}
+                for s in cross_exchange.detect_basis()[:5]
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/pipeline/health")
+async def pipeline_health() -> dict:
+    """Get async pipeline health status."""
+    return async_pipeline.get_health()
+
+
+@app.get("/pipeline/runs")
+async def pipeline_runs(n: int = Query(10, ge=1, le=100)) -> list[dict]:
+    """Get recent pipeline run reports."""
+    return async_pipeline.get_recent_reports(n=n)
+
+
+@app.get("/circuit-breakers")
+async def circuit_breaker_states() -> dict:
+    """Get all circuit breaker states."""
+    from backend.analysis.circuit_breaker import circuit_registry
+    return circuit_registry.get_all_states()
+
+
+@app.post("/circuit-breakers/reset")
+async def circuit_breaker_reset() -> dict:
+    """Reset all circuit breakers to CLOSED state."""
+    from backend.analysis.circuit_breaker import circuit_registry
+    circuit_registry.reset_all()
+    return {"status": "ok"}
+
+
+@app.get("/adaptive-sltp/state")
+async def adaptive_sltp_state() -> dict:
+    """Get adaptive SL/TP engine state."""
+    return adaptive_sltp.get_state()
+
+
+@app.get("/cvd/divergence")
+async def cvd_divergence_state() -> dict:
+    """Get CVD divergence detector state."""
+    return cvd_divergence_detector.get_state()
 
 
 # SPA fallback: serve index.html for any non-API route

@@ -283,7 +283,7 @@ export const useChartStore = create<ChartStore>((set) => {
       if (message.btc_patterns !== undefined) {
         // Throttle: capture closure to commit throttled value
         btcPatternsCommit = (value) => {
-          set((s) => ({ ...s, btcPatterns: value }))
+          set({ btcPatterns: value })
         }
         scheduleBtcPatternsCommit(message.btc_patterns)
       }
@@ -295,11 +295,14 @@ export const useChartStore = create<ChartStore>((set) => {
       if (message.scalp !== undefined) next.scalpContext = message.scalp
       if (message.scalp_risk !== undefined) next.scalpRisk = message.scalp_risk
 
-      // Persist signal state so it survives page refresh
-      const hasSignal = next.signals ?? state.signals
-      const hasScalp = next.scalpContext ?? state.scalpContext
-      const hasRisk = next.scalpRisk ?? state.scalpRisk
-      if (hasSignal || hasScalp || hasRisk) {
+      const shouldPersist =
+        message.signals !== undefined ||
+        message.scalp !== undefined ||
+        message.scalp_risk !== undefined
+      if (shouldPersist) {
+        const hasSignal = next.signals ?? state.signals
+        const hasScalp = next.scalpContext ?? state.scalpContext
+        const hasRisk = next.scalpRisk ?? state.scalpRisk
         queueMicrotask(() => saveCache({
           signals: hasSignal,
           scalpContext: hasScalp,
