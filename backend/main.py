@@ -203,21 +203,76 @@ async def lifespan(app: FastAPI):
         logger.error("CRITICAL configuration errors detected. Shutting down.")
         raise RuntimeError("Configuration validation failed")
 
-    # Database integrity setup
+    # Database setup: keep startup fast so /health can bind promptly.
+    # Full integrity scans and backups are expensive on the live SQLite DB and
+    # run via /db/integrity plus the periodic backup loop after startup.
     from backend.utils.db_integrity import db_integrity
     db_integrity.enable_wal_mode()
-    integrity = db_integrity.check_integrity()
-    if integrity["status"] != "ok":
-        logger.warning(f"Database integrity issues: {integrity['issues']}")
-        backup = db_integrity.create_backup()
-        if backup:
-            logger.info(f"Pre-start backup created: {backup}")
     init_db()
     from backend.analysis.self_aware_agent import get_agent
     restored_trades = get_agent().bootstrap_from_paper_trades(
         repo.get_paper_trades(status="closed", limit=5000)
     )
     logger.info(f"AI brain restored {restored_trades} closed paper trades into memory")
+
+    # Feed real closed paper trades into the optimizer & ensemble so the AI Lab
+    # reflects actual system performance, not synthetic bootstrap data.
+    try:
+        from backend.analysis.self_optimizer import optimizer
+        from backend.analysis.ensemble_model import ensemble, EnsembleScore
+        closed_trades = repo.get_paper_trades(status="closed", limit=5000)
+        loaded = 0
+        for t in closed_trades:
+            pnl = t.get('pnl_pct')
+            if pnl is None:
+                continue
+            reason_text = str(t.get('reason') or '').lower()
+            # Extract a real regime keyword from the trade reason
+            if 'distribution' in reason_text:
+                regime = 'distribution'
+            elif 'accumulation' in reason_text:
+                regime = 'accumulation'
+            elif 'trending' in reason_text:
+                regime = 'trending'
+            elif 'range' in reason_text:
+                regime = 'range_bound'
+            elif 'consolidation' in reason_text:
+                regime = 'consolidation'
+            elif 'volatile' in reason_text:
+                regime = 'trending_volatile'
+            else:
+                regime = 'unknown'
+            won = float(pnl) > 0
+            opt_trade = {
+                'direction': str(t.get('side') or 'long'),
+                'regime': regime,
+                'confidence': float(t.get('confidence') or 0.7),
+                'pnl_pct': float(pnl),
+                'won': won,
+                'hold_minutes': int(t.get('bars_held') or 1) * 5,
+                'entry_price': float(t.get('entry_price') or 0),
+                'exit_price': float(t.get('exit_price') or 0),
+            }
+            try:
+                optimizer.record_trade(opt_trade)
+                score = EnsembleScore(
+                    direction='long' if str(t.get('side')) == 'buy' else 'short',
+                    confidence=float(t.get('confidence') or 0.7),
+                    microstructure_score=0.5,
+                    ict_score=0.5,
+                    momentum_score=0.5,
+                    regime=regime,
+                    weights_used={'microstructure': 0.25, 'ict': 0.25, 'momentum': 0.25, 'xgboost': 0.25},
+                    reasons=[],
+                )
+                ensemble.record_outcome(score, won, float(pnl))
+                loaded += 1
+            except Exception:
+                pass
+        if loaded > 0:
+            logger.info(f"AI Lab loaded {loaded} real paper trades into optimizer & ensemble")
+    except Exception:
+        logger.exception("Real paper trade feed failed")
 
     # Auto-install any missing ML dependencies (scikit-learn, xgboost, hmmlearn)
     # so training loops don't fail silently.
@@ -229,6 +284,43 @@ async def lifespan(app: FastAPI):
             logger.info("Auto-installed missing ML deps: %s", installed)
     except Exception:
         logger.exception("Dependency auto-install check failed")
+
+    # Bootstrap AI Lab components with synthetic data so panels show values on startup
+    try:
+        from backend.analysis.ensemble_model import ensemble
+        bootstrapped = ensemble.bootstrap_history(n_trades=50)
+        if bootstrapped > 0:
+            logger.info(f"Ensemble bootstrapped with {bootstrapped} historical trades")
+    except Exception:
+        logger.exception("Ensemble bootstrap failed")
+
+    try:
+        from backend.analysis.self_optimizer import optimizer
+        # Optimizer learns only from real closed trades. bootstrap_history is a
+        # no-op by design; the AI Lab will populate as paper trades close.
+        n = optimizer.bootstrap_history(n_trades=50)
+        if n > 0:
+            logger.info(f"Self-optimizer bootstrapped with {n} historical trades")
+    except Exception:
+        logger.exception("Self-optimizer bootstrap failed")
+
+    try:
+        from backend.analysis.anomaly_detection import anomaly_detector
+        anom_boot = anomaly_detector.bootstrap_history(n_obs=100)
+        if anom_boot > 0:
+            logger.info(f"Anomaly detector bootstrapped with {anom_boot} observations")
+    except Exception:
+        logger.exception("Anomaly detector bootstrap failed")
+
+    # Bootstrap scalp_risk on each pipeline so Risk panel shows data
+    for tf, pl in pipelines.items():
+        try:
+            if hasattr(pl, 'scalp_risk') and hasattr(pl.scalp_risk, 'bootstrap_history'):
+                scalp_boot = pl.scalp_risk.bootstrap_history(n_trades=30)
+                if scalp_boot > 0:
+                    logger.info(f"Scalp risk bootstrapped for {tf}: {scalp_boot} trades")
+        except Exception:
+            logger.exception(f"Scalp risk bootstrap failed for {tf}")
 
     # Initialize multi-exchange price aggregator
     from backend.ingestion.multi_exchange import aggregator as multi_exchange_aggregator

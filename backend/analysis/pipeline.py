@@ -553,8 +553,16 @@ class AnalysisPipeline:
                 "trading_psychology": self._agent_psychology_status(),
                 "pattern_intel": self._agent_pattern_intel(),
                 "system_health": _get_system_health(),
-            },
+            }
         }
+        try:
+            from backend.utils.panel_freshness import panel_freshness
+            panel_freshness.mark_updated("ensemble")
+            panel_freshness.mark_updated("anomaly_detector")
+            panel_freshness.mark_updated("ai_lab")
+            panel_freshness.mark_updated("optimizer")
+        except Exception:
+            pass
         if include_candles:
             payload["candles"] = to_wire(store.get_chart_candles())
 

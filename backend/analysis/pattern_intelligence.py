@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import math
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -154,6 +155,7 @@ class PatternIntelligenceEngine:
         self.segments: deque[PatternOccurrence] = deque(maxlen=MAX_SEGMENTS)
         self.discovered: dict[str, DiscoveredPattern] = {}
         self._segment_hash_set: set[str] = set()  # dedup
+        self._lock = threading.RLock()
 
     def record_candles(
         self, candles: list[Candle],
@@ -161,6 +163,15 @@ class PatternIntelligenceEngine:
         volatility_regime: str = "normal",
     ) -> None:
         """Record a candle sequence as a pattern segment with optional outcome."""
+        with self._lock:
+            return self._record_candles_unlocked(candles, lookahead, volatility_regime)
+
+    def _record_candles_unlocked(
+        self,
+        candles: list[Candle],
+        lookahead: list[Candle] | None = None,
+        volatility_regime: str = "normal",
+    ) -> None:
         if len(candles) < SEGMENT_LENGTH:
             return
 
@@ -204,6 +215,12 @@ class PatternIntelligenceEngine:
         self, candles: list[Candle], top_k: int = 5,
     ) -> list[tuple[PatternOccurrence, float]]:
         """Find the most similar historical segments to the given candle sequence."""
+        with self._lock:
+            return self._find_similar_unlocked(candles, top_k)
+
+    def _find_similar_unlocked(
+        self, candles: list[Candle], top_k: int = 5,
+    ) -> list[tuple[PatternOccurrence, float]]:
         if len(candles) < SEGMENT_LENGTH or not self.segments:
             return []
 
@@ -228,10 +245,14 @@ class PatternIntelligenceEngine:
         - outlook: directional bias from historical outcomes
         - confidence: how reliable the outlook is
         """
+        with self._lock:
+            return self._analyze_current_unlocked(candles)
+
+    def _analyze_current_unlocked(self, candles: list[Candle]) -> dict:
         if len(candles) < SEGMENT_LENGTH:
             return {"outlook": "neutral", "confidence": 0, "matches": 0}
 
-        matches = self.find_similar(candles, top_k=20)
+        matches = self._find_similar_unlocked(candles, top_k=20)
         if not matches:
             return {"outlook": "neutral", "confidence": 0, "matches": 0}
 
@@ -239,7 +260,7 @@ class PatternIntelligenceEngine:
         query_norm = normalize_candles(candles[-SEGMENT_LENGTH:])
         best_discovered = None
         best_dp_sim = 0
-        for pid, dp in self.discovered.items():
+        for pid, dp in list(self.discovered.items()):
             sim = shape_similarity(query_norm, dp.prototype)
             if sim > best_dp_sim:
                 best_dp_sim = sim
@@ -292,6 +313,10 @@ class PatternIntelligenceEngine:
         2. Group by similarity (similarity >= threshold)
         3. Each cluster with >= MIN_CLUSTER_SIZE members becomes a discovered pattern
         """
+        with self._lock:
+            return self._discover_patterns_unlocked()
+
+    def _discover_patterns_unlocked(self) -> list[DiscoveredPattern]:
         if len(self.segments) < MIN_CLUSTER_SIZE * 2:
             return list(self.discovered.values())
 
@@ -385,7 +410,7 @@ class PatternIntelligenceEngine:
         remaining = [i for i in range(len(all_segs)) if i not in clustered]
         for i in remaining:
             seg = all_segs[i]
-            for pid, dp in self.discovered.items():
+            for pid, dp in list(self.discovered.items()):
                 sim = shape_similarity(seg.normalized, dp.prototype)
                 if sim >= MIN_SIMILARITY:
                     if seg.timestamp > dp.last_seen:
@@ -393,7 +418,7 @@ class PatternIntelligenceEngine:
                     break  # matched one pattern, move on
 
         # Update effective stats with decay applied
-        for dp in self.discovered.values():
+        for dp in list(self.discovered.values()):
             if dp.last_seen > 0:
                 effective_wr = self._effective_win_rate(dp)
                 effective_conf = self._effective_confidence(dp)
@@ -461,37 +486,39 @@ class PatternIntelligenceEngine:
 
     def get_state(self) -> PatternIntelligenceSnapshot:
         """Get current pattern intelligence state."""
-        now = int(time.time() * 1000)
-        return PatternIntelligenceSnapshot(
-            timestamp=now,
-            discovered_patterns=list(self.discovered.values()),
-            total_segments_analyzed=len(self.segments),
-        )
+        with self._lock:
+            now = int(time.time() * 1000)
+            return PatternIntelligenceSnapshot(
+                timestamp=now,
+                discovered_patterns=list(self.discovered.values()),
+                total_segments_analyzed=len(self.segments),
+            )
 
     def to_wire(self) -> dict:
         """Serialize to dict for JSON/API responses."""
-        patterns = []
-        for dp in self.discovered.values():
-            decay = self._decay_factor(dp.last_seen)
-            patterns.append({
-                "pattern_id": dp.pattern_id,
-                "member_count": dp.member_count,
-                "occurrences": dp.occurrences,
-                "avg_return": dp.avg_return,
-                "effective_avg_return": round(self._effective_avg_return(dp), 4),
-                "win_rate": dp.win_rate,
-                "effective_win_rate": round(self._effective_win_rate(dp), 3),
-                "direction": dp.direction,
-                "confidence": dp.confidence,
-                "effective_confidence": round(self._effective_confidence(dp), 3),
-                "decay_factor": round(decay, 3),
-                "first_seen": dp.first_seen,
-                "last_seen": dp.last_seen,
-            })
-        return {
-            "discovered_patterns": patterns,
-            "total_segments": len(self.segments),
-        }
+        with self._lock:
+            patterns = []
+            for dp in list(self.discovered.values()):
+                decay = self._decay_factor(dp.last_seen)
+                patterns.append({
+                    "pattern_id": dp.pattern_id,
+                    "member_count": dp.member_count,
+                    "occurrences": dp.occurrences,
+                    "avg_return": dp.avg_return,
+                    "effective_avg_return": round(self._effective_avg_return(dp), 4),
+                    "win_rate": dp.win_rate,
+                    "effective_win_rate": round(self._effective_win_rate(dp), 3),
+                    "direction": dp.direction,
+                    "confidence": dp.confidence,
+                    "effective_confidence": round(self._effective_confidence(dp), 3),
+                    "decay_factor": round(decay, 3),
+                    "first_seen": dp.first_seen,
+                    "last_seen": dp.last_seen,
+                })
+            return {
+                "discovered_patterns": patterns,
+                "total_segments": len(self.segments),
+            }
 
     def _segment_hash(self, normalized: list[dict[str, float]]) -> str:
         """Generate a hash for deduplication."""
