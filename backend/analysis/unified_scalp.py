@@ -566,6 +566,17 @@ class UnifiedScalpEngine:
         blended_long = agent_long * 0.6 + ensemble_long_score * 0.4
         blended_confidence = agent_conf * 0.6 + ensemble_confidence * 0.4
 
+        # Apply signal quality multiplier from self-optimizer's historical learning
+        if hasattr(self_optimizer, 'score_signal'):
+            quality_mult = self_optimizer.score_signal(
+                'long' if blended_long >= 0.5 else 'short',
+                regime_phase,
+                blended_confidence,
+            )
+            blended_confidence *= quality_mult
+            if quality_mult < 0.9 or quality_mult > 1.1:
+                logger.info("Signal quality mult=%.2f for regime=%s", quality_mult, regime_phase)
+
         if agent_has_signal:
             winning_side = agent_result['signal'].lower()
             winning_score = blended_confidence
@@ -1065,7 +1076,7 @@ class UnifiedScalpEngine:
         closes = [c.close for c in candles]
         price = closes[-1]
         threshold = adaptive_threshold if adaptive_threshold is not None else settings.scalp_min_confluence_score
-        edge = winning_score - losing_score
+        edge = abs(winning_score - losing_score)
         # Use adaptive edge threshold if provided
         edge_threshold = adaptive_edge if adaptive_edge is not None else settings.scalp_min_directional_edge
 

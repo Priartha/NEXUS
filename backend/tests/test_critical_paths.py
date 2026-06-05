@@ -89,6 +89,22 @@ def test_candle_close_check_uses_latest():
     assert "Weak bullish candle close" not in ctx.trade_blocked_reasons
 
 
+def test_signal_quality_edge_is_non_negative_with_mixed_score_scales():
+    engine = UnifiedScalpEngine()
+    blockers = engine._signal_quality_blockers(
+        candles=_candles(80),
+        side="long",
+        winning_score=0.62,
+        losing_score=0.90,
+        adaptive_threshold=0.60,
+        adaptive_edge=0.09,
+        winning_reasons=["agent", "ensemble", "momentum"],
+    )
+
+    assert not any("Directional edge -" in blocker for blocker in blockers)
+    assert not any(blocker.startswith("Directional edge") for blocker in blockers)
+
+
 def test_regime_accumulation_distribution_mutually_exclusive():
     candles = [
         Candle(1_700_000_000_000 + i * 300_000, 100, 101, 99, 100, 100, True)

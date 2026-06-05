@@ -205,13 +205,14 @@ class AsyncPipeline:
             candles = ctx.get("candles", [])
             if not candles:
                 return {"regime": "unknown", "probabilities": {}}
-            prices = [c["close"] for c in candles if "close" in c]
-            if len(prices) < hmm_classifier.n_states * 2:
-                return {"regime": "unknown", "probabilities": {}}
-            regime, probs = hmm_classifier.predict(prices)
+            regime_obj = hmm_classifier.predict(candles)
             if cb:
                 cb.record_success()
-            return {"regime": regime, "probabilities": probs}
+            return {
+                "regime": regime_obj.regime_name,
+                "probabilities": {regime_obj.regime_name: regime_obj.probability},
+                "probability": regime_obj.probability,
+            }
         except Exception as e:
             if cb:
                 cb.record_failure(str(e))

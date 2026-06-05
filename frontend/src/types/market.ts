@@ -440,6 +440,13 @@ export interface MarketStats {
     kept_attempts: number
     current_params: Record<string, number>
     regime_performance: Record<string, { trades: number; win_rate: number; total_pnl: number }>
+    signal_quality?: Record<string, {
+      quality_score: number
+      win_rate: number
+      avg_pnl: number
+      trades: number
+    }>
+    active_learning?: boolean
   }
   anomaly_detector?: {
     observations: number
@@ -447,6 +454,10 @@ export interface MarketStats {
     baseline_return_mean: number
     baseline_return_std: number
     current_volatility: number
+  }
+  system_health?: {
+    self_heal: Record<string, { alive: boolean; last_ok_ago: number; restarts: number; last_error: string }>
+    panel_freshness: Record<string, { age_seconds: number; threshold: number; is_stale: boolean }>
   }
 }
 

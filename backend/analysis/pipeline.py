@@ -25,6 +25,7 @@ from backend.analysis.regime_v2 import detect_market_regime
 from backend.analysis.unified_scalp import UnifiedScalpEngine
 from backend.analysis.scalp_risk import ScalpRiskManager
 from backend.config import settings
+from backend.utils.system_health import get_system_health as _get_system_health
 from backend.storage import repository as repo
 from backend.analysis.swing_detector import detect_swings
 from backend.engine.candle_store import CandleStore
@@ -551,6 +552,7 @@ class AnalysisPipeline:
                 "anomaly_detector": self.scalp_engine.anomaly_detector.get_status(),
                 "trading_psychology": self._agent_psychology_status(),
                 "pattern_intel": self._agent_pattern_intel(),
+                "system_health": _get_system_health(),
             },
         }
         if include_candles:
@@ -611,8 +613,13 @@ class AnalysisPipeline:
                         ensemble_model.record_outcome(ens_score, trade_data['won'], trade_data['pnl_pct'])
                     # Record in self-optimizer
                     self_optimizer.record_trade(trade_data)
-                    # Run self-optimization if due
-                    if self_optimizer.should_optimize():
+                    # Active learning: optimize on every trade close to refine signals
+                    if hasattr(self_optimizer, 'optimize_on_close'):
+                        opt_result = self_optimizer.optimize_on_close(trade_data)
+                        if opt_result.get('status') == 'applied':
+                            logger.info("AI Lab applied optimization: %s", opt_result.get('changes', {}))
+                    # Run scheduled self-optimization if due
+                    elif self_optimizer.should_optimize():
                         opt_result = self_optimizer.run_optimization()
                         if opt_result.get('status') == 'applied':
                             logger.info("Self-optimization applied: %s", opt_result)

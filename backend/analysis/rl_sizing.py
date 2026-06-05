@@ -18,7 +18,6 @@ import json
 import logging
 import math
 import os
-import random
 import tempfile
 import time
 from collections import deque
@@ -321,6 +320,7 @@ class RLSizingAgent:
         return {
             "is_trained": self._is_trained,
             "model_version": self._model_version,
+            "policy": "trained" if self._is_trained and self._policy is not None else "heuristic",
             "total_steps": self._total_steps,
             "memory_size": len(self._memory),
             "episodes": len(self._episode_rewards),

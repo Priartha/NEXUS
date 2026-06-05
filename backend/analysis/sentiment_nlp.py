@@ -73,6 +73,7 @@ class NLPSentimentEngine:
         self._cache: NLPSentimentResult | None = None
         self._history: deque[NLPSentimentResult] = deque(maxlen=200)
         self._headline_buffer: deque[dict] = deque(maxlen=500)
+        self._last_fetch: float = 0.0
 
         # FinBERT lazy load
         self._finbert_pipeline = None
@@ -198,12 +199,66 @@ class NLPSentimentEngine:
             pass
         return None
 
+    def _fetch_headlines(self, max_items: int = 20) -> list[dict]:
+        """Fetch latest crypto news headlines from public sources."""
+        headlines: list[dict] = []
+        try:
+            import httpx
+            resp = httpx.get(
+                "https://min-api.cryptocompare.com/data/v2/news/?lang=EN",
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data.get("Data", [])[:max_items]:
+                    title = item.get("title", "").strip()
+                    if title:
+                        headlines.append({
+                            "title": title,
+                            "source": item.get("source_info", {}).get("name", "cryptocompare"),
+                            "timestamp": int(item.get("published_on", 0)) * 1000,
+                        })
+        except Exception:
+            pass
+
+        if not headlines:
+            try:
+                import httpx
+                resp = httpx.get(
+                    "https://api.coinpaprika.com/v1/news",
+                    timeout=5,
+                )
+                if resp.status_code == 200:
+                    for item in resp.json()[:max_items]:
+                        title = item.get("title", "").strip()
+                        if title:
+                            headlines.append({
+                                "title": title,
+                                "source": item.get("source", "coinpaprika"),
+                                "timestamp": 0,
+                            })
+            except Exception:
+                pass
+
+        for h in headlines:
+            self.ingest_headline(h["title"], h["source"], h.get("timestamp"))
+        return headlines
+
     async def compute(self, recent_headlines: list[dict] | None = None) -> NLPSentimentResult:
         """Compute aggregated sentiment from all sources."""
         now_ms = int(time.time() * 1000)
 
-        # Use provided headlines or buffer
-        headlines = recent_headlines or list(self._headline_buffer)
+        if recent_headlines is not None:
+            headlines = recent_headlines
+        else:
+            if not self._headline_buffer or (time.time() - self._last_fetch) > 300:
+                self._fetch_headlines()
+                self._last_fetch = time.time()
+            headlines = list(self._headline_buffer)
+
+        if not headlines:
+            self._fetch_headlines()
+            headlines = list(self._headline_buffer)
 
         if not headlines:
             return NLPSentimentResult(

@@ -135,23 +135,28 @@ class XGBoostModel:
         if len(recent_labels) < self.min_training_samples:
             return {"status": "skipped", "reason": f"Only {len(recent_labels)} labels, need {self.min_training_samples}"}
 
-        # Build feature matrix
+        # Build feature matrix - collect all features first, then build aligned vectors
         X_list: list[list[float]] = []
         y_list: list[int] = []
         feature_names_set: set[str] = set()
+        feature_data: list[dict] = []
 
         for lb in recent_labels[:1000]:
             fv = feature_store.get_feature_vector(lb.timestamp, symbol, timeframe)
             if not fv:
                 continue
             feature_names_set.update(fv.keys())
-            X_list.append([fv.get(k, 0.0) for k in sorted(fv.keys())])
+            feature_data.append(fv)
             y_list.append(1 if lb.label == 1 else 0)
 
-        if len(X_list) < self.min_training_samples:
-            return {"status": "skipped", "reason": f"Only {len(X_list)} vectors, need {self.min_training_samples}"}
+        if len(feature_data) < self.min_training_samples:
+            return {"status": "skipped", "reason": f"Only {len(feature_data)} vectors, need {self.min_training_samples}"}
 
+        # Use stable, sorted feature names so all rows have the same shape
         self._feature_names = sorted(feature_names_set)
+        for fv in feature_data:
+            X_list.append([float(fv.get(k, 0.0)) for k in self._feature_names])
+
         X = np.array(X_list, dtype=np.float32)
         y = np.array(y_list, dtype=np.int32)
 
@@ -160,11 +165,14 @@ class XGBoostModel:
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
 
-        # Handle class imbalance
+        # Handle class imbalance (only for XGBoost; sklearn GBC uses sample_weight)
         n_pos = int(y_train.sum())
         n_neg = len(y_train) - n_pos
         if n_pos > 0 and n_neg > 0:
-            model.set_params(scale_pos_weight=n_neg / n_pos)
+            try:
+                model.set_params(scale_pos_weight=n_neg / n_pos)
+            except Exception:
+                pass
 
         model.fit(X_train, y_train)
 

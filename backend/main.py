@@ -171,6 +171,8 @@ ai_ict_reviews = {timeframe: None for timeframe in supported_timeframes}
 
 # ML background task handles
 xgboost_task: asyncio.Task | None = None
+hmm_task: asyncio.Task | None = None
+transformer_task: asyncio.Task | None = None
 nlp_task: asyncio.Task | None = None
 onchain_task: asyncio.Task | None = None
 pipeline_task: asyncio.Task | None = None
@@ -216,6 +218,17 @@ async def lifespan(app: FastAPI):
         repo.get_paper_trades(status="closed", limit=5000)
     )
     logger.info(f"AI brain restored {restored_trades} closed paper trades into memory")
+
+    # Auto-install any missing ML dependencies (scikit-learn, xgboost, hmmlearn)
+    # so training loops don't fail silently.
+    try:
+        from backend.utils.self_heal import check_and_install_deps
+        dep_results = check_and_install_deps()
+        installed = [k for k, v in dep_results.items() if v == "installed"]
+        if installed:
+            logger.info("Auto-installed missing ML deps: %s", installed)
+    except Exception:
+        logger.exception("Dependency auto-install check failed")
 
     # Initialize multi-exchange price aggregator
     from backend.ingestion.multi_exchange import aggregator as multi_exchange_aggregator
@@ -277,25 +290,74 @@ async def lifespan(app: FastAPI):
     auto_research_task = asyncio.create_task(auto_research_loop())
 
     # Phase 2/3 ML background tasks
-    global xgboost_task, nlp_task, onchain_task, pipeline_task, cross_exchange_task
+    global xgboost_task, nlp_task, onchain_task, pipeline_task, cross_exchange_task, hmm_task, transformer_task
     xgboost_task = asyncio.create_task(xgboost_train_loop())
+    hmm_task = asyncio.create_task(hmm_train_loop())
+    hmm_predict_task = asyncio.create_task(hmm_predict_loop())
+    transformer_task = asyncio.create_task(transformer_train_loop())
     nlp_task = asyncio.create_task(refresh_nlp_loop())
     onchain_task = asyncio.create_task(refresh_onchain_loop())
     cross_exchange_task = asyncio.create_task(refresh_cross_exchange_loop())
     pipeline_task = asyncio.create_task(pipeline_health_loop())
 
+    # Register all background tasks with the self-healing monitor so any task
+    # that dies or goes stale is automatically restarted.
+    from backend.utils.self_heal import self_heal
+    self_heal.register("xgboost_train", xgboost_task, lambda: asyncio.create_task(xgboost_train_loop()))
+    self_heal.register("hmm_train", hmm_task, lambda: asyncio.create_task(hmm_train_loop()))
+    self_heal.register("hmm_predict", hmm_predict_task, lambda: asyncio.create_task(hmm_predict_loop()))
+    self_heal.register("transformer_train", transformer_task, lambda: asyncio.create_task(transformer_train_loop()))
+    self_heal.register("nlp_refresh", nlp_task, lambda: asyncio.create_task(refresh_nlp_loop()))
+    self_heal.register("onchain_refresh", onchain_task, lambda: asyncio.create_task(refresh_onchain_loop()))
+    self_heal.register("cross_exchange", cross_exchange_task, lambda: asyncio.create_task(refresh_cross_exchange_loop()))
+    self_heal.register("pipeline_health", pipeline_task, lambda: asyncio.create_task(pipeline_health_loop()))
+    self_heal.register("sentiment", sentiment_task, lambda: asyncio.create_task(refresh_sentiment_loop()))
+    self_heal.register("ai_ict", ai_ict_task, lambda: asyncio.create_task(refresh_ai_ict_loop()))
+    self_heal.register("multi_exchange", me_task, lambda: asyncio.create_task(refresh_multi_exchange_loop()))
+    self_heal.register("auto_research", auto_research_task, lambda: asyncio.create_task(auto_research_loop()))
+    self_heal.register("model_monitor", model_monitor_task, lambda: asyncio.create_task(model_performance_monitor_loop()))
+    self_heal.register("db_backup", db_backup_task, lambda: asyncio.create_task(database_backup_loop(db_integrity)))
+    self_heal.register("futures", futures_task, lambda: asyncio.create_task(refresh_futures_loop()))
+    await self_heal.start()
+
+    # Register panels with the freshness monitor so any stale data triggers a refresh
+    from backend.utils.panel_freshness import panel_freshness
+    try:
+        from backend.analysis import (
+            self_optimizer, ensemble_model, anomaly_detection, scalp_risk,
+        )
+        panel_freshness.register_panel("optimizer", threshold=900.0)
+        panel_freshness.register_panel("ensemble", threshold=600.0)
+        panel_freshness.register_panel("anomaly_detector", threshold=300.0)
+        panel_freshness.register_panel("ai_lab", threshold=300.0)
+        panel_freshness.register_panel("ml_xgboost", threshold=1200.0)
+        panel_freshness.register_panel("transformer_forecast", threshold=1500.0)
+        panel_freshness.register_panel("hmm_regime", threshold=180.0)
+        await panel_freshness.start()
+    except Exception:
+        logger.exception("Panel freshness monitor registration failed")
+
     try:
         yield
     finally:
         logger.info("Shutting down background tasks")
+        try:
+            await self_heal.stop()
+        except Exception:
+            pass
+        try:
+            await panel_freshness.stop()
+        except Exception:
+            pass
         await history_recorder.stop()
         await daily_reporter.stop()
         model_monitor_task.cancel()
         db_backup_task.cancel()
         me_task.cancel()
-        for task in (xgboost_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task):
+        for task in (xgboost_task, hmm_task, transformer_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task):
             task.cancel()
-        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task, me_task, auto_research_task, xgboost_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task):
+        hmm_predict_task.cancel()
+        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task, me_task, auto_research_task, xgboost_task, hmm_task, transformer_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task, hmm_predict_task):
             try:
                 await task
             except asyncio.CancelledError:
@@ -1671,25 +1733,171 @@ async def refresh_futures_loop() -> None:
 
 async def xgboost_train_loop() -> None:
     """Periodically retrain the XGBoost model on new data."""
+    from backend.analysis.label_generator import labeler
+    from backend.storage.feature_store import feature_store
+    from backend.utils.self_heal import self_heal
     await asyncio.sleep(120)
     while True:
         try:
+            primary_tf = _valid_timeframe(settings.timeframe)
+            store = stores.get(primary_tf)
+            candles = store.get_closed_candles() if store else []
+
+            if len(candles) >= 250:
+                labeler.compute_labels(candles)
+                logger.info(f"Labels generated: {len(labeler._labels)} total")
+
+                # Compute and record features
+                feature_store.register_default_features()
+                last = candles[-1]
+                close = float(last.close)
+                if close > 0:
+                    closes = [float(c.close) for c in candles]
+                    volumes = [float(c.volume) for c in candles]
+                    highs = [float(c.high) for c in candles]
+                    lows = [float(c.low) for c in candles]
+                    n = len(closes)
+                    sma20 = sum(closes[-20:]) / 20 if n >= 20 else sum(closes) / n
+                    sma50 = sum(closes[-50:]) / 50 if n >= 50 else sma20
+                    returns = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, n) if closes[i - 1] > 0]
+                    pos_returns = [r for r in returns[-14:] if r > 0]
+                    neg_returns = [r for r in returns[-14:] if r < 0]
+                    avg_gain = sum(pos_returns) / 14 if pos_returns else 0
+                    avg_loss = abs(sum(neg_returns) / 14) if neg_returns else 1e-9
+                    rs = avg_gain / max(avg_loss, 1e-9)
+                    rsi = 100 - (100 / (1 + rs))
+                    atr_series = [max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])) for i in range(1, n)]
+                    atr = sum(atr_series[-14:]) / 14 if atr_series else 0
+                    avg_vol = sum(volumes[-20:]) / 20 if n >= 20 else sum(volumes) / n
+                    trend = (sma20 - sma50) / sma50 if sma50 > 0 else 0.0
+                    vol = (sum(r * r for r in returns[-20:]) / min(20, len(returns))) ** 0.5 if returns else 0.0
+
+                    feat_dict = {
+                        "rsi14": round(rsi, 4),
+                        "atr14": round(atr, 4),
+                        "trend_score": round(max(-1, min(1, trend * 50)), 4),
+                        "volatility_score": round(vol * 100, 4),
+                        "volume_zscore": round((volumes[-1] - avg_vol) / (avg_vol * 0.5 + 1e-9), 4),
+                        "realized_volatility": round(vol * 100, 4),
+                        "vwap_deviation": round((close - sma20) / sma20 * 100, 4),
+                        "of_cvd": round(closes[-1] - closes[0], 2),
+                    }
+                    if n >= 5 and closes[-5] > 0:
+                        feat_dict["of_cvd_slope"] = round((closes[-1] - closes[-5]) / closes[-5] * 100, 4)
+                    feature_store.ingest_feature_values(
+                        int(last.timestamp), settings.symbol, primary_tf, feat_dict
+                    )
+
+                    # Record label features
+                    for lb in list(labeler._labels_deque)[-200:]:
+                        feature_store.ingest_feature_values(
+                            lb.timestamp, settings.symbol, primary_tf,
+                            {
+                                "label_forward_return": round(lb.forward_return, 4),
+                                "label_direction": float(lb.label),
+                            }
+                        )
+
             if xgboost_model.should_retrain():
-                primary_tf = _valid_timeframe(settings.timeframe)
-                store = stores.get(primary_tf)
-                candles = store.get_closed_candles() if store else []
                 result = xgboost_model.train(candles, primary_tf, settings.symbol)
                 if result:
                     logger.info(f"XGBoost train: {result.get('status', 'ok')} - {result.get('accuracy', 0):.3f}")
+                    from backend.utils.panel_freshness import panel_freshness as _pf
+                    _pf.mark_updated("ml_xgboost")
+            self_heal.heartbeat("xgboost_train", ok=True)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as e:
+            self_heal.heartbeat("xgboost_train", ok=False, error=str(e))
             logger.exception("xgboost train loop failed")
+        await asyncio.sleep(900)  # retrain every 15 minutes
+
+
+async def hmm_train_loop() -> None:
+    """Periodically retrain the HMM regime classifier on new candle data."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(60)
+    while True:
+        try:
+            if hmm_classifier.should_retrain():
+                primary_tf = _valid_timeframe(settings.timeframe)
+                store = stores.get(primary_tf)
+                candles = store.get_closed_candles()[-500:] if store else []
+                if candles:
+                    result = hmm_classifier.train(candles)
+                    if result:
+                        logger.info(
+                            f"HMM train: {result.get('status', 'ok')} - {result.get('reason', 'completed')}"
+                        )
+                        panel_freshness.mark_updated("hmm_regime")
+            self_heal.heartbeat("hmm_train", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("hmm_train", ok=False, error=str(e))
+            logger.exception("hmm train loop failed")
         await asyncio.sleep(3600)
+
+
+async def transformer_train_loop() -> None:
+    """Periodically retrain the transformer forecaster on new candle data."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(180)
+    while True:
+        try:
+            state = transformer_forecaster.get_state()
+            if not state.get("is_trained", False) or (time.time() - state.get("last_train_ts", 0)) > 3600:
+                primary_tf = _valid_timeframe(settings.timeframe)
+                store = stores.get(primary_tf)
+                candles = store.get_closed_candles()[-1000:] if store else []
+                if len(candles) >= 500:
+                    result = transformer_forecaster.train(candles)
+                    if result:
+                        logger.info(
+                            f"Transformer train: {result.get('status', 'ok')} - "
+                            f"train_loss={result.get('train_loss', 0):.4f}, "
+                            f"test_loss={result.get('test_loss', 0):.4f}"
+                        )
+                        panel_freshness.mark_updated("transformer_forecast")
+            self_heal.heartbeat("transformer_train", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("transformer_train", ok=False, error=str(e))
+            logger.exception("transformer train loop failed")
+        await asyncio.sleep(3600)
+
+
+async def hmm_predict_loop() -> None:
+    """Periodically call HMM predict to populate recent_regimes history."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(90)
+    while True:
+        try:
+            state = hmm_classifier.get_state()
+            if state.get("is_trained", False):
+                primary_tf = _valid_timeframe(settings.timeframe)
+                store = stores.get(primary_tf)
+                candles = store.get_closed_candles()[-200:] if store else []
+                if len(candles) >= 50:
+                    hmm_classifier.predict(candles)
+                    panel_freshness.mark_updated("hmm_regime")
+            self_heal.heartbeat("hmm_predict", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("hmm_predict", ok=False, error=str(e))
+            logger.exception("hmm predict loop failed")
+        await asyncio.sleep(60)
 
 
 async def refresh_nlp_loop() -> None:
     """Refresh NLP sentiment from external sources."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
     await asyncio.sleep(5)
     while True:
         try:
@@ -1710,15 +1918,20 @@ async def refresh_nlp_loop() -> None:
                         "description": result.description,
                     },
                 })
+                panel_freshness.mark_updated("nlp_sentiment")
+            self_heal.heartbeat("nlp_refresh", ok=True)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as e:
+            self_heal.heartbeat("nlp_refresh", ok=False, error=str(e))
             logger.exception("nlp sentiment refresh failed")
         await asyncio.sleep(300)
 
 
 async def refresh_onchain_loop() -> None:
     """Refresh on-chain metrics periodically."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
     await asyncio.sleep(10)
     while True:
         try:
@@ -1743,9 +1956,12 @@ async def refresh_onchain_loop() -> None:
                 "symbol": settings.symbol,
                 "onchain": signal,
             })
+            panel_freshness.mark_updated("onchain_metrics")
+            self_heal.heartbeat("onchain_refresh", ok=True)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as e:
+            self_heal.heartbeat("onchain_refresh", ok=False, error=str(e))
             logger.exception("onchain refresh failed")
         await asyncio.sleep(600)
 
@@ -2189,6 +2405,48 @@ async def feature_store_stats() -> dict:
     return feature_store.get_state()
 
 
+@app.get("/ml/optimizer/status")
+async def ml_optimizer_status() -> dict:
+    """Get self-optimizer status including live signal quality scores."""
+    from backend.analysis.self_optimizer import optimizer as self_optimizer
+    return self_optimizer.get_status()
+
+
+@app.get("/system/self-heal/status")
+async def self_heal_status() -> dict:
+    """Status of all monitored background tasks (alive, last_ok_ago, restarts)."""
+    from backend.utils.self_heal import self_heal
+    return self_heal.get_status()
+
+
+@app.get("/system/panels/freshness")
+async def panel_freshness_status() -> dict:
+    """Freshness status of all registered data panels."""
+    from backend.utils.panel_freshness import panel_freshness
+    return panel_freshness.get_status()
+
+
+@app.post("/system/self-heal/restart-all")
+async def self_heal_restart_all() -> dict:
+    """Force-restart every monitored background task."""
+    from backend.utils.self_heal import self_heal
+    restarted = []
+    for name, info in self_heal._tasks.items():
+        if info.get("factory"):
+            try:
+                old = info["task"]
+                if old and not old.done():
+                    old.cancel()
+                new_task = info["factory"]()
+                info["task"] = new_task
+                info["last_ok"] = time.time()
+                self_heal._restart_counts[name] = self_heal._restart_counts.get(name, 0) + 1
+                restarted.append(name)
+            except Exception as e:
+                logger.exception("Failed to restart %s: %s", name, e)
+    return {"restarted": restarted, "count": len(restarted)}
+
+
 @app.get("/funding/strategy/state")
 async def funding_strategy_state() -> dict:
     """Get funding strategy current state."""
@@ -2199,6 +2457,23 @@ async def funding_strategy_state() -> dict:
 async def hmm_regime_state() -> dict:
     """Get HMM regime classifier state."""
     return hmm_classifier.get_state()
+
+
+@app.post("/hmm/train")
+async def hmm_train(timeframe: str = "5m", limit: int = 500) -> dict:
+    """Manually trigger HMM training on recent candle data."""
+    try:
+        tf = _valid_timeframe(timeframe)
+        store = stores.get(tf)
+        candles = store.get_closed_candles()[-limit:] if store else []
+        if not candles:
+            raise HTTPException(status_code=400, detail=f"No candles available for {tf}")
+        result = hmm_classifier.train(candles)
+        return {"status": "ok", "result": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/nlp/sentiment")
@@ -2258,6 +2533,23 @@ async def transformer_forecast_endpoint(candles: int = Query(100, ge=20, le=500)
             for f in forecasts
         ],
     }
+
+
+@app.post("/transformer/train")
+async def transformer_train(timeframe: str = "5m", limit: int = 1000) -> dict:
+    """Manually trigger transformer training on recent candle data."""
+    try:
+        tf = _valid_timeframe(timeframe)
+        store = stores.get(tf)
+        candles = store.get_closed_candles()[-limit:] if store else []
+        if not candles:
+            raise HTTPException(status_code=400, detail=f"No candles available for {tf}")
+        result = transformer_forecaster.train(candles)
+        return {"status": "ok", "result": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/rl/sizing")

@@ -53,7 +53,7 @@ class BacktestEngine:
         funding_rate_per_8h: float = 0.0001,
         signal_side_mode: str = "normal",
         avoid_reason_tokens: list[str] | None = None,
-        tp_atr_multiplier: float = 0.0,  # 0 = use signal default
+        tp_atr_multiplier: float = 2.0,
         sl_atr_multiplier: float = 0.0,  # 0 = use signal default
         require_regime_alignment: bool = False,
         max_candles: int = 0,  # 0 = unlimited

@@ -302,6 +302,7 @@ const MessageSchema = z.union([
       ensemble: z.any().optional(),
       self_optimizer: z.any().optional(),
       anomaly_detector: z.any().optional(),
+      system_health: z.any().optional(),
     }).passthrough().optional(),
     available_timeframes: z.array(z.string()).optional(),
     btc_patterns: z.any().nullable().optional(),

@@ -309,8 +309,7 @@ class HMMRegimeClassifier:
             "history_length": len(self._regime_history),
             "last_train_ts": self._last_train_ts,
             "recent_regimes": [
-                {"ts": r.timestamp, "name": r.regime_name, "prob": round(r.probability, 3)}
-                for r in list(self._regime_history)[-10:]
+                r.regime_name for r in list(self._regime_history)[-10:]
             ],
         }
 
