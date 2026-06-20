@@ -100,5 +100,21 @@ class Settings:
     enable_pattern_startup_seed: bool = os.getenv("NEXUS_ENABLE_PATTERN_STARTUP_SEED", "false").lower() == "true"
     pattern_seed_max_segments: int = int(os.getenv("NEXUS_PATTERN_SEED_MAX_SEGMENTS", "250"))
 
+    # Personalized execution profile derived from the user's Delta PnL export.
+    trader_profile_enabled: bool = os.getenv("NEXUS_TRADER_PROFILE_ENABLED", "true").lower() == "true"
+    trader_profile_path: str = os.getenv(
+        "NEXUS_TRADER_PROFILE_PATH",
+        "data/trader_style_profile.json",
+    )
+
+    # Paper-trading learning/risk controls.  Paper mode is used to collect
+    # forward-test evidence, so its drawdown guard should be configurable and
+    # separate from live execution risk.
+    paper_max_drawdown_pct: float = float(os.getenv("NEXUS_PAPER_MAX_DD_PCT", "0.30"))
+    paper_max_daily_loss_pct: float = float(os.getenv("NEXUS_PAPER_DAILY_LOSS_PCT", "0.05"))
+    paper_max_position_size_pct: float = float(os.getenv("NEXUS_PAPER_MAX_POSITION_PCT", "0.03"))
+    paper_exploration_enabled: bool = os.getenv("NEXUS_PAPER_EXPLORATION_ENABLED", "true").lower() == "true"
+    paper_exploration_min_score: float = float(os.getenv("NEXUS_PAPER_EXPLORATION_MIN_SCORE", "0.52"))
+
 
 settings = Settings()

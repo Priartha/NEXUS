@@ -37,6 +37,7 @@ from backend.analysis.anomaly_detection import MarketAnomalyDetector, adaptive_s
 from backend.analysis.cvd_divergence import cvd_divergence_detector
 from backend.analysis.funding_strategy import funding_strategy
 from backend.analysis.adaptive_sltp import adaptive_sltp as adaptive_sltp_engine
+from backend.analysis.trader_profile import get_trader_profile
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,7 @@ class UnifiedScalpEngine:
         self._spot_vol_avg: float = 0.0
         self._liq_cache: list[dict] = []
         self._last_signal_ts: int = 0
-        self._signal_cooldown_ms: int = 5 * 60 * 1000
+        self._signal_cooldown_ms: int = 1 * 60 * 1000
         self._use_candle_timestamp_for_cooldown: bool = True
         # Multi-exchange aggregated price for cross-validation
         self._last_aggregated_price: float | None = None
@@ -485,6 +486,8 @@ class UnifiedScalpEngine:
 
         # Use adaptive threshold from self-optimizer
         threshold = adaptive_params.get('min_confidence', settings.scalp_min_confluence_score)
+        trader_profile = get_trader_profile()
+        threshold = trader_profile.confidence_threshold(threshold, ordered[-1])
 
         has_oi = oi.current_oi > 0 and len(self._oi_hist) >= 2
         has_funding = self._cur_funding != 0.0
@@ -602,12 +605,53 @@ class UnifiedScalpEngine:
         quality_blockers = self._signal_quality_blockers(
             ordered, winning_side, winning_score, 1.0 - winning_score if agent_has_signal else (short_score if winning_side == "long" else long_score),
             regime, threshold, winning_reasons,
-            adaptive_edge=adaptive_params.get('min_edge', settings.scalp_min_directional_edge),
+            adaptive_edge=trader_profile.edge_threshold(
+                adaptive_params.get('min_edge', settings.scalp_min_directional_edge),
+                ordered[-1].timestamp,
+            ),
         )
+        quality_blockers.extend(trader_profile.signal_blockers(None, ordered[-1]))
         if sl_blocker:
             quality_blockers.append(sl_blocker)
 
         if quality_blockers:
+            paper_signals: list[ScalpSignal] = []
+            if (
+                settings.paper_exploration_enabled
+                and winning_score >= settings.paper_exploration_min_score
+                and not sl_blocker
+            ):
+                agent_memory = get_agent().memory if hasattr(get_agent(), 'memory') else None
+                win_rate = (
+                    agent_memory.winning_trades / agent_memory.total_trades
+                    if agent_memory and agent_memory.total_trades > 0 else 0.5
+                )
+                adaptive_sltp = self._regime_adaptive_sltp(price, atr, winning_score, regime)
+                kelly = self._kelly_position_size(win_rate, winning_score, 2.0)
+                last_candle = ordered[-1]
+                paper_reason = [
+                    "PAPER_EXPLORATION_ONLY",
+                    *winning_reasons[:6],
+                    "Live blockers: " + "; ".join(quality_blockers[:4]),
+                ]
+                paper_sig = self._build_signal(
+                    f"{winning_side.upper()} BTCUSD",
+                    price,
+                    atr,
+                    winning_score,
+                    paper_reason,
+                    now_ms,
+                    funding_rate,
+                    enriched_features=agent_result.get('enriched_features') if agent_has_signal else None,
+                    candle=last_candle,
+                    regime=regime,
+                    adaptive_sltp=adaptive_sltp,
+                    kelly=kelly,
+                )
+                if paper_sig:
+                    paper_sig.status = "paper"
+                    paper_sig.model = "unified-scalp-paper-exploration"
+                    paper_signals.append(paper_sig)
             ctx = ScalpContext(
                 timestamp=now_ms,
                 order_flow=order_flow,
@@ -619,7 +663,7 @@ class UnifiedScalpEngine:
                 volume_profile=vol_profile,
                 liquidity_sweeps=sweeps,
                 wick_rejection=wick,
-                signals=[],
+                signals=paper_signals,
                 rsi_3=round(rsi_3, 2),
                 spot_volume_ok=True,
                 macro_event_block=False,

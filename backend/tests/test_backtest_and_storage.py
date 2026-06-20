@@ -44,6 +44,51 @@ class TestBacktestEngine(unittest.TestCase):
         result = self.engine.run([])
         self.assertEqual(result["total_trades"], 0)
 
+    def test_ignores_paper_only_signals(self):
+        from backend.models.types import ScalpContext, ScalpSignal
+
+        candles = self._dummy_candles(100)
+
+        class FakeScalp:
+            _use_candle_timestamp_for_cooldown = True
+            _cur_funding = 0.0
+            _cur_oi = 500_000_000.0
+
+            def __init__(self):
+                self._oi_hist = []
+
+            def compute(self, **kwargs):
+                c = kwargs["candles"][-1]
+                return ScalpContext(
+                    timestamp=c.timestamp,
+                    signals=[
+                        ScalpSignal(
+                            id="paper-only",
+                            timestamp=c.timestamp,
+                            signal_type="LONG BTCUSD",
+                            entry_zone_low=c.close - 1,
+                            entry_zone_high=c.close + 1,
+                            sl_level=c.close - 10,
+                            target_1=c.close + 10,
+                            target_2=c.close + 20,
+                            status="paper",
+                            confidence="MEDIUM",
+                            risk_reward=2.0,
+                        )
+                    ],
+                )
+
+        import backend.analysis.backtest as backtest_mod
+
+        original = backtest_mod.UnifiedScalpEngine
+        try:
+            backtest_mod.UnifiedScalpEngine = FakeScalp
+            result = self.engine.run(candles, symbol="BTCUSD", timeframe="15m")
+        finally:
+            backtest_mod.UnifiedScalpEngine = original
+
+        self.assertEqual(result["total_trades"], 0)
+
 
 class TestStorageLayer(unittest.TestCase):
     def setUp(self):

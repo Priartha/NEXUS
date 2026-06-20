@@ -443,14 +443,16 @@ class AnalysisPipeline:
                 now_ms = int(time.time() * 1000)
                 expired = sig.time_limit_ms > 0 and now_ms > sig.time_limit_ms
                 is_long = "LONG" in sig.signal_type
+                post_signal_candles = [c for c in closed_candles[-20:] if c.timestamp >= sig.timestamp]
+                post_signal_tp_candles = post_signal_candles[-10:]
                 sl_hit = False
                 tp_hit = False
                 if is_long:
-                    sl_hit = any(c.low <= sig.sl_level for c in closed_candles[-20:])
-                    tp_hit = any(c.high >= sig.target_1 for c in closed_candles[-10:])
+                    sl_hit = any(c.low <= sig.sl_level for c in post_signal_candles)
+                    tp_hit = any(c.high >= sig.target_1 for c in post_signal_tp_candles)
                 else:
-                    sl_hit = any(c.high >= sig.sl_level for c in closed_candles[-20:])
-                    tp_hit = any(c.low <= sig.target_1 for c in closed_candles[-10:])
+                    sl_hit = any(c.high >= sig.sl_level for c in post_signal_candles)
+                    tp_hit = any(c.low <= sig.target_1 for c in post_signal_tp_candles)
                 if not sl_hit and not tp_hit and not expired:
                     valid_signals.append(sig)
             if len(valid_signals) != len(display_ctx.signals):

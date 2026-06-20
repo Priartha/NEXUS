@@ -17,6 +17,7 @@ from typing import Any
 
 from backend.analysis.risk_manager import RiskManager
 from backend.analysis.self_aware_agent import get_agent
+from backend.analysis.trader_profile import get_trader_profile
 from backend.config import settings
 from backend.models.types import Candle, TradeSignal
 from backend.storage import repository as repo
@@ -35,7 +36,7 @@ class PaperTradingEngine:
         max_concurrent: int = 1,
         min_confidence: float = 0.55,
         max_daily_trades: int = 5,
-        max_daily_loss_pct: float = 0.03,
+        max_daily_loss_pct: float | None = None,
         cooldown_after_losses: int = 3,
         cooldown_minutes: int = 90,
         risk_per_trade_pct: float = 0.02,
@@ -49,7 +50,9 @@ class PaperTradingEngine:
         self.max_concurrent = max_concurrent
         self.min_confidence = min_confidence
         self.max_daily_trades = max_daily_trades
-        self.max_daily_loss_pct = max_daily_loss_pct
+        self.max_daily_loss_pct = (
+            settings.paper_max_daily_loss_pct if max_daily_loss_pct is None else max_daily_loss_pct
+        )
         self.cooldown_after_losses = cooldown_after_losses
         self.cooldown_minutes = cooldown_minutes
         self.risk_per_trade_pct = risk_per_trade_pct
@@ -58,7 +61,14 @@ class PaperTradingEngine:
         self.slippage_pct = slippage_pct
         self.commission_pct = commission_pct
         self.funding_rate_per_8h = funding_rate_per_8h
-        self.risk_manager = RiskManager(initial_balance=initial_balance)
+        self.risk_manager = RiskManager(
+            initial_balance=initial_balance,
+            max_daily_loss_pct=self.max_daily_loss_pct,
+            max_drawdown_pct=settings.paper_max_drawdown_pct,
+            max_position_size_pct=settings.paper_max_position_size_pct,
+            max_open_positions=max_concurrent,
+            min_confidence=min_confidence,
+        )
         self.last_evaluation: dict[str, Any] = {}
         self.evaluation_count = 0
 
@@ -95,12 +105,28 @@ class PaperTradingEngine:
 
         open_trades = repo.get_paper_trades(status="open")
 
-        qualified = [s for s in signals if s.confidence >= self.min_confidence and s.status in ("open", "pending", "active")]
+        profile = get_trader_profile()
+        dynamic_min_confidence = profile.confidence_threshold(self.min_confidence, candle)
+        profile_blockers = profile.signal_blockers(None, candle)
+        if profile_blockers:
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="trader_profile_blocked",
+                signal_count=len(signals), qualified_count=0,
+                min_confidence=dynamic_min_confidence,
+                open_positions=len(open_trades),
+                blockers=profile_blockers,
+            )
+            return events
+
+        qualified = [
+            s for s in signals
+            if s.confidence >= dynamic_min_confidence and s.status in ("open", "pending", "active", "paper")
+        ]
         if not qualified:
             self._record_evaluation(
                 symbol=symbol, timeframe=timeframe, status="no_qualified_signal",
                 signal_count=len(signals), qualified_count=0,
-                min_confidence=self.min_confidence,
+                min_confidence=dynamic_min_confidence,
                 open_positions=len(open_trades),
                 blockers=["no signal met confidence/status requirements"],
             )
@@ -157,9 +183,26 @@ class PaperTradingEngine:
             return events
 
         best = max(qualified, key=lambda s: s.confidence)
+        profile_blockers = profile.signal_blockers(best, candle)
+        profile_blockers.extend(self._post_win_cooldown_blockers(profile.post_win_cooldown_minutes))
+        if profile_blockers:
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="trader_profile_blocked",
+                signal_count=len(signals), qualified_count=len(qualified),
+                signal_id=best.id,
+                blockers=profile_blockers,
+            )
+            events.append({
+                "type": "trade_blocked",
+                "reason": "trader_profile",
+                "blockers": profile_blockers,
+                "signal_id": best.id,
+            })
+            return events
 
         current_balance = self._current_balance()
-        risk_amount = current_balance * self.risk_per_trade_pct
+        effective_risk_pct = min(self.risk_per_trade_pct, profile.risk_per_trade_pct)
+        risk_amount = current_balance * effective_risk_pct
         allowed, blockers = self.risk_manager.can_open_trade(
             signal_confidence=best.confidence,
             risk_amount=risk_amount,
@@ -181,7 +224,7 @@ class PaperTradingEngine:
             return events
 
         balance = self._current_balance()
-        risk_per_trade = balance * self.risk_per_trade_pct
+        risk_per_trade = balance * effective_risk_pct
         risk_per_unit = abs(best.entry - best.stop_loss)
         qty = risk_per_trade / risk_per_unit if risk_per_unit > 0 else 0.001
 
@@ -190,6 +233,21 @@ class PaperTradingEngine:
 
         notional = entry_with_slippage * qty
         entry_commission = notional * self.commission_pct
+        fee_blockers = profile.fee_edge_blockers(best, qty, entry_with_slippage, self.commission_pct)
+        if fee_blockers:
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="fee_edge_blocked",
+                signal_count=len(signals), qualified_count=len(qualified),
+                signal_id=best.id,
+                blockers=fee_blockers,
+            )
+            events.append({
+                "type": "trade_blocked",
+                "reason": "fee_edge",
+                "blockers": fee_blockers,
+                "signal_id": best.id,
+            })
+            return events
 
         trade = {
             "id": str(uuid.uuid4()),
@@ -225,6 +283,7 @@ class PaperTradingEngine:
             symbol=symbol, timeframe=timeframe, status="opened",
             signal_count=len(signals), qualified_count=len(qualified),
             signal_id=best.id, side=best.side, confidence=best.confidence,
+            effective_risk_pct=round(effective_risk_pct, 4),
         )
         events.append({"type": "trade_opened", "trade": trade})
 
@@ -409,6 +468,22 @@ class PaperTradingEngine:
             minutes_since = (now_ms - last_exit_ts) / (1000 * 60)
             return minutes_since < self.cooldown_minutes
         return False
+
+    def _post_win_cooldown_blockers(self, cooldown_minutes: int) -> list[str]:
+        if cooldown_minutes <= 0:
+            return []
+        closed = repo.get_paper_trades(status="closed", limit=20)
+        if not closed:
+            return []
+        last = max(closed, key=lambda t: t.get("closed_at") or t.get("exit_timestamp") or 0)
+        pnl = float(last.get("pnl") or 0)
+        closed_at = int(last.get("closed_at") or last.get("exit_timestamp") or 0)
+        if pnl <= 0 or closed_at <= 0:
+            return []
+        minutes_since = (int(time.time() * 1000) - closed_at) / 60000
+        if minutes_since < cooldown_minutes:
+            return [f"Trader profile post-win cooldown: {cooldown_minutes - minutes_since:.0f}m remaining"]
+        return []
 
     def _hit_daily_loss_limit(self) -> bool:
         now_ms = int(time.time() * 1000)

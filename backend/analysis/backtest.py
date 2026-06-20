@@ -409,6 +409,11 @@ class BacktestEngine:
             # Convert ScalpSignal to backtest-compatible format
             compatible_signals = []
             for ss in signals:
+                # Paper exploration exists only to collect forward-test samples.
+                # Official backtests must validate live-quality signals, not
+                # deliberately relaxed paper-only candidates.
+                if getattr(ss, "status", "") == "paper":
+                    continue
                 # Map confidence based on score relative to threshold
                 # Scores range from ~0.20 to ~0.70 in backtest mode
                 raw_score = ss.risk_reward  # Not ideal, but use signal strength
@@ -427,6 +432,15 @@ class BacktestEngine:
                     else:
                         stop_loss = entry + stop_distance
                         exit_price = entry - target_distance
+                if not all(math.isfinite(v) for v in (entry, stop_loss, exit_price)):
+                    logger.warning("Skipping backtest signal with non-finite geometry: %s", ss.id)
+                    continue
+                if entry <= 0 or stop_loss <= 0 or exit_price <= 0:
+                    logger.warning("Skipping backtest signal with non-positive geometry: %s", ss.id)
+                    continue
+                if abs(entry - stop_loss) <= 1e-10 or abs(exit_price - entry) <= 1e-10:
+                    logger.warning("Skipping backtest signal with zero risk/reward distance: %s", ss.id)
+                    continue
                 compatible_signals.append(type("CompatSignal", (), {
                     "id": ss.id,
                     "timestamp": ss.timestamp,
@@ -458,12 +472,21 @@ class BacktestEngine:
                 risk_per_trade = balance * self.position_size_pct
                 risk_per_unit = abs(sig.entry - sig.stop_loss)
                 quantity = risk_per_trade / risk_per_unit if risk_per_unit > 0 else 0
+                if not math.isfinite(quantity) or quantity <= 0:
+                    logger.warning("Skipping backtest trade with invalid quantity for signal %s", sig.id)
+                    continue
 
                 slippage = sig.entry * self.slippage_pct
                 entry_with_slippage = sig.entry + slippage if sig.side == "buy" else sig.entry - slippage
+                if not math.isfinite(entry_with_slippage) or entry_with_slippage <= 0:
+                    logger.warning("Skipping backtest trade with invalid entry for signal %s", sig.id)
+                    continue
 
                 notional = entry_with_slippage * quantity
                 entry_commission = notional * self.commission_pct
+                if not math.isfinite(notional) or not math.isfinite(entry_commission):
+                    logger.warning("Skipping backtest trade with invalid notional for signal %s", sig.id)
+                    continue
 
                 tp = sig.exit_price
                 sl = sig.stop_loss
