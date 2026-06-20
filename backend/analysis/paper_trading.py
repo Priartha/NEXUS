@@ -15,9 +15,9 @@ import time
 import uuid
 from typing import Any
 
-from backend.analysis.profitability_guard import evaluate_profitability_artifact
 from backend.analysis.risk_manager import RiskManager
 from backend.analysis.self_aware_agent import get_agent
+from backend.config import settings
 from backend.models.types import Candle, TradeSignal
 from backend.storage import repository as repo
 
@@ -59,6 +59,16 @@ class PaperTradingEngine:
         self.commission_pct = commission_pct
         self.funding_rate_per_8h = funding_rate_per_8h
         self.risk_manager = RiskManager(initial_balance=initial_balance)
+        self.last_evaluation: dict[str, Any] = {}
+        self.evaluation_count = 0
+
+    def _record_evaluation(self, **payload: Any) -> None:
+        self.evaluation_count += 1
+        self.last_evaluation = {
+            "timestamp": int(time.time() * 1000),
+            "evaluation_count": self.evaluation_count,
+            **payload,
+        }
 
     def evaluate_signals(
         self,
@@ -70,6 +80,11 @@ class PaperTradingEngine:
         regime: str = "unknown",
     ) -> list[dict]:
         if not self.enabled:
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="disabled",
+                signal_count=len(signals), qualified_count=0,
+                blockers=["paper trading disabled"],
+            )
             return []
 
         open_trades = repo.get_paper_trades(status="open")
@@ -80,39 +95,65 @@ class PaperTradingEngine:
 
         open_trades = repo.get_paper_trades(status="open")
 
-        gate = evaluate_profitability_artifact()
-        if not gate.allowed:
-            events.append({
-                "type": "trade_blocked",
-                "reason": "profitability_validation",
-                "blockers": gate.blockers,
-            })
-            return events
-
         qualified = [s for s in signals if s.confidence >= self.min_confidence and s.status in ("open", "pending", "active")]
         if not qualified:
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="no_qualified_signal",
+                signal_count=len(signals), qualified_count=0,
+                min_confidence=self.min_confidence,
+                open_positions=len(open_trades),
+                blockers=["no signal met confidence/status requirements"],
+            )
             return events
 
         open_count = len([t for t in open_trades if t["status"] == "open"])
         if open_count >= self.max_concurrent:
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="max_concurrent_reached",
+                signal_count=len(signals), qualified_count=len(qualified),
+                open_positions=open_count,
+                blockers=[f"open positions {open_count} >= max concurrent {self.max_concurrent}"],
+            )
             return events
 
         # Prevent duplicate entries from the same signal
         open_signal_ids = {t.get("signal_id") for t in open_trades if t["status"] == "open"}
         qualified = [s for s in qualified if s.id not in open_signal_ids]
         if not qualified:
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="duplicate_signal",
+                signal_count=len(signals), qualified_count=0,
+                open_positions=open_count,
+                blockers=["signal already has an open paper position"],
+            )
             return events
 
         now_ms = int(time.time() * 1000)
         day_ago_ms = now_ms - 24 * 60 * 60 * 1000
         today_trades = [t for t in repo.get_paper_trades(status="closed") if t.get("exit_timestamp", 0) >= day_ago_ms]
         if len(today_trades) >= self.max_daily_trades:
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="daily_trade_limit",
+                signal_count=len(signals), qualified_count=len(qualified),
+                closed_today=len(today_trades),
+                blockers=[f"closed trades today {len(today_trades)} >= daily limit {self.max_daily_trades}"],
+            )
             return events
 
         if self._hit_daily_loss_limit():
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="daily_loss_limit",
+                signal_count=len(signals), qualified_count=len(qualified),
+                blockers=["daily loss limit reached"],
+            )
             return events
 
         if self._is_in_cooldown():
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="loss_cooldown",
+                signal_count=len(signals), qualified_count=len(qualified),
+                blockers=["loss cooldown active"],
+            )
             return events
 
         best = max(qualified, key=lambda s: s.confidence)
@@ -125,6 +166,12 @@ class PaperTradingEngine:
             symbol=symbol,
         )
         if not allowed:
+            self._record_evaluation(
+                symbol=symbol, timeframe=timeframe, status="risk_manager_blocked",
+                signal_count=len(signals), qualified_count=len(qualified),
+                signal_id=best.id,
+                blockers=blockers,
+            )
             events.append({
                 "type": "trade_blocked",
                 "reason": "risk_manager",
@@ -142,7 +189,7 @@ class PaperTradingEngine:
         entry_with_slippage = best.entry + slippage if best.side == "buy" else best.entry - slippage
 
         notional = entry_with_slippage * qty
-        commission = notional * self.commission_pct
+        entry_commission = notional * self.commission_pct
 
         trade = {
             "id": str(uuid.uuid4()),
@@ -166,12 +213,19 @@ class PaperTradingEngine:
             "lowest_price": best.entry if best.side == "sell" else None,
             "atr_at_entry": best.expected_move if best.expected_move else 0,
             "slippage_pct": round(slippage / best.entry * 100 if best.entry > 0 else 0, 4),
-            "commission": round(commission, 2),
+            "entry_commission": round(entry_commission, 2),
+            "commission": round(entry_commission, 2),
             "funding_rate": self.funding_rate_per_8h,
+            "max_hold_minutes": int(getattr(best, "max_hold_minutes", 0) or settings.scalp_max_hold_minutes),
             "regime": regime,
             "enriched_features": getattr(best, 'enriched_features', None),
         }
         repo.save_paper_trade(trade)
+        self._record_evaluation(
+            symbol=symbol, timeframe=timeframe, status="opened",
+            signal_count=len(signals), qualified_count=len(qualified),
+            signal_id=best.id, side=best.side, confidence=best.confidence,
+        )
         events.append({"type": "trade_opened", "trade": trade})
 
         return events
@@ -196,6 +250,20 @@ class PaperTradingEngine:
 
         return base_slippage * slippage_multiplier * range_multiplier
 
+    def _exit_price_with_slippage(self, exit_price: float, side: str, candle: Candle) -> float:
+        slippage = self._compute_slippage(exit_price, 0.001, candle)
+        return exit_price - slippage if side == "buy" else exit_price + slippage
+
+    def _net_pnl(self, side: str, entry: float, exit_price: float, qty: float, trade: dict, candle: Candle) -> tuple[float, float, float, float]:
+        filled_exit = self._exit_price_with_slippage(exit_price, side, candle)
+        gross = (filled_exit - entry) * qty if side == "buy" else (entry - filled_exit) * qty
+        entry_commission = float(trade.get("entry_commission", trade.get("commission", 0)) or 0)
+        exit_commission = abs(filled_exit * qty) * self.commission_pct
+        funding_cost = self.funding_rate_per_8h * entry * qty
+        pnl = gross - entry_commission - exit_commission - funding_cost
+        pnl_pct = pnl / (entry * qty) * 100 if entry * qty else 0
+        return filled_exit, pnl, pnl_pct, funding_cost
+
     def _check_exits(self, open_trades: list[dict], candle: Candle) -> list[dict]:
         events: list[dict] = []
         now_ms = int(time.time() * 1000)
@@ -219,12 +287,7 @@ class PaperTradingEngine:
             hold_minutes = (now_ms - trade.get("opened_at", now_ms)) / 60000
             max_hold = trade.get("max_hold_minutes", 30)
             if hold_minutes > max_hold:
-                exit_price = candle.close
-                pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                commission = trade.get("commission", 0)
-                funding_cost = self.funding_rate_per_8h * entry * qty
-                pnl -= commission + funding_cost
-                pnl_pct = pnl / (entry * qty) * 100 if entry * qty else 0
+                exit_price, pnl, pnl_pct, funding_cost = self._net_pnl(side, entry, candle.close, qty, trade, candle)
                 repo.close_paper_trade(trade["id"], exit_price, round(pnl, 2), round(pnl_pct, 4), "max_hold_exceeded")
                 self.risk_manager.record_trade_result(pnl)
                 events.append({
@@ -270,11 +333,7 @@ class PaperTradingEngine:
                 hit_target = candle.low <= tp
 
             if hit_stop or hit_target:
-                exit_price = sl if hit_stop else tp
-                pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                commission = trade.get("commission", 0)
-                pnl -= commission + funding_cost
-                pnl_pct = pnl / (entry * qty) * 100 if entry * qty else 0
+                exit_price, pnl, pnl_pct, funding_cost = self._net_pnl(side, entry, sl if hit_stop else tp, qty, trade, candle)
                 reason = "stop_loss" if hit_stop else "target_hit"
                 repo.close_paper_trade(trade["id"], exit_price, round(pnl, 2), round(pnl_pct, 4), reason)
 

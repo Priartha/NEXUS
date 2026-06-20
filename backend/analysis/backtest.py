@@ -463,7 +463,7 @@ class BacktestEngine:
                 entry_with_slippage = sig.entry + slippage if sig.side == "buy" else sig.entry - slippage
 
                 notional = entry_with_slippage * quantity
-                commission = notional * self.commission_pct
+                entry_commission = notional * self.commission_pct
 
                 tp = sig.exit_price
                 sl = sig.stop_loss
@@ -491,7 +491,8 @@ class BacktestEngine:
                     "reason": sig.reason,
                     "risk_reward": sig.risk_reward,
                     "slippage": round(slippage, 2),
-                    "commission": round(commission, 2),
+                    "entry_commission": round(entry_commission, 2),
+                    "commission": round(entry_commission, 2),
                     "bars_held": 0,
                 }
                 open_trades.append(trade)
@@ -524,12 +525,19 @@ class BacktestEngine:
                                 trade["stop_loss"] = min(trade["stop_loss"], entry)
                                 sl = trade["stop_loss"]
 
-                funding_cost = funding_per_bar * entry * qty
-                if bars_held >= self.max_hold_bars + 1:
-                    exit_price = current.close
-                    pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"] + funding_cost
+                def apply_exit_costs(raw_exit_price: float) -> tuple[float, float, float, float]:
+                    exit_slippage = raw_exit_price * self.slippage_pct
+                    filled_exit = raw_exit_price - exit_slippage if side == "buy" else raw_exit_price + exit_slippage
+                    gross_pnl = (filled_exit - entry) * qty if side == "buy" else (entry - filled_exit) * qty
+                    entry_commission = float(trade.get("entry_commission", trade.get("commission", 0)) or 0)
+                    exit_commission = abs(filled_exit * qty) * self.commission_pct
+                    funding_cost = funding_per_bar * entry * qty
+                    pnl = gross_pnl - entry_commission - exit_commission - funding_cost
                     pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
+                    return filled_exit, pnl, pnl_pct, funding_cost
+
+                if bars_held >= self.max_hold_bars + 1:
+                    exit_price, pnl, pnl_pct, funding_cost = apply_exit_costs(current.close)
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
                     trade["exit_timestamp"] = current.timestamp
@@ -550,10 +558,7 @@ class BacktestEngine:
                     hit_target = current.low <= tp
 
                 if hit_stop:
-                    exit_price = sl
-                    pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"] + funding_cost
-                    pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
+                    exit_price, pnl, pnl_pct, funding_cost = apply_exit_costs(sl)
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
                     trade["exit_timestamp"] = current.timestamp
@@ -565,10 +570,7 @@ class BacktestEngine:
                     returns_series.append(pnl / balance if balance > 0 else 0)
                     results.append(dict(trade))
                 elif hit_target:
-                    exit_price = tp
-                    pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"] + funding_cost
-                    pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
+                    exit_price, pnl, pnl_pct, funding_cost = apply_exit_costs(tp)
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
                     trade["exit_timestamp"] = current.timestamp

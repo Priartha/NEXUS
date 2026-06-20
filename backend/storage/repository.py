@@ -81,8 +81,11 @@ def save_paper_trade(trade: dict) -> None:
             INSERT OR REPLACE INTO paper_trades
             (id, signal_id, symbol, timeframe, side, entry_price, stop_loss,
              take_profit, quantity, status, opened_at, closed_at, exit_price,
-             pnl, pnl_pct, risk_reward, confidence, reason, close_reason)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             pnl, pnl_pct, risk_reward, confidence, reason, close_reason,
+             bars_held, highest_price, lowest_price, initial_stop, atr_at_entry,
+             entry_commission, slippage_pct, funding_rate, max_hold_minutes,
+             regime, enriched_features)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             trade["id"], trade.get("signal_id"), trade["symbol"],
             trade.get("timeframe", "5m"), trade["side"], trade["entry_price"],
@@ -91,13 +94,21 @@ def save_paper_trade(trade: dict) -> None:
             trade.get("closed_at"), trade.get("exit_price"),
             trade.get("pnl"), trade.get("pnl_pct"), trade.get("risk_reward"),
             trade.get("confidence"), trade.get("reason"), trade.get("close_reason"),
+            trade.get("bars_held", 0), trade.get("highest_price"), trade.get("lowest_price"),
+            trade.get("initial_stop", trade.get("stop_loss")), trade.get("atr_at_entry", 0),
+            trade.get("entry_commission", trade.get("commission", 0)),
+            trade.get("slippage_pct", 0), trade.get("funding_rate", 0),
+            trade.get("max_hold_minutes", 25), trade.get("regime"),
+            json.dumps(trade.get("enriched_features")) if trade.get("enriched_features") is not None else None,
         ))
         conn.commit()
     finally:
         conn.close()
 
 
-ALLOWED_PAPER_COLS = {"bars_held", "stop_loss", "highest_price", "lowest_price"}
+ALLOWED_PAPER_COLS = {
+    "bars_held", "stop_loss", "highest_price", "lowest_price",
+}
 
 def update_paper_trade(trade_id: str, updates: dict) -> None:
     cols = {k: v for k, v in updates.items() if k in ALLOWED_PAPER_COLS}
@@ -144,7 +155,16 @@ def get_paper_trades(symbol: str | None = None, status: str | None = None,
         query += " ORDER BY opened_at DESC LIMIT ?"
         params.append(limit)
         rows = conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        results = []
+        for r in rows:
+            d = dict(r)
+            if d.get("enriched_features"):
+                try:
+                    d["enriched_features"] = json.loads(d["enriched_features"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            results.append(d)
+        return results
     finally:
         conn.close()
 

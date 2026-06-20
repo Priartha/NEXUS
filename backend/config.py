@@ -91,6 +91,14 @@ class Settings:
     profitability_min_win_rate: float = float(os.getenv("NEXUS_PROFITABILITY_MIN_WIN_RATE", "0.50"))
     profitability_min_profit_factor: float = float(os.getenv("NEXUS_PROFITABILITY_MIN_PF", "1.50"))
     profitability_max_drawdown_pct: float = float(os.getenv("NEXUS_PROFITABILITY_MAX_DD_PCT", "15.0"))
+    backtest_route_max_candles: int = int(os.getenv("NEXUS_BACKTEST_ROUTE_MAX_CANDLES", "200"))
+    backtest_route_timeout_seconds: float = float(os.getenv("NEXUS_BACKTEST_ROUTE_TIMEOUT_SECONDS", "45"))
+    backtest_adaptive_max_candidates: int = int(os.getenv("NEXUS_BACKTEST_ADAPTIVE_MAX_CANDIDATES", "3"))
+    db_integrity_timeout_seconds: float = float(os.getenv("NEXUS_DB_INTEGRITY_TIMEOUT_SECONDS", "8"))
+    snapshot_timeout_seconds: float = float(os.getenv("NEXUS_SNAPSHOT_TIMEOUT_SECONDS", "15"))
+    auto_install_dependencies: bool = os.getenv("NEXUS_AUTO_INSTALL_DEPS", "false").lower() == "true"
+    enable_pattern_startup_seed: bool = os.getenv("NEXUS_ENABLE_PATTERN_STARTUP_SEED", "false").lower() == "true"
+    pattern_seed_max_segments: int = int(os.getenv("NEXUS_PATTERN_SEED_MAX_SEGMENTS", "250"))
 
 
 settings = Settings()

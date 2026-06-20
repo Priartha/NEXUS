@@ -274,16 +274,17 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Real paper trade feed failed")
 
-    # Auto-install any missing ML dependencies (scikit-learn, xgboost, hmmlearn)
-    # so training loops don't fail silently.
-    try:
-        from backend.utils.self_heal import check_and_install_deps
-        dep_results = check_and_install_deps()
-        installed = [k for k, v in dep_results.items() if v == "installed"]
-        if installed:
-            logger.info("Auto-installed missing ML deps: %s", installed)
-    except Exception:
-        logger.exception("Dependency auto-install check failed")
+    # Installing Python packages inside FastAPI startup blocks the event loop
+    # and makes the UI look crashed. Keep it opt-in for maintenance sessions.
+    if settings.auto_install_dependencies:
+        try:
+            from backend.utils.self_heal import check_and_install_deps
+            dep_results = await asyncio.to_thread(check_and_install_deps)
+            installed = [k for k, v in dep_results.items() if v == "installed"]
+            if installed:
+                logger.info("Auto-installed missing ML deps: %s", installed)
+        except Exception:
+            logger.exception("Dependency auto-install check failed")
 
     # Bootstrap AI Lab components with synthetic data so panels show values on startup
     try:
@@ -341,7 +342,7 @@ async def lifespan(app: FastAPI):
     for tf, store in stores.items():
         try:
             logger.info(f"Seeding historical data for {tf}")
-            candles = await _fetch(_base_url, settings.symbol, tf, limit=1000)
+            candles = await _fetch(_base_url, settings.symbol, tf, limit=settings.history_seed_candles)
             now_ms = candles[-1].timestamp if candles else None
             store.seed(candles, now_ms=now_ms)
             logger.info(f"Seeded {len(candles)} candles for {tf}")
@@ -661,7 +662,11 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
     if len(candles) < 80:
         raise HTTPException(status_code=400, detail=f"Not enough candles: {len(candles)} (need at least 80)")
 
-    requested_candle_count = body.candle_count
+    requested_candle_count = min(
+        body.candle_count,
+        settings.max_candles,
+        settings.backtest_route_max_candles,
+    )
     candles = candles[-requested_candle_count:]
     data_quality_report = await loop.run_in_executor(None, lambda: analyze_candles(
         candles,
@@ -713,7 +718,10 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
 
     try:
         engine = build_engine()
-        result = await loop.run_in_executor(None, lambda: engine.run(candles, symbol=body.symbol, timeframe=body.timeframe))
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)),
+            timeout=settings.backtest_route_timeout_seconds,
+        )
 
         if body.adaptive_learning and result.get("profit_factor", 0) < 1.0 and len(candles) >= 80:
             recent_window = candles[-min(500, len(candles)):]
@@ -789,12 +797,16 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
             best_result = result
             best_candidate = "requested_window"
             best_score = candidate_score(result)
-            for candidate_name, candidate_candles, params in candidates:
+            for candidate_name, candidate_candles, params in candidates[:settings.backtest_adaptive_max_candidates]:
                 if len(candidate_candles) < 80:
                     continue
                 try:
-                    candidate = await loop.run_in_executor(
-                        None, lambda eng=build_engine(**params): eng.run(candidate_candles, symbol=body.symbol, timeframe=body.timeframe)
+                    candidate = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            lambda eng=build_engine(**params): eng.run(candidate_candles, symbol=body.symbol, timeframe=body.timeframe),
+                        ),
+                        timeout=settings.backtest_route_timeout_seconds,
                     )
                     score = candidate_score(candidate)
                     if score > best_score:
@@ -819,8 +831,9 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
                 best_result["adaptive_learning"] = {
                     "enabled": True,
                     "selected": best_candidate,
-                    "requested_candle_count": requested_candle_count,
+                    "requested_candle_count": body.candle_count,
                     "selected_candle_count": best_result.get("candle_count"),
+                    "route_candle_cap": requested_candle_count,
                     "reason": "Requested window was unprofitable; selected the best recent regime candidate.",
                     "baseline": {
                         "profit_factor": result.get("profit_factor"),
@@ -834,11 +847,22 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
                 result["adaptive_learning"] = {
                     "enabled": True,
                     "selected": "requested_window",
-                    "requested_candle_count": requested_candle_count,
+                    "requested_candle_count": body.candle_count,
                     "selected_candle_count": result.get("candle_count"),
                     "reason": "No recent regime candidate improved the requested window.",
+                    "route_candle_cap": requested_candle_count,
                 }
+        elif body.candle_count != requested_candle_count:
+            result["route_candle_cap"] = requested_candle_count
         result["data_quality"] = data_quality_report
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Backtest exceeded the route timeout. "
+                "Use fewer candles or run scripts/validate_profitability.py offline."
+            ),
+        )
     except Exception as e:
         import traceback
         logger.error(f"Backtest engine failed: {e}\n{traceback.format_exc()}")
@@ -895,6 +919,7 @@ async def paper_trade_status() -> dict:
         "profitability_gate": summarize_gate(),
         "open_positions": len(repo.get_paper_trades(status="open")),
         "closed_trades": repo.get_paper_trade_stats().get("closed_trades", 0),
+        "last_evaluation": getattr(paper_trading, "last_evaluation", {}),
     }
 
 
@@ -1216,10 +1241,16 @@ async def snapshot(
     if tf not in supported_timeframes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {tf}. Supported: {list(supported_timeframes)}")
     timeframe = tf
-    payload = await asyncio.wait_for(
-        pipelines[timeframe].snapshot_async(stores[timeframe]),
-        timeout=15.0,
-    )
+    try:
+        payload = await asyncio.wait_for(
+            pipelines[timeframe].snapshot_async(stores[timeframe]),
+            timeout=settings.snapshot_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Snapshot for {timeframe} exceeded {settings.snapshot_timeout_seconds:.0f}s; retry after current analysis cycle.",
+        )
     payload["mtf_confluence"] = compute_mtf_confluence(timeframe, stores, pipelines)
     return _attach_realtime_context(payload, timeframe)
 
@@ -2302,7 +2333,29 @@ async def db_integrity_check() -> dict:
 
         from backend.utils.db_integrity import db_integrity
         from backend.storage.schema import get_conn
-        raw = db_integrity.check_integrity()
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(db_integrity.check_integrity),
+                timeout=settings.db_integrity_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "database_size_mb": 0,
+                "total_tables": 0,
+                "total_records": 0,
+                "wal_mode": False,
+                "integrity_checks": [
+                    {
+                        "check_name": "Timeout",
+                        "status": "warning",
+                        "message": f"Integrity check exceeded {settings.db_integrity_timeout_seconds:.0f}s; run offline for full details.",
+                    },
+                ],
+                "table_info": [],
+                "oldest_record": None,
+                "newest_record": None,
+                "timestamp": int(time.time() * 1000),
+            }
 
         conn = get_conn()
         try:
@@ -2604,7 +2657,7 @@ async def transformer_forecast_endpoint(candles: int = Query(100, ge=20, le=500)
         return {"current_price": current_price, "model_ready": False, "horizons": [], "reason": "insufficient_data"}
     current_price = candle_list[-1].close
     try:
-        forecasts = transformer_forecaster.predict(candle_list, current_price)
+        forecasts = await asyncio.to_thread(transformer_forecaster.predict, candle_list, current_price)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Forecast failed: {e}")
     return {

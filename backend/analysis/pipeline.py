@@ -487,6 +487,8 @@ class AnalysisPipeline:
                     trailing_stop=None,
                     trailing_mode="atr_chandelier",
                     model="unified-scalp-v2",
+                    max_hold_minutes=ss.max_hold_minutes,
+                    enriched_features=ss.enriched_features,
                 )
                 scalp_signals_as_trade.append(t_sig)
 
@@ -778,11 +780,15 @@ class AnalysisPipeline:
         if self._pattern_seeded or len(candles) < 20:
             return
         self._pattern_seeded = True
+        if not settings.enable_pattern_startup_seed:
+            logger.info("Pattern intelligence startup seed skipped")
+            return
         try:
             from backend.analysis.self_aware_agent import get_agent
             pi = get_agent().pattern_intel
             # Slide through historical candles in overlapping segments
-            for i in range(8, len(candles) - 4):
+            start = max(8, len(candles) - settings.pattern_seed_max_segments - 4)
+            for i in range(start, len(candles) - 4):
                 segment = candles[:i + 1]
                 lookahead = candles[i + 1:i + 5]
                 # Only record when segment has a closed lookahead

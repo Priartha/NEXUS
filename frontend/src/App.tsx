@@ -115,11 +115,6 @@ class RuntimeGuard extends Component<RuntimeGuardProps, RuntimeGuardState> {
 
   componentDidCatch(error: Error) {
     console.error('NEXUS UI runtime error', error)
-    // Only auto-reload once per session to prevent infinite reload loops
-    if (!sessionStorage.getItem('nexus_error_reloaded')) {
-      sessionStorage.setItem('nexus_error_reloaded', '1')
-      window.setTimeout(() => window.location.reload(), 1500)
-    }
   }
 
   render() {
@@ -130,14 +125,47 @@ class RuntimeGuard extends Component<RuntimeGuardProps, RuntimeGuardState> {
             <div className="hero-card neutral">
               <div className="hero-title">
                 <div className="hero-signal-group">
-                  <span className="hero-label">RUNTIME RECOVERY</span>
-                  <strong className="hero-action">RECONNECTING</strong>
+                  <span className="hero-label">RUNTIME FAULT</span>
+                  <strong className="hero-action">CHECK CONSOLE</strong>
                 </div>
               </div>
-              <p className="hero-summary">The UI hit a runtime fault and is reloading automatically.</p>
+              <p className="hero-summary">The shell caught an unrecoverable runtime fault. Reload manually after checking the error.</p>
             </div>
           </section>
         </main>
+      )
+    }
+    return this.props.children
+  }
+}
+
+type PanelGuardProps = {
+  children: ReactNode
+  panelView: PanelView
+}
+
+class PanelGuard extends Component<PanelGuardProps, RuntimeGuardState> {
+  state: RuntimeGuardState = { hasError: false }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: Error) {
+    console.error(`NEXUS panel runtime error in ${this.props.panelView}`, error)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="panel-content">
+          <section>
+            <h2><AlertTriangle size={13} /> Panel Error</h2>
+            <p className="empty-state">
+              The {this.props.panelView} panel failed to render. Switch to another panel and back after the next data refresh.
+            </p>
+          </section>
+        </div>
       )
     }
     return this.props.children
@@ -567,6 +595,7 @@ function AppShell() {
           </div>
 
           <div className="panel-main">
+          <PanelGuard key={panelView} panelView={panelView}>
           {/* ─── SIGNALS TAB ────────────────────────── */}
           {panelView === 'signals' && (
             <div className="panel-content">
@@ -947,6 +976,7 @@ function AppShell() {
             </div>
           )}
 
+          </PanelGuard>
           </div>
         </aside>
       </section>
