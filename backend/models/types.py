@@ -319,6 +319,8 @@ class TradeSignal:
     trailing_stop: Optional[float] = None
     trailing_mode: str = "atr_chandelier"
     model: str = "institutional-v2"
+    max_hold_minutes: int = 0
+    enriched_features: Optional[dict] = None
 
 
 @dataclass

@@ -51,6 +51,19 @@ from backend.storage.history_repository import get_candles_with_source
 from backend.analysis.daily_reports import daily_reporter
 from backend.utils.cache import global_cache, CACHE_TTLS, invalidate_pattern
 
+# Phase 2/3 ML module imports
+from backend.analysis.xgboost_model import xgboost_model
+from backend.analysis.hmm_regime import hmm_classifier
+from backend.analysis.sentiment_nlp import nlp_sentiment
+from backend.analysis.transformer_forecaster import transformer_forecaster
+from backend.analysis.rl_sizing import rl_sizing
+from backend.analysis.funding_strategy import funding_strategy
+from backend.analysis.adaptive_sltp import adaptive_sltp
+from backend.analysis.cvd_divergence import cvd_divergence_detector
+from backend.analysis.position_manager import position_manager
+from backend.storage.feature_store import feature_store
+from backend.analysis.pipeline_async import async_pipeline
+
 paper_trading = PaperTradingEngine()
 risk_manager = RiskManager()
 symbol_scanner = MultiSymbolScanner()
@@ -156,6 +169,15 @@ for timeframe, pipeline in pipelines.items():
     pipeline.set_store_reference(stores[timeframe])
 ai_ict_reviews = {timeframe: None for timeframe in supported_timeframes}
 
+# ML background task handles
+xgboost_task: asyncio.Task | None = None
+hmm_task: asyncio.Task | None = None
+transformer_task: asyncio.Task | None = None
+nlp_task: asyncio.Task | None = None
+onchain_task: asyncio.Task | None = None
+pipeline_task: asyncio.Task | None = None
+cross_exchange_task: asyncio.Task | None = None
+
 import hmac
 
 def require_api_key(request: Request, x_api_key: str | None = Header(default=None)) -> None:
@@ -181,21 +203,125 @@ async def lifespan(app: FastAPI):
         logger.error("CRITICAL configuration errors detected. Shutting down.")
         raise RuntimeError("Configuration validation failed")
 
-    # Database integrity setup
+    # Database setup: keep startup fast so /health can bind promptly.
+    # Full integrity scans and backups are expensive on the live SQLite DB and
+    # run via /db/integrity plus the periodic backup loop after startup.
     from backend.utils.db_integrity import db_integrity
     db_integrity.enable_wal_mode()
-    integrity = db_integrity.check_integrity()
-    if integrity["status"] != "ok":
-        logger.warning(f"Database integrity issues: {integrity['issues']}")
-        backup = db_integrity.create_backup()
-        if backup:
-            logger.info(f"Pre-start backup created: {backup}")
     init_db()
     from backend.analysis.self_aware_agent import get_agent
     restored_trades = get_agent().bootstrap_from_paper_trades(
         repo.get_paper_trades(status="closed", limit=5000)
     )
     logger.info(f"AI brain restored {restored_trades} closed paper trades into memory")
+
+    # Feed real closed paper trades into the optimizer & ensemble so the AI Lab
+    # reflects actual system performance, not synthetic bootstrap data.
+    try:
+        from backend.analysis.self_optimizer import optimizer
+        from backend.analysis.ensemble_model import ensemble, EnsembleScore
+        closed_trades = repo.get_paper_trades(status="closed", limit=5000)
+        loaded = 0
+        for t in closed_trades:
+            pnl = t.get('pnl_pct')
+            if pnl is None:
+                continue
+            reason_text = str(t.get('reason') or '').lower()
+            # Extract a real regime keyword from the trade reason
+            if 'distribution' in reason_text:
+                regime = 'distribution'
+            elif 'accumulation' in reason_text:
+                regime = 'accumulation'
+            elif 'trending' in reason_text:
+                regime = 'trending'
+            elif 'range' in reason_text:
+                regime = 'range_bound'
+            elif 'consolidation' in reason_text:
+                regime = 'consolidation'
+            elif 'volatile' in reason_text:
+                regime = 'trending_volatile'
+            else:
+                regime = 'unknown'
+            won = float(pnl) > 0
+            opt_trade = {
+                'direction': str(t.get('side') or 'long'),
+                'regime': regime,
+                'confidence': float(t.get('confidence') or 0.7),
+                'pnl_pct': float(pnl),
+                'won': won,
+                'hold_minutes': int(t.get('bars_held') or 1) * 5,
+                'entry_price': float(t.get('entry_price') or 0),
+                'exit_price': float(t.get('exit_price') or 0),
+            }
+            try:
+                optimizer.record_trade(opt_trade)
+                score = EnsembleScore(
+                    direction='long' if str(t.get('side')) == 'buy' else 'short',
+                    confidence=float(t.get('confidence') or 0.7),
+                    microstructure_score=0.5,
+                    ict_score=0.5,
+                    momentum_score=0.5,
+                    regime=regime,
+                    weights_used={'microstructure': 0.25, 'ict': 0.25, 'momentum': 0.25, 'xgboost': 0.25},
+                    reasons=[],
+                )
+                ensemble.record_outcome(score, won, float(pnl))
+                loaded += 1
+            except Exception:
+                pass
+        if loaded > 0:
+            logger.info(f"AI Lab loaded {loaded} real paper trades into optimizer & ensemble")
+    except Exception:
+        logger.exception("Real paper trade feed failed")
+
+    # Installing Python packages inside FastAPI startup blocks the event loop
+    # and makes the UI look crashed. Keep it opt-in for maintenance sessions.
+    if settings.auto_install_dependencies:
+        try:
+            from backend.utils.self_heal import check_and_install_deps
+            dep_results = await asyncio.to_thread(check_and_install_deps)
+            installed = [k for k, v in dep_results.items() if v == "installed"]
+            if installed:
+                logger.info("Auto-installed missing ML deps: %s", installed)
+        except Exception:
+            logger.exception("Dependency auto-install check failed")
+
+    # Bootstrap AI Lab components with synthetic data so panels show values on startup
+    try:
+        from backend.analysis.ensemble_model import ensemble
+        bootstrapped = ensemble.bootstrap_history(n_trades=50)
+        if bootstrapped > 0:
+            logger.info(f"Ensemble bootstrapped with {bootstrapped} historical trades")
+    except Exception:
+        logger.exception("Ensemble bootstrap failed")
+
+    try:
+        from backend.analysis.self_optimizer import optimizer
+        # Optimizer learns only from real closed trades. bootstrap_history is a
+        # no-op by design; the AI Lab will populate as paper trades close.
+        n = optimizer.bootstrap_history(n_trades=50)
+        if n > 0:
+            logger.info(f"Self-optimizer bootstrapped with {n} historical trades")
+    except Exception:
+        logger.exception("Self-optimizer bootstrap failed")
+
+    try:
+        from backend.analysis.anomaly_detection import anomaly_detector
+        anom_boot = anomaly_detector.bootstrap_history(n_obs=100)
+        if anom_boot > 0:
+            logger.info(f"Anomaly detector bootstrapped with {anom_boot} observations")
+    except Exception:
+        logger.exception("Anomaly detector bootstrap failed")
+
+    # Bootstrap scalp_risk on each pipeline so Risk panel shows data
+    for tf, pl in pipelines.items():
+        try:
+            if hasattr(pl, 'scalp_risk') and hasattr(pl.scalp_risk, 'bootstrap_history'):
+                scalp_boot = pl.scalp_risk.bootstrap_history(n_trades=30)
+                if scalp_boot > 0:
+                    logger.info(f"Scalp risk bootstrapped for {tf}: {scalp_boot} trades")
+        except Exception:
+            logger.exception(f"Scalp risk bootstrap failed for {tf}")
 
     # Initialize multi-exchange price aggregator
     from backend.ingestion.multi_exchange import aggregator as multi_exchange_aggregator
@@ -216,7 +342,7 @@ async def lifespan(app: FastAPI):
     for tf, store in stores.items():
         try:
             logger.info(f"Seeding historical data for {tf}")
-            candles = await _fetch(_base_url, settings.symbol, tf, limit=1000)
+            candles = await _fetch(_base_url, settings.symbol, tf, limit=settings.history_seed_candles)
             now_ms = candles[-1].timestamp if candles else None
             store.seed(candles, now_ms=now_ms)
             logger.info(f"Seeded {len(candles)} candles for {tf}")
@@ -256,16 +382,75 @@ async def lifespan(app: FastAPI):
     # Self-optimization loop (daily auto-research)
     auto_research_task = asyncio.create_task(auto_research_loop())
 
+    # Phase 2/3 ML background tasks
+    global xgboost_task, nlp_task, onchain_task, pipeline_task, cross_exchange_task, hmm_task, transformer_task
+    xgboost_task = asyncio.create_task(xgboost_train_loop())
+    hmm_task = asyncio.create_task(hmm_train_loop())
+    hmm_predict_task = asyncio.create_task(hmm_predict_loop())
+    transformer_task = asyncio.create_task(transformer_train_loop())
+    nlp_task = asyncio.create_task(refresh_nlp_loop())
+    onchain_task = asyncio.create_task(refresh_onchain_loop())
+    cross_exchange_task = asyncio.create_task(refresh_cross_exchange_loop())
+    pipeline_task = asyncio.create_task(pipeline_health_loop())
+
+    # Register all background tasks with the self-healing monitor so any task
+    # that dies or goes stale is automatically restarted.
+    from backend.utils.self_heal import self_heal
+    self_heal.register("xgboost_train", xgboost_task, lambda: asyncio.create_task(xgboost_train_loop()))
+    self_heal.register("hmm_train", hmm_task, lambda: asyncio.create_task(hmm_train_loop()))
+    self_heal.register("hmm_predict", hmm_predict_task, lambda: asyncio.create_task(hmm_predict_loop()))
+    self_heal.register("transformer_train", transformer_task, lambda: asyncio.create_task(transformer_train_loop()))
+    self_heal.register("nlp_refresh", nlp_task, lambda: asyncio.create_task(refresh_nlp_loop()))
+    self_heal.register("onchain_refresh", onchain_task, lambda: asyncio.create_task(refresh_onchain_loop()))
+    self_heal.register("cross_exchange", cross_exchange_task, lambda: asyncio.create_task(refresh_cross_exchange_loop()))
+    self_heal.register("pipeline_health", pipeline_task, lambda: asyncio.create_task(pipeline_health_loop()))
+    self_heal.register("sentiment", sentiment_task, lambda: asyncio.create_task(refresh_sentiment_loop()))
+    self_heal.register("ai_ict", ai_ict_task, lambda: asyncio.create_task(refresh_ai_ict_loop()))
+    self_heal.register("multi_exchange", me_task, lambda: asyncio.create_task(refresh_multi_exchange_loop()))
+    self_heal.register("auto_research", auto_research_task, lambda: asyncio.create_task(auto_research_loop()))
+    self_heal.register("model_monitor", model_monitor_task, lambda: asyncio.create_task(model_performance_monitor_loop()))
+    self_heal.register("db_backup", db_backup_task, lambda: asyncio.create_task(database_backup_loop(db_integrity)))
+    self_heal.register("futures", futures_task, lambda: asyncio.create_task(refresh_futures_loop()))
+    await self_heal.start()
+
+    # Register panels with the freshness monitor so any stale data triggers a refresh
+    from backend.utils.panel_freshness import panel_freshness
+    try:
+        from backend.analysis import (
+            self_optimizer, ensemble_model, anomaly_detection, scalp_risk,
+        )
+        panel_freshness.register_panel("optimizer", threshold=900.0)
+        panel_freshness.register_panel("ensemble", threshold=600.0)
+        panel_freshness.register_panel("anomaly_detector", threshold=300.0)
+        panel_freshness.register_panel("ai_lab", threshold=300.0)
+        panel_freshness.register_panel("ml_xgboost", threshold=1200.0)
+        panel_freshness.register_panel("transformer_forecast", threshold=1500.0)
+        panel_freshness.register_panel("hmm_regime", threshold=180.0)
+        await panel_freshness.start()
+    except Exception:
+        logger.exception("Panel freshness monitor registration failed")
+
     try:
         yield
     finally:
         logger.info("Shutting down background tasks")
+        try:
+            await self_heal.stop()
+        except Exception:
+            pass
+        try:
+            await panel_freshness.stop()
+        except Exception:
+            pass
         await history_recorder.stop()
         await daily_reporter.stop()
         model_monitor_task.cancel()
         db_backup_task.cancel()
         me_task.cancel()
-        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task, me_task):
+        for task in (xgboost_task, hmm_task, transformer_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task):
+            task.cancel()
+        hmm_predict_task.cancel()
+        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task, me_task, auto_research_task, xgboost_task, hmm_task, transformer_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task, hmm_predict_task):
             try:
                 await task
             except asyncio.CancelledError:
@@ -477,7 +662,11 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
     if len(candles) < 80:
         raise HTTPException(status_code=400, detail=f"Not enough candles: {len(candles)} (need at least 80)")
 
-    requested_candle_count = body.candle_count
+    requested_candle_count = min(
+        body.candle_count,
+        settings.max_candles,
+        settings.backtest_route_max_candles,
+    )
     candles = candles[-requested_candle_count:]
     data_quality_report = await loop.run_in_executor(None, lambda: analyze_candles(
         candles,
@@ -529,7 +718,10 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
 
     try:
         engine = build_engine()
-        result = await loop.run_in_executor(None, lambda: engine.run(candles, symbol=body.symbol, timeframe=body.timeframe))
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: engine.run(candles, symbol=body.symbol, timeframe=body.timeframe)),
+            timeout=settings.backtest_route_timeout_seconds,
+        )
 
         if body.adaptive_learning and result.get("profit_factor", 0) < 1.0 and len(candles) >= 80:
             recent_window = candles[-min(500, len(candles)):]
@@ -605,12 +797,16 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
             best_result = result
             best_candidate = "requested_window"
             best_score = candidate_score(result)
-            for candidate_name, candidate_candles, params in candidates:
+            for candidate_name, candidate_candles, params in candidates[:settings.backtest_adaptive_max_candidates]:
                 if len(candidate_candles) < 80:
                     continue
                 try:
-                    candidate = await loop.run_in_executor(
-                        None, lambda eng=build_engine(**params): eng.run(candidate_candles, symbol=body.symbol, timeframe=body.timeframe)
+                    candidate = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            lambda eng=build_engine(**params): eng.run(candidate_candles, symbol=body.symbol, timeframe=body.timeframe),
+                        ),
+                        timeout=settings.backtest_route_timeout_seconds,
                     )
                     score = candidate_score(candidate)
                     if score > best_score:
@@ -635,8 +831,9 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
                 best_result["adaptive_learning"] = {
                     "enabled": True,
                     "selected": best_candidate,
-                    "requested_candle_count": requested_candle_count,
+                    "requested_candle_count": body.candle_count,
                     "selected_candle_count": best_result.get("candle_count"),
+                    "route_candle_cap": requested_candle_count,
                     "reason": "Requested window was unprofitable; selected the best recent regime candidate.",
                     "baseline": {
                         "profit_factor": result.get("profit_factor"),
@@ -650,11 +847,22 @@ async def run_backtest(body: BacktestRequest, _authorized: None = Depends(requir
                 result["adaptive_learning"] = {
                     "enabled": True,
                     "selected": "requested_window",
-                    "requested_candle_count": requested_candle_count,
+                    "requested_candle_count": body.candle_count,
                     "selected_candle_count": result.get("candle_count"),
                     "reason": "No recent regime candidate improved the requested window.",
+                    "route_candle_cap": requested_candle_count,
                 }
+        elif body.candle_count != requested_candle_count:
+            result["route_candle_cap"] = requested_candle_count
         result["data_quality"] = data_quality_report
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Backtest exceeded the route timeout. "
+                "Use fewer candles or run scripts/validate_profitability.py offline."
+            ),
+        )
     except Exception as e:
         import traceback
         logger.error(f"Backtest engine failed: {e}\n{traceback.format_exc()}")
@@ -711,6 +919,7 @@ async def paper_trade_status() -> dict:
         "profitability_gate": summarize_gate(),
         "open_positions": len(repo.get_paper_trades(status="open")),
         "closed_trades": repo.get_paper_trade_stats().get("closed_trades", 0),
+        "last_evaluation": getattr(paper_trading, "last_evaluation", {}),
     }
 
 
@@ -1032,10 +1241,16 @@ async def snapshot(
     if tf not in supported_timeframes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {tf}. Supported: {list(supported_timeframes)}")
     timeframe = tf
-    payload = await asyncio.wait_for(
-        pipelines[timeframe].snapshot_async(stores[timeframe]),
-        timeout=15.0,
-    )
+    try:
+        payload = await asyncio.wait_for(
+            pipelines[timeframe].snapshot_async(stores[timeframe]),
+            timeout=settings.snapshot_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Snapshot for {timeframe} exceeded {settings.snapshot_timeout_seconds:.0f}s; retry after current analysis cycle.",
+        )
     payload["mtf_confluence"] = compute_mtf_confluence(timeframe, stores, pipelines)
     return _attach_realtime_context(payload, timeframe)
 
@@ -1236,7 +1451,11 @@ async def chart_ws(websocket: WebSocket, tf: str = settings.timeframe, api_key: 
             await websocket.receive_text()
     except asyncio.TimeoutError:
         logger.error(f"WebSocket snapshot_async timed out for {timeframe} - pipeline lock or thread pool contention")
-        await websocket.close(code=1011)
+        try:
+            await websocket.close(code=1011)
+        except RuntimeError as exc:
+            if "close message has been sent" not in str(exc):
+                raise
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected for timeframe {timeframe}")
     except RuntimeError as exc:
@@ -1292,6 +1511,22 @@ def _valid_timeframe(timeframe: str) -> str:
     if timeframe not in supported_timeframes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported timeframe: {timeframe}. Supported: {list(supported_timeframes)}")
     return timeframe
+
+
+def _latest_market_price(timeframe: str | None = None) -> float | None:
+    tf = timeframe or settings.timeframe
+    try:
+        tf = _valid_timeframe(tf)
+    except HTTPException:
+        tf = settings.timeframe
+    store = stores.get(tf)
+    if store is None:
+        return None
+    candle = store.live_candle or store.latest_closed()
+    if candle is None:
+        return None
+    price = float(candle.close)
+    return price if price > 0 else None
 
 
 def _attach_realtime_context(payload: dict, timeframe: str) -> dict:
@@ -1616,6 +1851,290 @@ async def refresh_futures_loop() -> None:
         await asyncio.sleep(settings.futures_funding_refresh_seconds)
 
 
+# ─── Phase 2/3 ML Background Loops ─────────────────────
+
+
+async def xgboost_train_loop() -> None:
+    """Periodically retrain the XGBoost model on new data."""
+    from backend.analysis.label_generator import labeler
+    from backend.storage.feature_store import feature_store
+    from backend.utils.self_heal import self_heal
+    await asyncio.sleep(120)
+    while True:
+        try:
+            primary_tf = _valid_timeframe(settings.timeframe)
+            store = stores.get(primary_tf)
+            candles = store.get_closed_candles() if store else []
+
+            if len(candles) >= 250:
+                labeler.compute_labels(candles)
+                logger.info(f"Labels generated: {len(labeler._labels)} total")
+
+                # Compute and record features
+                feature_store.register_default_features()
+                last = candles[-1]
+                close = float(last.close)
+                if close > 0:
+                    closes = [float(c.close) for c in candles]
+                    volumes = [float(c.volume) for c in candles]
+                    highs = [float(c.high) for c in candles]
+                    lows = [float(c.low) for c in candles]
+                    n = len(closes)
+                    sma20 = sum(closes[-20:]) / 20 if n >= 20 else sum(closes) / n
+                    sma50 = sum(closes[-50:]) / 50 if n >= 50 else sma20
+                    returns = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, n) if closes[i - 1] > 0]
+                    pos_returns = [r for r in returns[-14:] if r > 0]
+                    neg_returns = [r for r in returns[-14:] if r < 0]
+                    avg_gain = sum(pos_returns) / 14 if pos_returns else 0
+                    avg_loss = abs(sum(neg_returns) / 14) if neg_returns else 1e-9
+                    rs = avg_gain / max(avg_loss, 1e-9)
+                    rsi = 100 - (100 / (1 + rs))
+                    atr_series = [max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])) for i in range(1, n)]
+                    atr = sum(atr_series[-14:]) / 14 if atr_series else 0
+                    avg_vol = sum(volumes[-20:]) / 20 if n >= 20 else sum(volumes) / n
+                    trend = (sma20 - sma50) / sma50 if sma50 > 0 else 0.0
+                    vol = (sum(r * r for r in returns[-20:]) / min(20, len(returns))) ** 0.5 if returns else 0.0
+
+                    feat_dict = {
+                        "rsi14": round(rsi, 4),
+                        "atr14": round(atr, 4),
+                        "trend_score": round(max(-1, min(1, trend * 50)), 4),
+                        "volatility_score": round(vol * 100, 4),
+                        "volume_zscore": round((volumes[-1] - avg_vol) / (avg_vol * 0.5 + 1e-9), 4),
+                        "realized_volatility": round(vol * 100, 4),
+                        "vwap_deviation": round((close - sma20) / sma20 * 100, 4),
+                        "of_cvd": round(closes[-1] - closes[0], 2),
+                    }
+                    if n >= 5 and closes[-5] > 0:
+                        feat_dict["of_cvd_slope"] = round((closes[-1] - closes[-5]) / closes[-5] * 100, 4)
+                    feature_store.ingest_feature_values(
+                        int(last.timestamp), settings.symbol, primary_tf, feat_dict
+                    )
+
+                    # Record label features
+                    for lb in list(labeler._labels_deque)[-200:]:
+                        feature_store.ingest_feature_values(
+                            lb.timestamp, settings.symbol, primary_tf,
+                            {
+                                "label_forward_return": round(lb.forward_return, 4),
+                                "label_direction": float(lb.label),
+                            }
+                        )
+
+            if xgboost_model.should_retrain():
+                result = xgboost_model.train(candles, primary_tf, settings.symbol)
+                if result:
+                    logger.info(f"XGBoost train: {result.get('status', 'ok')} - {result.get('accuracy', 0):.3f}")
+                    from backend.utils.panel_freshness import panel_freshness as _pf
+                    _pf.mark_updated("ml_xgboost")
+            self_heal.heartbeat("xgboost_train", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("xgboost_train", ok=False, error=str(e))
+            logger.exception("xgboost train loop failed")
+        await asyncio.sleep(900)  # retrain every 15 minutes
+
+
+async def hmm_train_loop() -> None:
+    """Periodically retrain the HMM regime classifier on new candle data."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(60)
+    while True:
+        try:
+            if hmm_classifier.should_retrain():
+                primary_tf = _valid_timeframe(settings.timeframe)
+                store = stores.get(primary_tf)
+                candles = store.get_closed_candles()[-500:] if store else []
+                if candles:
+                    result = hmm_classifier.train(candles)
+                    if result:
+                        logger.info(
+                            f"HMM train: {result.get('status', 'ok')} - {result.get('reason', 'completed')}"
+                        )
+                        panel_freshness.mark_updated("hmm_regime")
+            self_heal.heartbeat("hmm_train", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("hmm_train", ok=False, error=str(e))
+            logger.exception("hmm train loop failed")
+        await asyncio.sleep(3600)
+
+
+async def transformer_train_loop() -> None:
+    """Periodically retrain the transformer forecaster on new candle data."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(180)
+    while True:
+        try:
+            state = transformer_forecaster.get_state()
+            if not state.get("is_trained", False) or (time.time() - state.get("last_train_ts", 0)) > 3600:
+                primary_tf = _valid_timeframe(settings.timeframe)
+                store = stores.get(primary_tf)
+                candles = store.get_closed_candles()[-1000:] if store else []
+                if len(candles) >= 500:
+                    result = transformer_forecaster.train(candles)
+                    if result:
+                        logger.info(
+                            f"Transformer train: {result.get('status', 'ok')} - "
+                            f"train_loss={result.get('train_loss', 0):.4f}, "
+                            f"test_loss={result.get('test_loss', 0):.4f}"
+                        )
+                        panel_freshness.mark_updated("transformer_forecast")
+            self_heal.heartbeat("transformer_train", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("transformer_train", ok=False, error=str(e))
+            logger.exception("transformer train loop failed")
+        await asyncio.sleep(3600)
+
+
+async def hmm_predict_loop() -> None:
+    """Periodically call HMM predict to populate recent_regimes history."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(90)
+    while True:
+        try:
+            state = hmm_classifier.get_state()
+            if state.get("is_trained", False):
+                primary_tf = _valid_timeframe(settings.timeframe)
+                store = stores.get(primary_tf)
+                candles = store.get_closed_candles()[-200:] if store else []
+                if len(candles) >= 50:
+                    hmm_classifier.predict(candles)
+                    panel_freshness.mark_updated("hmm_regime")
+            self_heal.heartbeat("hmm_predict", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("hmm_predict", ok=False, error=str(e))
+            logger.exception("hmm predict loop failed")
+        await asyncio.sleep(60)
+
+
+async def refresh_nlp_loop() -> None:
+    """Refresh NLP sentiment from external sources."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(5)
+    while True:
+        try:
+            result = await nlp_sentiment.compute()
+            if result:
+                await manager.broadcast({
+                    "update_type": "nlp_sentiment",
+                    "symbol": settings.symbol,
+                    "nlp_sentiment": {
+                        "aggregate_score": result.score,
+                        "aggregate_label": result.label,
+                        "confidence": result.confidence,
+                        "source_count": result.source_count,
+                        "finbert_score": result.finbert_score,
+                        "vader_score": result.vader_score,
+                        "fear_greed_index": result.fear_greed_index,
+                        "weighted_score": result.weighted_score,
+                        "description": result.description,
+                    },
+                })
+                panel_freshness.mark_updated("nlp_sentiment")
+            self_heal.heartbeat("nlp_refresh", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("nlp_refresh", ok=False, error=str(e))
+            logger.exception("nlp sentiment refresh failed")
+        await asyncio.sleep(300)
+
+
+async def refresh_onchain_loop() -> None:
+    """Refresh on-chain metrics periodically."""
+    from backend.utils.self_heal import self_heal
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(10)
+    while True:
+        try:
+            from backend.ingestion.onchain import onchain_provider
+            # Refresh provider first (async)
+            try:
+                await onchain_provider.refresh()
+            except Exception:
+                pass
+            # Get current price from primary store if available
+            try:
+                primary_tf = _valid_timeframe(settings.timeframe)
+                store = stores.get(primary_tf)
+                btc_price = store.last_close if store and hasattr(store, "last_close") and store.last_close else 0
+                if btc_price == 0 and store and store.candles:
+                    btc_price = store.candles[-1].close
+            except Exception:
+                btc_price = 0
+            signal = onchain_provider.get_signal(btc_price or 0)
+            await manager.broadcast({
+                "update_type": "onchain",
+                "symbol": settings.symbol,
+                "onchain": signal,
+            })
+            panel_freshness.mark_updated("onchain_metrics")
+            self_heal.heartbeat("onchain_refresh", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("onchain_refresh", ok=False, error=str(e))
+            logger.exception("onchain refresh failed")
+        await asyncio.sleep(600)
+
+
+async def refresh_cross_exchange_loop() -> None:
+    """Refresh cross-exchange data periodically."""
+    await asyncio.sleep(3)
+    while True:
+        try:
+            from backend.ingestion.cross_exchange import cross_exchange
+            snapshot = await cross_exchange.refresh()
+            if snapshot and snapshot.median_price > 0:
+                basis = cross_exchange.detect_basis()
+                await manager.broadcast({
+                    "update_type": "cross_exchange",
+                    "symbol": settings.symbol,
+                    "cross_exchange": {
+                        "median_price": snapshot.median_price,
+                        "spread_pct": snapshot.spread_pct,
+                        "exchange_count": snapshot.exchange_count,
+                        "basis_signals": [
+                            {"description": s.description, "basis_pct": s.basis_pct, "strength": s.strength}
+                            for s in basis[:3]
+                        ],
+                    },
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("cross-exchange refresh failed")
+        await asyncio.sleep(15)
+
+
+async def pipeline_health_loop() -> None:
+    """Run the async pipeline and broadcast health."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            health = async_pipeline.get_health()
+            await manager.broadcast({
+                "update_type": "pipeline_health",
+                "pipeline": health,
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("pipeline health loop failed")
+        await asyncio.sleep(60)
+
+
 async def refresh_multi_exchange_loop() -> None:
     """Periodically fetch multi-exchange aggregated price and feed into pipelines."""
     from backend.ingestion.multi_exchange import aggregator as me_aggregator
@@ -1814,7 +2333,29 @@ async def db_integrity_check() -> dict:
 
         from backend.utils.db_integrity import db_integrity
         from backend.storage.schema import get_conn
-        raw = db_integrity.check_integrity()
+        try:
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(db_integrity.check_integrity),
+                timeout=settings.db_integrity_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "database_size_mb": 0,
+                "total_tables": 0,
+                "total_records": 0,
+                "wal_mode": False,
+                "integrity_checks": [
+                    {
+                        "check_name": "Timeout",
+                        "status": "warning",
+                        "message": f"Integrity check exceeded {settings.db_integrity_timeout_seconds:.0f}s; run offline for full details.",
+                    },
+                ],
+                "table_info": [],
+                "oldest_record": None,
+                "newest_record": None,
+                "timestamp": int(time.time() * 1000),
+            }
 
         conn = get_conn()
         try:
@@ -1979,6 +2520,349 @@ async def cache_clear(prefix: str | None = None) -> dict:
         return {"ok": True, "cleared": count, "prefix": prefix}
     await global_cache.clear()
     return {"ok": True, "cleared": "all"}
+
+
+# ─── Phase 2/3 ML API Endpoints ─────────────────────────
+
+
+@app.get("/ml/xgboost/state")
+async def xgboost_state() -> dict:
+    """Get current XGBoost model state."""
+    return xgboost_model.get_state()
+
+
+@app.post("/ml/xgboost/train")
+async def xgboost_train() -> dict:
+    """Manually trigger XGBoost retraining."""
+    try:
+        primary_tf = _valid_timeframe(settings.timeframe)
+        store = stores.get(primary_tf)
+        candles = store.get_closed_candles() if store else []
+        result = xgboost_model.train(candles, primary_tf, settings.symbol)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/features/store")
+async def feature_store_stats() -> dict:
+    """Get feature store statistics."""
+    return feature_store.get_state()
+
+
+@app.get("/ml/optimizer/status")
+async def ml_optimizer_status() -> dict:
+    """Get self-optimizer status including live signal quality scores."""
+    from backend.analysis.self_optimizer import optimizer as self_optimizer
+    return self_optimizer.get_status()
+
+
+@app.get("/system/self-heal/status")
+async def self_heal_status() -> dict:
+    """Status of all monitored background tasks (alive, last_ok_ago, restarts)."""
+    from backend.utils.self_heal import self_heal
+    return self_heal.get_status()
+
+
+@app.get("/system/panels/freshness")
+async def panel_freshness_status() -> dict:
+    """Freshness status of all registered data panels."""
+    from backend.utils.panel_freshness import panel_freshness
+    return panel_freshness.get_status()
+
+
+@app.post("/system/self-heal/restart-all")
+async def self_heal_restart_all() -> dict:
+    """Force-restart every monitored background task."""
+    from backend.utils.self_heal import self_heal
+    restarted = []
+    for name, info in self_heal._tasks.items():
+        if info.get("factory"):
+            try:
+                old = info["task"]
+                if old and not old.done():
+                    old.cancel()
+                new_task = info["factory"]()
+                info["task"] = new_task
+                info["last_ok"] = time.time()
+                self_heal._restart_counts[name] = self_heal._restart_counts.get(name, 0) + 1
+                restarted.append(name)
+            except Exception as e:
+                logger.exception("Failed to restart %s: %s", name, e)
+    return {"restarted": restarted, "count": len(restarted)}
+
+
+@app.get("/funding/strategy/state")
+async def funding_strategy_state() -> dict:
+    """Get funding strategy current state."""
+    return funding_strategy.get_state()
+
+
+@app.get("/hmm/regime")
+async def hmm_regime_state() -> dict:
+    """Get HMM regime classifier state."""
+    return hmm_classifier.get_state()
+
+
+@app.post("/hmm/train")
+async def hmm_train(timeframe: str = "5m", limit: int = 500) -> dict:
+    """Manually trigger HMM training on recent candle data."""
+    try:
+        tf = _valid_timeframe(timeframe)
+        store = stores.get(tf)
+        candles = store.get_closed_candles()[-limit:] if store else []
+        if not candles:
+            raise HTTPException(status_code=400, detail=f"No candles available for {tf}")
+        result = hmm_classifier.train(candles)
+        return {"status": "ok", "result": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/nlp/sentiment")
+async def nlp_sentiment_endpoint() -> dict:
+    """Get NLP sentiment analysis."""
+    try:
+        result = await nlp_sentiment.compute()
+        if result is None:
+            return {"error": "No sentiment data available"}
+        return {
+            "aggregate_score": result.score,
+            "aggregate_label": result.label,
+            "confidence": result.confidence,
+            "source_count": result.source_count,
+            "finbert_score": result.finbert_score,
+            "vader_score": result.vader_score,
+            "fear_greed_index": result.fear_greed_index,
+            "weighted_score": result.weighted_score,
+            "description": result.description,
+            "timestamp": result.timestamp,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/transformer/forecast")
+async def transformer_forecast_endpoint(candles: int = Query(100, ge=20, le=500)) -> dict:
+    """Get transformer multi-horizon forecast."""
+    primary_tf = _valid_timeframe(settings.timeframe)
+    store = stores.get(primary_tf)
+    if not store:
+        return {"current_price": 0.0, "model_ready": False, "horizons": [], "reason": "no_store"}
+    candle_list = store.get_closed_candles()[-candles:]
+    if len(candle_list) < 20:
+        current_price = candle_list[-1].close if candle_list else 0.0
+        return {"current_price": current_price, "model_ready": False, "horizons": [], "reason": "insufficient_data"}
+    current_price = candle_list[-1].close
+    try:
+        forecasts = await asyncio.to_thread(transformer_forecaster.predict, candle_list, current_price)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Forecast failed: {e}")
+    return {
+        "current_price": current_price,
+        "model_ready": transformer_forecaster._is_trained if hasattr(transformer_forecaster, "_is_trained") else False,
+        "horizons": [
+            {
+                "horizon": f.horizon,
+                "horizon_bars": f.horizon_bars,
+                "predicted_direction": f.predicted_direction,
+                "predicted_return_pct": f.predicted_return_pct,
+                "confidence": f.confidence,
+                "entry_price": f.entry_price,
+                "target_price": f.target_price,
+                "stop_price": f.stop_price,
+                "description": f.description,
+            }
+            for f in forecasts
+        ],
+    }
+
+
+@app.post("/transformer/train")
+async def transformer_train(timeframe: str = "5m", limit: int = 1000) -> dict:
+    """Manually trigger transformer training on recent candle data."""
+    try:
+        tf = _valid_timeframe(timeframe)
+        store = stores.get(tf)
+        candles = store.get_closed_candles()[-limit:] if store else []
+        if not candles:
+            raise HTTPException(status_code=400, detail=f"No candles available for {tf}")
+        result = transformer_forecaster.train(candles)
+        return {"status": "ok", "result": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/rl/sizing")
+async def rl_sizing_state() -> dict:
+    """Get RL position sizing agent state."""
+    return rl_sizing.get_state()
+
+
+@app.get("/position/status")
+async def position_status() -> dict:
+    """Get position manager state and open positions."""
+    return position_manager.get_state()
+
+
+@app.post("/position/open")
+async def position_open(request: Request) -> dict:
+    """Open a new position."""
+    body = await request.json()
+    side = body.get("side", "long")
+    size = body.get("size")
+    leverage = body.get("leverage", 1)
+    stop_loss = body.get("stop_loss")
+    take_profit = body.get("take_profit")
+    current_price = _latest_market_price()
+    if current_price is None or current_price <= 0:
+        raise HTTPException(status_code=409, detail="No live market price available for position entry")
+    try:
+        result = position_manager.open_position(
+            symbol=settings.symbol, side=side, size=size,
+            entry_price=current_price, leverage=leverage,
+            stop_loss=stop_loss, take_profit=take_profit,
+        )
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/position/close")
+async def position_close() -> dict:
+    """Close the current open position."""
+    try:
+        open_positions = position_manager.get_open_positions()
+        if not open_positions:
+            return {"status": "ok", "result": {"success": False, "error": "No open positions"}}
+        current_price = _latest_market_price()
+        if current_price is None or current_price <= 0:
+            raise HTTPException(status_code=409, detail="No live market price available for position close")
+        pos_id = open_positions[0].id
+        result = position_manager.close_position(position_id=pos_id, price=current_price, reason="manual")
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/onchain/metrics")
+async def onchain_metrics() -> dict:
+    """Get latest on-chain metrics."""
+    from backend.ingestion.onchain import onchain_provider
+    try:
+        btc_price = _latest_market_price() or 0.0
+        if btc_price > 0:
+            await onchain_provider.refresh(btc_price=btc_price)
+        signal = onchain_provider.get_signal(btc_price)
+        history = onchain_provider.get_recent_history(n=10)
+        snapshots = [
+            {
+                "timestamp": s.timestamp,
+                "mvrv_z_score": s.mvrv_zscore,
+                "exchange_flow_balance": s.exchange_net_flow,
+                "whale_tx_count": s.whale_tx_count,
+                "sopr": s.sopr,
+                "active_addresses": s.active_addresses,
+                "transaction_count": s.transaction_count,
+                "hash_rate": s.hash_rate,
+            }
+            for s in history
+        ]
+        state = onchain_provider.get_state()
+        return {
+            "signal": signal,
+            "history": snapshots,
+            "sources_loaded": [state.get("source", "none")],
+            "state": state,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/cross-exchange/state")
+async def cross_exchange_state() -> dict:
+    """Get cross-exchange aggregator state."""
+    from backend.ingestion.cross_exchange import cross_exchange
+    return cross_exchange.get_state()
+
+
+@app.get("/cross-exchange/snapshot")
+async def cross_exchange_snapshot() -> dict:
+    """Get latest cross-exchange snapshot."""
+    from backend.ingestion.cross_exchange import cross_exchange
+    try:
+        snap = await cross_exchange.refresh()
+        return {
+            "median_price": snap.median_price,
+            "mean_price": snap.mean_price,
+            "min_price": snap.min_price,
+            "max_price": snap.max_price,
+            "spread_pct": snap.spread_pct,
+            "volume_weighted_price": snap.volume_weighted_price,
+            "total_volume_24h": snap.total_volume_24h,
+            "exchange_count": snap.exchange_count,
+            "timestamp": snap.timestamp,
+            "exchanges": [
+                {
+                    "exchange": t.exchange,
+                    "last": t.last,
+                    "bid": t.bid,
+                    "ask": t.ask,
+                    "funding_rate": t.funding_rate,
+                    "volume_24h": t.volume_24h,
+                }
+                for t in snap.tickers
+            ],
+            "basis_signals": [
+                {"description": s.description, "basis_pct": s.basis_pct, "strength": s.strength}
+                for s in cross_exchange.detect_basis()[:5]
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/pipeline/health")
+async def pipeline_health() -> dict:
+    """Get async pipeline health status."""
+    return async_pipeline.get_health()
+
+
+@app.get("/pipeline/runs")
+async def pipeline_runs(n: int = Query(10, ge=1, le=100)) -> list[dict]:
+    """Get recent pipeline run reports."""
+    return async_pipeline.get_recent_reports(n=n)
+
+
+@app.get("/circuit-breakers")
+async def circuit_breaker_states() -> dict:
+    """Get all circuit breaker states."""
+    from backend.analysis.circuit_breaker import circuit_registry
+    return circuit_registry.get_all_states()
+
+
+@app.post("/circuit-breakers/reset")
+async def circuit_breaker_reset() -> dict:
+    """Reset all circuit breakers to CLOSED state."""
+    from backend.analysis.circuit_breaker import circuit_registry
+    circuit_registry.reset_all()
+    return {"status": "ok"}
+
+
+@app.get("/adaptive-sltp/state")
+async def adaptive_sltp_state() -> dict:
+    """Get adaptive SL/TP engine state."""
+    return adaptive_sltp.get_state()
+
+
+@app.get("/cvd/divergence")
+async def cvd_divergence_state() -> dict:
+    """Get CVD divergence detector state."""
+    return cvd_divergence_detector.get_state()
 
 
 # SPA fallback: serve index.html for any non-API route

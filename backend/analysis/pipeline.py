@@ -25,6 +25,7 @@ from backend.analysis.regime_v2 import detect_market_regime
 from backend.analysis.unified_scalp import UnifiedScalpEngine
 from backend.analysis.scalp_risk import ScalpRiskManager
 from backend.config import settings
+from backend.utils.system_health import get_system_health as _get_system_health
 from backend.storage import repository as repo
 from backend.analysis.swing_detector import detect_swings
 from backend.engine.candle_store import CandleStore
@@ -442,14 +443,16 @@ class AnalysisPipeline:
                 now_ms = int(time.time() * 1000)
                 expired = sig.time_limit_ms > 0 and now_ms > sig.time_limit_ms
                 is_long = "LONG" in sig.signal_type
+                post_signal_candles = [c for c in closed_candles[-20:] if c.timestamp >= sig.timestamp]
+                post_signal_tp_candles = post_signal_candles[-10:]
                 sl_hit = False
                 tp_hit = False
                 if is_long:
-                    sl_hit = any(c.low <= sig.sl_level for c in closed_candles[-20:])
-                    tp_hit = any(c.high >= sig.target_1 for c in closed_candles[-10:])
+                    sl_hit = any(c.low <= sig.sl_level for c in post_signal_candles)
+                    tp_hit = any(c.high >= sig.target_1 for c in post_signal_tp_candles)
                 else:
-                    sl_hit = any(c.high >= sig.sl_level for c in closed_candles[-20:])
-                    tp_hit = any(c.low <= sig.target_1 for c in closed_candles[-10:])
+                    sl_hit = any(c.high >= sig.sl_level for c in post_signal_candles)
+                    tp_hit = any(c.low <= sig.target_1 for c in post_signal_tp_candles)
                 if not sl_hit and not tp_hit and not expired:
                     valid_signals.append(sig)
             if len(valid_signals) != len(display_ctx.signals):
@@ -486,6 +489,8 @@ class AnalysisPipeline:
                     trailing_stop=None,
                     trailing_mode="atr_chandelier",
                     model="unified-scalp-v2",
+                    max_hold_minutes=ss.max_hold_minutes,
+                    enriched_features=ss.enriched_features,
                 )
                 scalp_signals_as_trade.append(t_sig)
 
@@ -551,8 +556,17 @@ class AnalysisPipeline:
                 "anomaly_detector": self.scalp_engine.anomaly_detector.get_status(),
                 "trading_psychology": self._agent_psychology_status(),
                 "pattern_intel": self._agent_pattern_intel(),
-            },
+                "system_health": _get_system_health(),
+            }
         }
+        try:
+            from backend.utils.panel_freshness import panel_freshness
+            panel_freshness.mark_updated("ensemble")
+            panel_freshness.mark_updated("anomaly_detector")
+            panel_freshness.mark_updated("ai_lab")
+            panel_freshness.mark_updated("optimizer")
+        except Exception:
+            pass
         if include_candles:
             payload["candles"] = to_wire(store.get_chart_candles())
 
@@ -611,8 +625,13 @@ class AnalysisPipeline:
                         ensemble_model.record_outcome(ens_score, trade_data['won'], trade_data['pnl_pct'])
                     # Record in self-optimizer
                     self_optimizer.record_trade(trade_data)
-                    # Run self-optimization if due
-                    if self_optimizer.should_optimize():
+                    # Active learning: optimize on every trade close to refine signals
+                    if hasattr(self_optimizer, 'optimize_on_close'):
+                        opt_result = self_optimizer.optimize_on_close(trade_data)
+                        if opt_result.get('status') == 'applied':
+                            logger.info("AI Lab applied optimization: %s", opt_result.get('changes', {}))
+                    # Run scheduled self-optimization if due
+                    elif self_optimizer.should_optimize():
                         opt_result = self_optimizer.run_optimization()
                         if opt_result.get('status') == 'applied':
                             logger.info("Self-optimization applied: %s", opt_result)
@@ -763,11 +782,15 @@ class AnalysisPipeline:
         if self._pattern_seeded or len(candles) < 20:
             return
         self._pattern_seeded = True
+        if not settings.enable_pattern_startup_seed:
+            logger.info("Pattern intelligence startup seed skipped")
+            return
         try:
             from backend.analysis.self_aware_agent import get_agent
             pi = get_agent().pattern_intel
             # Slide through historical candles in overlapping segments
-            for i in range(8, len(candles) - 4):
+            start = max(8, len(candles) - settings.pattern_seed_max_segments - 4)
+            for i in range(start, len(candles) - 4):
                 segment = candles[:i + 1]
                 lookahead = candles[i + 1:i + 5]
                 # Only record when segment has a closed lookahead

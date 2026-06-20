@@ -11,6 +11,8 @@ from backend.config import settings
 from backend.ingestion.binance import _binance_symbol, fetch_historical_candles
 from backend.models.types import Candle
 
+BINANCE_REST_BASE_URL = "https://api.binance.com"
+
 
 async def _fetch_window(symbol: str, interval: str, candles: int, base_url: str) -> list[Candle]:
     remaining = candles
@@ -78,11 +80,17 @@ async def main() -> int:
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--interval", default="5m")
     parser.add_argument("--candles", type=int, default=8640)
+    parser.add_argument("--base-url", default=BINANCE_REST_BASE_URL)
     parser.add_argument("--output", default=settings.profitability_validation_path)
     parser.add_argument("--walk-forward", action="store_true", default=True)
     args = parser.parse_args()
 
-    candles = await _fetch_window(args.symbol, args.interval, args.candles, settings.market_data_rest_base_url)
+    if "binance" not in args.base_url.lower():
+        raise SystemExit(
+            "validate_profitability.py uses Binance kline format; pass a Binance-compatible --base-url."
+        )
+
+    candles = await _fetch_window(args.symbol, args.interval, args.candles, args.base_url)
     engine = BacktestEngine(max_candles=0)
     result = engine.run(candles, symbol=args.symbol, timeframe=args.interval, walk_forward=args.walk_forward)
     summary = result.get("combined", result)

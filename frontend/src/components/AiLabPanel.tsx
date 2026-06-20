@@ -1,4 +1,4 @@
-import { BrainCircuit, Shield, Zap, AlertTriangle, Target } from 'lucide-react'
+import { BrainCircuit, Shield, Zap, AlertTriangle, Target, Activity } from 'lucide-react'
 import { useChartStore } from '../store/chartStore'
 
 export function AiLabPanel() {
@@ -98,6 +98,37 @@ export function AiLabPanel() {
                 </dl>
               </section>
             )}
+            {optimizer.signal_quality && Object.keys(optimizer.signal_quality).length > 0 && (
+              <section style={{ marginTop: 8 }}>
+                <h3 style={{ fontSize: 11, color: '#888', margin: '4px 0' }}>
+                  <Target size={11} style={{ display: 'inline', verticalAlign: 'middle' }} />{' '}
+                  Signal Quality (Live)
+                </h3>
+                <dl className="facts compact">
+                  {Object.entries(optimizer.signal_quality).map(([regime, data]: [string, any]) => {
+                    const q = data.quality_score
+                    const color = q >= 1.0 ? '#1fe3a3' : (q >= 0.8 ? '#f59f43' : '#ff5b6b')
+                    return (
+                      <div key={regime}>
+                        <dt style={{ textTransform: 'capitalize' }}>{regime}</dt>
+                        <dd style={{ color }}>
+                          {q.toFixed(2)}x ({(data.win_rate * 100).toFixed(0)}% WR)
+                        </dd>
+                      </div>
+                    )
+                  })}
+                </dl>
+                <p style={{ fontSize: 10, color: '#666', margin: '4px 0 0 0' }}>
+                  Multiplier applied to signals based on historical performance.
+                  1.0x = neutral, &gt;1.0x = strong edge, &lt;1.0x = suppress.
+                </p>
+              </section>
+            )}
+            {optimizer.active_learning && (
+              <p style={{ fontSize: 10, color: '#1fe3a3', margin: '4px 0' }}>
+                ● Active learning: parameters updated on every trade close
+              </p>
+            )}
           </>
         ) : <p style={{ color: '#555', fontSize: 11 }}>No optimizer data yet</p>}
       </section>
@@ -160,6 +191,59 @@ export function AiLabPanel() {
           </dl>
         )}
       </section>
+
+      {/* ── SYSTEM HEALTH (auto-restart + panel freshness) ── */}
+      {stats?.system_health && (
+        <section>
+          <h2><Activity size={13} /> System Health (Auto-Self-Heal)</h2>
+          <p style={{ fontSize: 10, color: '#888', margin: '0 0 4px 0' }}>
+            All background tasks monitored. Failed or stale tasks auto-restart.
+          </p>
+          {stats.system_health.self_heal && Object.keys(stats.system_health.self_heal).length > 0 && (
+            <details open style={{ marginBottom: 6 }}>
+              <summary style={{ fontSize: 11, color: '#aaa', cursor: 'pointer' }}>
+                Background Tasks ({Object.values(stats.system_health.self_heal).filter((t: any) => t.alive).length}/{Object.keys(stats.system_health.self_heal).length} alive)
+              </summary>
+              <dl className="facts compact" style={{ marginTop: 4 }}>
+                {Object.entries(stats.system_health.self_heal).map(([name, t]: [string, any]) => {
+                  const color = t.alive
+                    ? (t.restarts > 0 ? '#f59f43' : '#1fe3a3')
+                    : '#ff5b6b'
+                  return (
+                    <div key={name}>
+                      <dt style={{ textTransform: 'capitalize' }}>{name.replace(/_/g, ' ')}</dt>
+                      <dd style={{ color }}>
+                        {t.alive ? '●' : '○'} {t.alive ? `${Math.round(t.last_ok_ago)}s` : 'DEAD'}
+                        {t.restarts > 0 && ` (×${t.restarts})`}
+                      </dd>
+                    </div>
+                  )
+                })}
+              </dl>
+            </details>
+          )}
+          {stats.system_health.panel_freshness && Object.keys(stats.system_health.panel_freshness).length > 0 && (
+            <details>
+              <summary style={{ fontSize: 11, color: '#aaa', cursor: 'pointer' }}>
+                Panel Freshness ({Object.values(stats.system_health.panel_freshness).filter((p: any) => !p.is_stale).length}/{Object.keys(stats.system_health.panel_freshness).length} fresh)
+              </summary>
+              <dl className="facts compact" style={{ marginTop: 4 }}>
+                {Object.entries(stats.system_health.panel_freshness).map(([name, p]: [string, any]) => {
+                  const color = p.is_stale ? '#ff5b6b' : '#1fe3a3'
+                  return (
+                    <div key={name}>
+                      <dt style={{ textTransform: 'capitalize' }}>{name.replace(/_/g, ' ')}</dt>
+                      <dd style={{ color }}>
+                        {p.is_stale ? '⚠' : '●'} {Math.round(p.age_seconds)}s / {Math.round(p.threshold)}s
+                      </dd>
+                    </div>
+                  )
+                })}
+              </dl>
+            </details>
+          )}
+        </section>
+      )}
     </div>
   )
 }

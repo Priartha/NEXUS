@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -48,6 +47,7 @@ class SelfOptimizationEngine:
     """
     
     def __init__(self) -> None:
+        self.state_version = 2
         self.attempts: deque[OptimizationAttempt] = deque(maxlen=200)
         self._last_optimization: float = 0
         self._optimization_interval: float = 7200  # 2 hours
@@ -70,6 +70,14 @@ class SelfOptimizationEngine:
         
         # Load saved state
         self._load_state()
+
+    def bootstrap_history(self, n_trades: int = 50) -> int:
+        """Do not synthesize optimizer history.
+
+        Kept as a no-op compatibility shim for older callers. The optimizer
+        must learn only from real closed trades.
+        """
+        return 0
 
     def record_trade(self, trade: dict) -> None:
         """Record a completed trade for optimization analysis."""
@@ -161,6 +169,50 @@ class SelfOptimizationEngine:
                 reason=f"No improvement ({result['improvement']:.4f})",
             ))
             return {'status': 'reverted', 'improvement': result['improvement']}
+
+    def optimize_on_close(self, trade: dict) -> dict:
+        """Run lightweight optimization on every trade close.
+
+        Adjusts parameters in-place based on the latest trade outcome
+        to keep signals in tune with current market conditions. Returns the
+        result of the optimization run (or skipped if no changes needed).
+        """
+        # Trigger optimization more aggressively after bootstrap (no interval wait)
+        if len(self.performance_window) < 3:
+            return {'status': 'skipped', 'reason': 'insufficient_data'}
+
+        # Force optimization to run regardless of interval
+        self._last_optimization = 0
+        result = self.run_optimization()
+        return result
+
+    def score_signal(self, direction: str, regime: str, confidence: float) -> float:
+        """Score a new signal based on historical performance of similar setups.
+
+        Returns a multiplier in [0.5, 1.3]:
+        - 1.0 = neutral (no history)
+        - 1.3 = strong historical edge
+        - 0.5 = historically losing setup
+
+        The historical edge has a strong floor; even low-confidence signals
+        get the benefit/drawback of the regime's track record.
+        """
+        rp = self.regime_performance.get(regime, {})
+        if not rp or rp.get('trades', 0) < 3:
+            return 1.0
+        wr = rp['wins'] / rp['trades']
+        avg_pnl = rp['total_pnl'] / rp['trades']
+        n = rp['trades']
+        # Base quality: combines win rate (60%) and avg pnl (40%)
+        pnl_component = max(-0.15, min(0.15, avg_pnl / 5))
+        quality = 0.5 + (wr - 0.5) * 0.6 + pnl_component * 0.4
+        # Confidence amplifies the move but with less dampening
+        quality = 0.8 + (quality - 0.8) * (0.5 + 0.5 * confidence)
+        # Confidence-conditional boost: high conf in winning regime = more
+        if confidence > 0.6 and wr > 0.55:
+            quality += 0.05
+        # Clamp
+        return float(max(0.5, min(1.3, quality)))
 
     def _analyze_performance(self) -> dict:
         """Analyze recent performance metrics."""
@@ -278,13 +330,6 @@ class SelfOptimizationEngine:
                 # For weak regimes, increase minimum edge
                 proposed['min_edge'] = min(0.15, proposed['min_edge'] + 0.01)
         
-        # Random perturbation for exploration (10% chance)
-        if random.random() < 0.10:
-            key = random.choice(list(proposed.keys()))
-            if isinstance(proposed[key], float):
-                delta = random.uniform(-0.02, 0.02)
-                proposed[key] = max(0.01, proposed[key] + delta)
-        
         return proposed
 
     def _evaluate_changes(self, proposed: dict, analysis: dict) -> dict:
@@ -349,6 +394,19 @@ class SelfOptimizationEngine:
 
     def get_status(self) -> dict:
         """Get optimization engine status."""
+        # Compute live signal quality scores per regime
+        signal_quality = {}
+        for regime, s in self.regime_performance.items():
+            if s.get('trades', 0) >= 3:
+                wr = s['wins'] / s['trades']
+                avg_pnl = s['total_pnl'] / s['trades']
+                quality_score = max(0.5, min(1.2, 0.5 + (wr - 0.5) * 0.6 + max(-0.1, min(0.1, avg_pnl / 10)) * 0.4))
+                signal_quality[regime] = {
+                    'quality_score': round(quality_score, 4),
+                    'win_rate': round(wr, 4),
+                    'avg_pnl': round(avg_pnl, 4),
+                    'trades': s['trades'],
+                }
         return {
             'total_attempts': len(self.attempts),
             'kept_attempts': sum(1 for a in self.attempts if a.kept),
@@ -361,12 +419,15 @@ class SelfOptimizationEngine:
                 }
                 for r, s in self.regime_performance.items()
             },
+            'signal_quality': signal_quality,
             'last_optimization': self._last_optimization,
             'next_optimization': self._last_optimization + self._optimization_interval,
+            'active_learning': True,
         }
 
     def _save_state(self) -> None:
         state = {
+            'state_version': self.state_version,
             'params': self.params,
             'regime_performance': self.regime_performance,
             'last_optimization': self._last_optimization,
@@ -390,11 +451,30 @@ class SelfOptimizationEngine:
         try:
             with open(path) as f:
                 state = json.load(f)
+            if int(state.get('state_version', 0) or 0) < self.state_version:
+                return
             self.params.update(state.get('params', {}))
             self.regime_performance = state.get('regime_performance', {})
             self._last_optimization = state.get('last_optimization', 0)
+            # Restore attempts list so counter persists across restarts
+            loaded_attempts = state.get('attempts', [])
+            for a in loaded_attempts:
+                if isinstance(a, dict):
+                    self.attempts.append(OptimizationAttempt(
+                        timestamp=a.get('timestamp', 0),
+                        params_before=a.get('params_before', {}),
+                        params_after=a.get('params_after', {}),
+                        backtest_result=a.get('backtest_result', {}),
+                        improvement=a.get('improvement', 0.0),
+                        kept=a.get('kept', False),
+                        reason=a.get('reason', ''),
+                    ))
         except (FileNotFoundError, json.JSONDecodeError):
             pass
+
+    def _rebuild_performance_window(self) -> None:
+        """Compatibility no-op: aggregate stats cannot recreate real trades."""
+        return None
 
 
 # Singleton

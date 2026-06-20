@@ -91,6 +91,30 @@ class Settings:
     profitability_min_win_rate: float = float(os.getenv("NEXUS_PROFITABILITY_MIN_WIN_RATE", "0.50"))
     profitability_min_profit_factor: float = float(os.getenv("NEXUS_PROFITABILITY_MIN_PF", "1.50"))
     profitability_max_drawdown_pct: float = float(os.getenv("NEXUS_PROFITABILITY_MAX_DD_PCT", "15.0"))
+    backtest_route_max_candles: int = int(os.getenv("NEXUS_BACKTEST_ROUTE_MAX_CANDLES", "200"))
+    backtest_route_timeout_seconds: float = float(os.getenv("NEXUS_BACKTEST_ROUTE_TIMEOUT_SECONDS", "45"))
+    backtest_adaptive_max_candidates: int = int(os.getenv("NEXUS_BACKTEST_ADAPTIVE_MAX_CANDIDATES", "3"))
+    db_integrity_timeout_seconds: float = float(os.getenv("NEXUS_DB_INTEGRITY_TIMEOUT_SECONDS", "8"))
+    snapshot_timeout_seconds: float = float(os.getenv("NEXUS_SNAPSHOT_TIMEOUT_SECONDS", "15"))
+    auto_install_dependencies: bool = os.getenv("NEXUS_AUTO_INSTALL_DEPS", "false").lower() == "true"
+    enable_pattern_startup_seed: bool = os.getenv("NEXUS_ENABLE_PATTERN_STARTUP_SEED", "false").lower() == "true"
+    pattern_seed_max_segments: int = int(os.getenv("NEXUS_PATTERN_SEED_MAX_SEGMENTS", "250"))
+
+    # Personalized execution profile derived from the user's Delta PnL export.
+    trader_profile_enabled: bool = os.getenv("NEXUS_TRADER_PROFILE_ENABLED", "true").lower() == "true"
+    trader_profile_path: str = os.getenv(
+        "NEXUS_TRADER_PROFILE_PATH",
+        "data/trader_style_profile.json",
+    )
+
+    # Paper-trading learning/risk controls.  Paper mode is used to collect
+    # forward-test evidence, so its drawdown guard should be configurable and
+    # separate from live execution risk.
+    paper_max_drawdown_pct: float = float(os.getenv("NEXUS_PAPER_MAX_DD_PCT", "0.30"))
+    paper_max_daily_loss_pct: float = float(os.getenv("NEXUS_PAPER_DAILY_LOSS_PCT", "0.05"))
+    paper_max_position_size_pct: float = float(os.getenv("NEXUS_PAPER_MAX_POSITION_PCT", "0.03"))
+    paper_exploration_enabled: bool = os.getenv("NEXUS_PAPER_EXPLORATION_ENABLED", "true").lower() == "true"
+    paper_exploration_min_score: float = float(os.getenv("NEXUS_PAPER_EXPLORATION_MIN_SCORE", "0.52"))
 
 
 settings = Settings()

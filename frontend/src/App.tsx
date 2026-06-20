@@ -3,6 +3,7 @@ import {
   Activity,
   AlertTriangle,
   BarChart2,
+  BarChart3,
   Bell,
   Brain,
   BrainCircuit,
@@ -13,6 +14,7 @@ import {
   Globe,
   Gauge,
   Layers,
+  MessageSquare,
   Orbit,
   Radar,
   RefreshCw,
@@ -22,6 +24,7 @@ import {
   Timer,
   TrendingDown,
   TrendingUp,
+  Users,
   Zap,
 } from 'lucide-react'
 import './App.css'
@@ -49,6 +52,12 @@ import { SESSION_COLORS } from './components/panelConstants'
 import AlertsPanel from './components/AlertsPanel'
 import BacktestPanel from './components/BacktestPanel'
 import PaperTradingPanel from './components/PaperTradingPanel'
+import { PositionManagerPanel } from './components/PositionManagerPanel'
+import { HMMRegimePanel } from './components/HMMRegimePanel'
+import { OnChainPanel } from './components/OnChainPanel'
+import { NLPSentimentPanel } from './components/NLPSentimentPanel'
+import { TransformerForecastPanel } from './components/TransformerForecastPanel'
+import { MLDashboardPanel } from './components/MLDashboardPanel'
 import { useAudioAlerts } from './hooks/useAudioAlerts'
 import { useMarketSocket } from './hooks/useMarketSocket'
 import { useChartStore } from './store/chartStore'
@@ -58,7 +67,7 @@ import {
   formatTimestamp,
 } from './types/market'
 
-export type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab'
+export type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab' | 'position' | 'hmm' | 'onchain' | 'nlp' | 'forecast' | 'ml-dash'
 const PANEL_VIEWS: readonly PanelView[] = [
   'signals',
   'scalp',
@@ -73,6 +82,12 @@ const PANEL_VIEWS: readonly PanelView[] = [
   'backtest',
   'forward',
   'log',
+  'position',
+  'ml-dash',
+  'hmm',
+  'nlp',
+  'forecast',
+  'onchain',
   'alerts',
   'alert-config',
   'analytics',
@@ -100,11 +115,6 @@ class RuntimeGuard extends Component<RuntimeGuardProps, RuntimeGuardState> {
 
   componentDidCatch(error: Error) {
     console.error('NEXUS UI runtime error', error)
-    // Only auto-reload once per session to prevent infinite reload loops
-    if (!sessionStorage.getItem('nexus_error_reloaded')) {
-      sessionStorage.setItem('nexus_error_reloaded', '1')
-      window.setTimeout(() => window.location.reload(), 1500)
-    }
   }
 
   render() {
@@ -115,14 +125,47 @@ class RuntimeGuard extends Component<RuntimeGuardProps, RuntimeGuardState> {
             <div className="hero-card neutral">
               <div className="hero-title">
                 <div className="hero-signal-group">
-                  <span className="hero-label">RUNTIME RECOVERY</span>
-                  <strong className="hero-action">RECONNECTING</strong>
+                  <span className="hero-label">RUNTIME FAULT</span>
+                  <strong className="hero-action">CHECK CONSOLE</strong>
                 </div>
               </div>
-              <p className="hero-summary">The UI hit a runtime fault and is reloading automatically.</p>
+              <p className="hero-summary">The shell caught an unrecoverable runtime fault. Reload manually after checking the error.</p>
             </div>
           </section>
         </main>
+      )
+    }
+    return this.props.children
+  }
+}
+
+type PanelGuardProps = {
+  children: ReactNode
+  panelView: PanelView
+}
+
+class PanelGuard extends Component<PanelGuardProps, RuntimeGuardState> {
+  state: RuntimeGuardState = { hasError: false }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: Error) {
+    console.error(`NEXUS panel runtime error in ${this.props.panelView}`, error)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="panel-content">
+          <section>
+            <h2><AlertTriangle size={13} /> Panel Error</h2>
+            <p className="empty-state">
+              The {this.props.panelView} panel failed to render. Switch to another panel and back after the next data refresh.
+            </p>
+          </section>
+        </div>
       )
     }
     return this.props.children
@@ -468,6 +511,42 @@ function AppShell() {
                     Log
                   </>
                 )}
+                {view === 'position' && (
+                  <>
+                    <Target size={11} />
+                    Positions
+                  </>
+                )}
+                {view === 'ml-dash' && (
+                  <>
+                    <Cpu size={11} />
+                    ML
+                  </>
+                )}
+                {view === 'hmm' && (
+                  <>
+                    <Activity size={11} />
+                    Regime
+                  </>
+                )}
+                {view === 'nlp' && (
+                  <>
+                    <MessageSquare size={11} />
+                    NLP
+                  </>
+                )}
+                {view === 'forecast' && (
+                  <>
+                    <BarChart3 size={11} />
+                    Forecast
+                  </>
+                )}
+                {view === 'onchain' && (
+                  <>
+                    <Users size={11} />
+                    OnChain
+                  </>
+                )}
                 {view === 'forward' && (
                   <>
                     <Activity size={11} />
@@ -516,6 +595,7 @@ function AppShell() {
           </div>
 
           <div className="panel-main">
+          <PanelGuard key={panelView} panelView={panelView}>
           {/* ─── SIGNALS TAB ────────────────────────── */}
           {panelView === 'signals' && (
             <div className="panel-content">
@@ -859,6 +939,44 @@ function AppShell() {
               <SignalLogPanel />
             </div>
           )}
+
+          {panelView === 'position' && (
+            <div className="panel-content">
+              <PositionManagerPanel />
+            </div>
+          )}
+
+          {panelView === 'ml-dash' && (
+            <div className="panel-content">
+              <MLDashboardPanel />
+            </div>
+          )}
+
+          {panelView === 'hmm' && (
+            <div className="panel-content">
+              <HMMRegimePanel />
+            </div>
+          )}
+
+          {panelView === 'nlp' && (
+            <div className="panel-content">
+              <NLPSentimentPanel />
+            </div>
+          )}
+
+          {panelView === 'forecast' && (
+            <div className="panel-content">
+              <TransformerForecastPanel />
+            </div>
+          )}
+
+          {panelView === 'onchain' && (
+            <div className="panel-content">
+              <OnChainPanel />
+            </div>
+          )}
+
+          </PanelGuard>
           </div>
         </aside>
       </section>

@@ -53,7 +53,7 @@ class BacktestEngine:
         funding_rate_per_8h: float = 0.0001,
         signal_side_mode: str = "normal",
         avoid_reason_tokens: list[str] | None = None,
-        tp_atr_multiplier: float = 0.0,  # 0 = use signal default
+        tp_atr_multiplier: float = 2.0,
         sl_atr_multiplier: float = 0.0,  # 0 = use signal default
         require_regime_alignment: bool = False,
         max_candles: int = 0,  # 0 = unlimited
@@ -409,6 +409,11 @@ class BacktestEngine:
             # Convert ScalpSignal to backtest-compatible format
             compatible_signals = []
             for ss in signals:
+                # Paper exploration exists only to collect forward-test samples.
+                # Official backtests must validate live-quality signals, not
+                # deliberately relaxed paper-only candidates.
+                if getattr(ss, "status", "") == "paper":
+                    continue
                 # Map confidence based on score relative to threshold
                 # Scores range from ~0.20 to ~0.70 in backtest mode
                 raw_score = ss.risk_reward  # Not ideal, but use signal strength
@@ -427,6 +432,15 @@ class BacktestEngine:
                     else:
                         stop_loss = entry + stop_distance
                         exit_price = entry - target_distance
+                if not all(math.isfinite(v) for v in (entry, stop_loss, exit_price)):
+                    logger.warning("Skipping backtest signal with non-finite geometry: %s", ss.id)
+                    continue
+                if entry <= 0 or stop_loss <= 0 or exit_price <= 0:
+                    logger.warning("Skipping backtest signal with non-positive geometry: %s", ss.id)
+                    continue
+                if abs(entry - stop_loss) <= 1e-10 or abs(exit_price - entry) <= 1e-10:
+                    logger.warning("Skipping backtest signal with zero risk/reward distance: %s", ss.id)
+                    continue
                 compatible_signals.append(type("CompatSignal", (), {
                     "id": ss.id,
                     "timestamp": ss.timestamp,
@@ -458,12 +472,21 @@ class BacktestEngine:
                 risk_per_trade = balance * self.position_size_pct
                 risk_per_unit = abs(sig.entry - sig.stop_loss)
                 quantity = risk_per_trade / risk_per_unit if risk_per_unit > 0 else 0
+                if not math.isfinite(quantity) or quantity <= 0:
+                    logger.warning("Skipping backtest trade with invalid quantity for signal %s", sig.id)
+                    continue
 
                 slippage = sig.entry * self.slippage_pct
                 entry_with_slippage = sig.entry + slippage if sig.side == "buy" else sig.entry - slippage
+                if not math.isfinite(entry_with_slippage) or entry_with_slippage <= 0:
+                    logger.warning("Skipping backtest trade with invalid entry for signal %s", sig.id)
+                    continue
 
                 notional = entry_with_slippage * quantity
-                commission = notional * self.commission_pct
+                entry_commission = notional * self.commission_pct
+                if not math.isfinite(notional) or not math.isfinite(entry_commission):
+                    logger.warning("Skipping backtest trade with invalid notional for signal %s", sig.id)
+                    continue
 
                 tp = sig.exit_price
                 sl = sig.stop_loss
@@ -491,7 +514,8 @@ class BacktestEngine:
                     "reason": sig.reason,
                     "risk_reward": sig.risk_reward,
                     "slippage": round(slippage, 2),
-                    "commission": round(commission, 2),
+                    "entry_commission": round(entry_commission, 2),
+                    "commission": round(entry_commission, 2),
                     "bars_held": 0,
                 }
                 open_trades.append(trade)
@@ -524,12 +548,19 @@ class BacktestEngine:
                                 trade["stop_loss"] = min(trade["stop_loss"], entry)
                                 sl = trade["stop_loss"]
 
-                funding_cost = funding_per_bar * entry * qty
-                if bars_held >= self.max_hold_bars + 1:
-                    exit_price = current.close
-                    pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"] + funding_cost
+                def apply_exit_costs(raw_exit_price: float) -> tuple[float, float, float, float]:
+                    exit_slippage = raw_exit_price * self.slippage_pct
+                    filled_exit = raw_exit_price - exit_slippage if side == "buy" else raw_exit_price + exit_slippage
+                    gross_pnl = (filled_exit - entry) * qty if side == "buy" else (entry - filled_exit) * qty
+                    entry_commission = float(trade.get("entry_commission", trade.get("commission", 0)) or 0)
+                    exit_commission = abs(filled_exit * qty) * self.commission_pct
+                    funding_cost = funding_per_bar * entry * qty
+                    pnl = gross_pnl - entry_commission - exit_commission - funding_cost
                     pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
+                    return filled_exit, pnl, pnl_pct, funding_cost
+
+                if bars_held >= self.max_hold_bars + 1:
+                    exit_price, pnl, pnl_pct, funding_cost = apply_exit_costs(current.close)
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
                     trade["exit_timestamp"] = current.timestamp
@@ -550,10 +581,7 @@ class BacktestEngine:
                     hit_target = current.low <= tp
 
                 if hit_stop:
-                    exit_price = sl
-                    pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"] + funding_cost
-                    pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
+                    exit_price, pnl, pnl_pct, funding_cost = apply_exit_costs(sl)
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
                     trade["exit_timestamp"] = current.timestamp
@@ -565,10 +593,7 @@ class BacktestEngine:
                     returns_series.append(pnl / balance if balance > 0 else 0)
                     results.append(dict(trade))
                 elif hit_target:
-                    exit_price = tp
-                    pnl = (exit_price - entry) * qty if side == "buy" else (entry - exit_price) * qty
-                    pnl -= trade["commission"] + funding_cost
-                    pnl_pct = pnl / (entry * qty) * 100 if entry * qty > 0 else 0
+                    exit_price, pnl, pnl_pct, funding_cost = apply_exit_costs(tp)
                     trade["status"] = "closed"
                     trade["exit_price"] = exit_price
                     trade["exit_timestamp"] = current.timestamp

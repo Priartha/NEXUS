@@ -12,10 +12,17 @@ _local = threading.local()
 
 def get_conn() -> sqlite3.Connection:
     existing = getattr(_local, "_conn", None)
-    if existing is not None:
+    existing_path = getattr(_local, "_path", None)
+    current_path = str(DB_PATH.resolve())
+    if existing is not None and existing_path == current_path:
         try:
             existing.execute("SELECT 1")
             return existing
+        except sqlite3.Error:
+            pass
+    elif existing is not None:
+        try:
+            existing.close()
         except sqlite3.Error:
             pass
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -25,6 +32,7 @@ def get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
     _local._conn = conn
+    _local._path = current_path
     return conn
 
 
@@ -80,7 +88,18 @@ def init_db() -> None:
             risk_reward REAL,
             confidence REAL,
             reason TEXT,
-            close_reason TEXT
+            close_reason TEXT,
+            bars_held INTEGER DEFAULT 0,
+            highest_price REAL,
+            lowest_price REAL,
+            initial_stop REAL,
+            atr_at_entry REAL DEFAULT 0,
+            entry_commission REAL DEFAULT 0,
+            slippage_pct REAL DEFAULT 0,
+            funding_rate REAL DEFAULT 0,
+            max_hold_minutes INTEGER DEFAULT 25,
+            regime TEXT,
+            enriched_features JSON
         );
 
         CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -406,6 +425,29 @@ def init_db() -> None:
 
         CREATE INDEX IF NOT EXISTS idx_daily_reports_date ON daily_reports(date);
         """)
+        _ensure_columns(conn, "paper_trades", {
+            "bars_held": "INTEGER DEFAULT 0",
+            "highest_price": "REAL",
+            "lowest_price": "REAL",
+            "initial_stop": "REAL",
+            "atr_at_entry": "REAL DEFAULT 0",
+            "entry_commission": "REAL DEFAULT 0",
+            "slippage_pct": "REAL DEFAULT 0",
+            "funding_rate": "REAL DEFAULT 0",
+            "max_hold_minutes": "INTEGER DEFAULT 25",
+            "regime": "TEXT",
+            "enriched_features": "JSON",
+        })
         conn.commit()
     finally:
         conn.close()
+        if getattr(_local, "_conn", None) is conn:
+            _local._conn = None
+            _local._path = None
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info([{table}])").fetchall()}
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE [{table}] ADD COLUMN [{name}] {definition}")
