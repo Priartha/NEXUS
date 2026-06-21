@@ -351,6 +351,25 @@ class UnifiedScalpEngine:
         closes = [c.close for c in ordered]
         price = closes[-1]
 
+        # ── News sentiment override for regime bias ──────────────────────
+        # News drives markets — strong news sentiment can override technical bias
+        if regime:
+            try:
+                from backend.analysis.sentiment import SentimentService
+                sentiment_service = SentimentService(settings.symbol)
+                sentiment = getattr(sentiment_service, 'current', None)
+                if sentiment and hasattr(sentiment, 'label') and sentiment.label in ("bullish", "bearish"):
+                    sentiment_score = getattr(sentiment, 'score', 0) or 0
+                    if abs(sentiment_score) > 0.3 and sentiment.confidence > 0.3:
+                        if sentiment.label == "bullish" and regime.bias != "bullish":
+                            regime.bias = "bullish"
+                            logger.info("News sentiment overrides bias → bullish (score=%.2f)", sentiment_score)
+                        elif sentiment.label == "bearish" and regime.bias != "bearish":
+                            regime.bias = "bearish"
+                            logger.info("News sentiment overrides bias → bearish (score=%.2f)", sentiment_score)
+            except Exception:
+                pass
+
         order_flow = self._order_flow(ordered)
 
         # Feed order flow to CVD divergence detector

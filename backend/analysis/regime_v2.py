@@ -94,28 +94,41 @@ def detect_market_regime(
     trend_conditions_met = sum([is_structured_trend, is_ema_aligned, is_efficient, price_direction_matches, has_ema_spread])
 
     # Classify regime in priority order (first match wins)
+    # Volume confirmation: expanding volume that aligns with the price
+    # direction strengthens the trend signal
+    volume_aligns_bullish = volume_state == "expanding" and metrics.volume_zscore > 0
+    volume_aligns_bearish = volume_state == "expanding" and metrics.volume_zscore < 0
+    volume_compressed = volume_state == "compressed"
+
     if trend_conditions_met >= 4:
         # Strong trending
         phase = "trending"
         bias = structure["direction"]
         confidence = min(0.92, 0.50 + efficiency * 0.25 + (0.10 if is_ema_aligned else 0))
-        reasons = [
-            f"Structure: {structure['pattern']}",
-            f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned",
-            f"Efficiency: {efficiency:.2f}",
-            f"Price: {price_change_pct:+.2f}%",
-            f"EMA spread: {ema_spread_pct:.2f}%",
-        ]
+        # Volume confirmation: expanding volume in trend direction boosts confidence
+        if (bias == "bullish" and volume_aligns_bullish) or (bias == "bearish" and volume_aligns_bearish):
+            confidence = min(0.95, confidence + 0.10)
+            reasons.append(f"Volume confirms {bias} (z={metrics.volume_zscore:.1f})")
+        elif volume_compressed:
+            confidence = max(0.40, confidence - 0.10)
+            reasons.append("Volume weak for trend")
+        reasons.append(f"Structure: {structure['pattern']}")
+        reasons.append(f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned")
+        reasons.append(f"Efficiency: {efficiency:.2f}")
+        reasons.append(f"Price: {price_change_pct:+.2f}%")
+        reasons.append(f"EMA spread: {ema_spread_pct:.2f}%")
     elif trend_conditions_met >= 3:
         # Moderate trending - still trending but lower confidence
         phase = "trending"
         bias = structure["direction"]
         confidence = min(0.75, 0.40 + efficiency * 0.20)
-        reasons = [
-            f"Structure: {structure['pattern']}",
-            f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned",
-            f"Price: {price_change_pct:+.2f}%",
-        ]
+        # Volume can confirm or weaken moderate trend
+        if (bias == "bullish" and volume_aligns_bullish) or (bias == "bearish" and volume_aligns_bearish):
+            confidence = min(0.85, confidence + 0.12)
+            reasons.append(f"Volume confirms moderate trend")
+        reasons.append(f"Structure: {structure['pattern']}")
+        reasons.append(f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned")
+        reasons.append(f"Price: {price_change_pct:+.2f}%")
     elif sell_side_sweep and latest.close >= range_mid:
         # 4. ACCUMULATION: sell-side sweep + reclaim + price above mid
         phase = "accumulation"
