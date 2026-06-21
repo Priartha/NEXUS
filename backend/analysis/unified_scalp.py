@@ -446,9 +446,18 @@ class UnifiedScalpEngine:
         # ── MOMENTUM-FIRST SIGNAL PATH ─────────────────────────────────
         # Genuine momentum beats everything else. If momentum is real, trade it.
         if momentum_strong and not self._sl_cooldown_active(now_ms, momentum.direction, self._sl_breached_at_ms):
-            try:
-                import sys as _sys; getattr(_sys, 'stderr').write(f"MOMENTUM_FIRED: strength={momentum.strength:.3f} dir={momentum.direction}\n")
-            except Exception: pass
+            # Trend filter: even strong momentum must align with the trend bias
+            if regime and regime.bias in ("bullish", "bearish"):
+                if (regime.bias == "bullish" and momentum.direction != "bullish") or \
+                   (regime.bias == "bearish" and momentum.direction != "bearish"):
+                    try:
+                        import sys as _sys; getattr(_sys, 'stderr').write(f"MOMENTUM_BLOCKED: dir={momentum.direction} vs trend={regime.bias}\n")
+                    except Exception: pass
+                    momentum_strong = False
+            if momentum_strong:
+                try:
+                    import sys as _sys; getattr(_sys, 'stderr').write(f"MOMENTUM_FIRED: strength={momentum.strength:.3f} dir={momentum.direction}\n")
+                except Exception: pass
             atr_mom = _atr(ordered, 14)
             # Scale SL/TP with momentum strength
             sl_mult = 1.2 + momentum.strength * 1.8
@@ -895,11 +904,13 @@ class UnifiedScalpEngine:
                     if winning_side == "short" and close_position > 0.40:
                         return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Weak bearish candle close"])
 
-        if settings.scalp_require_mtf_alignment and regime and regime.phase == "trending":
+        # Trend alignment: only trade with the trend, never against it.
+        # Trend is your friend — trading against it guarantees losses.
+        if regime and regime.bias in ("bullish", "bearish"):
             if regime.bias == "bullish" and winning_side == "short":
-                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: short signal in bullish trend"])
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: short against bullish bias"])
             if regime.bias == "bearish" and winning_side == "long":
-                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: long signal in bearish trend"])
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: long against bearish bias"])
 
         cooldown_ts = ordered[-1].timestamp if self._use_candle_timestamp_for_cooldown else now_ms
         if cooldown_ts - self._last_signal_ts < self._signal_cooldown_ms:
