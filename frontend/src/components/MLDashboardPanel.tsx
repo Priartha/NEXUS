@@ -218,7 +218,7 @@ export function MLDashboardPanel() {
           <StatRow label="Trained" value={xgboost?.is_trained ? 'Yes (Auto)' : 'No'} color={xgboost?.is_trained ? '#22c55e' : '#ef4444'} />
           <StatRow label="Accuracy" value={xgboost?.accuracy !== null && xgboost?.accuracy !== undefined ? `${(xgboost.accuracy * 100).toFixed(1)}%` : '--'} />
           <StatRow label="Predictions" value={xgboost?.total_predictions?.toLocaleString() ?? '0'} />
-          {(xgboost?.last_train_ts ?? 0) > 0 && <StatRow label="Last Train" value={new Date(xgboost!.last_train_ts!).toLocaleString()} />}
+          {(xgboost?.last_train_ts ?? 0) > 0 && <StatRow label="Last Train" value={new Date(xgboost!.last_train_ts! * 1000).toLocaleString()} />}
           <StatRow label="Auto-Training" value="Every 15 min" color="#8ab4f8" />
           {xgboost?.top_features && xgboost.top_features.length > 0 && (
             <div className="ml-features">
@@ -241,7 +241,7 @@ export function MLDashboardPanel() {
           <StatRow label="Regime Count" value={hmm?.n_regimes?.toString() ?? '--'} />
           <StatRow label="History Samples" value={hmm?.history_length?.toLocaleString() ?? '0'} />
           <StatRow label="Version" value={`v${hmm?.version ?? 0}`} />
-          {(hmm?.last_train_ts ?? 0) > 0 && <StatRow label="Last Train" value={new Date(hmm!.last_train_ts!).toLocaleString()} />}
+          {(hmm?.last_train_ts ?? 0) > 0 && <StatRow label="Last Train" value={new Date(hmm!.last_train_ts! * 1000).toLocaleString()} />}
           <StatRow label="Auto-Training" value="Every 60 min" color="#8ab4f8" />
         </ModelCard>
 

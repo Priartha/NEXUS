@@ -49,16 +49,16 @@ class ModelWeight:
             self.correct_predictions += 1
         self.recent_pnl += pnl
         # Exponential moving average update with decay
-        decay = 0.95
-        if self.total_predictions > 5:
+        decay = 0.90
+        if self.total_predictions > 3:
             performance = 1.0 if correct else 0.0
             self.current_weight = self.current_weight * decay + performance * (1 - decay)
-            self.current_weight = max(0.05, min(0.70, self.current_weight))
+            self.current_weight = max(0.15, min(0.80, self.current_weight))  # Minimum 0.15 to prevent decay to 0
         # Track regime-specific performance via EMA
         if regime not in self.regime_weights:
             self.regime_weights[regime] = self.base_weight
         regime_perf = 1.0 if correct else 0.0
-        self.regime_weights[regime] = self.regime_weights[regime] * 0.9 + regime_perf * 0.1
+        self.regime_weights[regime] = self.regime_weights[regime] * 0.85 + regime_perf * 0.15
 
 
 @dataclass
@@ -595,26 +595,28 @@ class EnsembleModel:
         """Generate synthetic historical trade outcomes for the AI Lab to show.
 
         Synthesizes plausible per-regime results so model_weights/regime_weights
-        have non-default values on startup.
+        have non-default values on startup. Trending/accumulation regimes have
+        higher win rates matching real market behavior.
         """
         if len(self.trade_history) >= n_trades:
             return 0
-        rng = random.Random(int(time.time() / 3600))
+        import random as _random
+        rng = _random.Random(int(time.time() / 3600))
         regimes = ['trending', 'trending_volatile', 'range_bound', 'consolidation',
                    'accumulation', 'distribution']
         for i in range(n_trades):
             regime = rng.choice(regimes)
             direction = 'long' if rng.random() < 0.55 else 'short'
-            confidence = round(rng.uniform(0.55, 0.92), 4)
-            base_win = 0.45 + (0.15 if regime in ('trending', 'accumulation') else 0)
+            confidence = round(rng.uniform(0.60, 0.90), 4)
+            base_win = 0.60 if regime in ('trending', 'accumulation') else 0.45
             won = rng.random() < base_win
-            pnl = round(rng.uniform(0.3, 2.5), 4) if won else round(rng.uniform(-1.8, -0.2), 4)
+            pnl = round(rng.uniform(0.5, 2.0), 4) if won else round(rng.uniform(-1.5, -0.3), 4)
             score = EnsembleScore(
                 direction=direction,
                 confidence=confidence,
-                microstructure_score=rng.uniform(0.3, 0.9),
-                ict_score=rng.uniform(0.3, 0.9),
-                momentum_score=rng.uniform(0.3, 0.9),
+                microstructure_score=rng.uniform(0.4, 0.8),
+                ict_score=rng.uniform(0.4, 0.8),
+                momentum_score=rng.uniform(0.4, 0.8),
                 regime=regime,
                 weights_used={'microstructure': 0.25, 'ict': 0.25, 'momentum': 0.25, 'xgboost': 0.25},
                 reasons=[],

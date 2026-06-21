@@ -40,8 +40,8 @@ class PaperTradingEngine:
         cooldown_after_losses: int = 3,
         cooldown_minutes: int = 90,
         risk_per_trade_pct: float = 0.02,
-        trailing_atr_multiplier: float = 2.0,
-        breakeven_at_r: float = 1.5,
+        trailing_atr_multiplier: float = 1.5,
+        breakeven_at_r: float = 1.0,
         slippage_pct: float = 0.0001,
         commission_pct: float = 0.0002,
         funding_rate_per_8h: float = 0.0001,
@@ -364,11 +364,18 @@ class PaperTradingEngine:
             if side == "buy":
                 highest = max(trade.get("highest_price", entry), candle.high)
                 trade["highest_price"] = highest
-                # Wider trailing: use 2.0x ATR instead of 1.0x to avoid noise stops
+                # Tighter trailing for scalping: move to breakeven at 1.0R, trail at 1.5R
                 if self.trailing_atr_multiplier > 0 and highest > entry:
                     profit_r = (highest - entry) / max(abs(entry - trade.get("initial_stop", sl)), 1e-10)
-                    if profit_r >= self.breakeven_at_r:
-                        trailing_stop = highest - atr * max(self.trailing_atr_multiplier, 2.0)
+                    if profit_r >= 0.8:
+                        # Move to breakeven quickly to eliminate risk
+                        new_sl = max(sl, entry)
+                        if new_sl > sl:
+                            trade["stop_loss"] = new_sl
+                            sl = new_sl
+                            events.append({"type": "trailing_stop_breakeven", "trade_id": trade["id"]})
+                    if profit_r >= 1.5:
+                        trailing_stop = highest - atr * self.trailing_atr_multiplier
                         new_sl = max(sl, trailing_stop)
                         if new_sl > sl:
                             trade["stop_loss"] = new_sl
@@ -381,8 +388,14 @@ class PaperTradingEngine:
                 trade["lowest_price"] = lowest
                 if self.trailing_atr_multiplier > 0 and lowest < entry:
                     profit_r = (entry - lowest) / max(abs(entry - trade.get("initial_stop", sl)), 1e-10)
-                    if profit_r >= self.breakeven_at_r:
-                        trailing_stop = lowest + atr * max(self.trailing_atr_multiplier, 2.0)
+                    if profit_r >= 0.8:
+                        new_sl = min(sl, entry)
+                        if new_sl < sl:
+                            trade["stop_loss"] = new_sl
+                            sl = new_sl
+                            events.append({"type": "trailing_stop_breakeven", "trade_id": trade["id"]})
+                    if profit_r >= 1.5:
+                        trailing_stop = lowest + atr * self.trailing_atr_multiplier
                         new_sl = min(sl, trailing_stop)
                         if new_sl < sl:
                             trade["stop_loss"] = new_sl

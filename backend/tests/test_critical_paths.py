@@ -15,7 +15,7 @@ def _candles(count: int, base: float = 100.0) -> list[Candle]:
         price = base + i * 0.05
         out.append(
             Candle(
-                timestamp=1_700_000_000_000 + i * 300_000,
+                timestamp=1_699_990_200_000 + i * 300_000,
                 open=price,
                 high=price + 1.0,
                 low=price - 1.0,

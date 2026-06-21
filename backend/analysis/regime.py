@@ -75,13 +75,13 @@ def detect_market_regime(
     confidence = 0.5
     reasons: list[str] = []
 
-    # 1. TRENDING: requires ALL of structure + EMA alignment + efficiency + momentum
+    # 1. TRENDING: requires structure + EITHER EMA alignment OR strong efficiency
     is_structured_trend = structure["is_trending"] and structure["direction"] != "neutral"
     is_ema_aligned = emas_aligned_bullish or emas_aligned_bearish
-    is_efficient = efficiency > 0.35
-    has_momentum = ema_spread_pct > 0.20
+    is_efficient = efficiency > 0.30
+    has_momentum = ema_spread_pct > 0.15
 
-    if is_structured_trend and is_ema_aligned and is_efficient:
+    if is_structured_trend and (is_ema_aligned or is_efficient):
         phase = "trending"
         bias = structure["direction"]
         if bias == "neutral":

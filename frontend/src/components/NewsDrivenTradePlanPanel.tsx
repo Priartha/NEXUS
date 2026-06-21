@@ -15,8 +15,7 @@ import {
   Newspaper,
 } from 'lucide-react'
 import { useChartStore } from '../store/chartStore'
-import { formatTimestamp } from '../types/market'
-import type { NewsDrivenPlan, NewsActivityEntry, NewsTradePlanSnapshot, FastHeadline } from '../types/market'
+import type { NewsDrivenPlan, NewsActivityEntry, NewsTradePlanSnapshot } from '../types/market'
 
 function getDirectionColor(dir: string) {
   switch (dir) {
@@ -157,16 +156,19 @@ export function NewsDrivenTradePlanPanel() {
     }
   }, [wsSnapshot])
 
+  const planFetcher = useCallback(() => {
+    if (!wsSnapshot) fetchPlan()
+  }, [fetchPlan, wsSnapshot])
+
   useEffect(() => {
-    if (!wsSnapshot) {
-      fetchPlan()
-      const interval = setInterval(fetchPlan, 120000)
-      return () => clearInterval(interval)
-    } else {
+    planFetcher()
+    const id = setInterval(planFetcher, 120000)
+    if (wsSnapshot) {
       setLoading(false)
       setError(null)
     }
-  }, [fetchPlan, wsSnapshot])
+    return () => { clearInterval(id); setLoading(false); setError(null) }
+  }, [planFetcher])
 
   const display = wsSnapshot ?? snapshot
 

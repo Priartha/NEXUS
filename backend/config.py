@@ -58,11 +58,11 @@ class Settings:
 
     # Scalping engine configuration (Futures-only)
     scalp_enabled: bool = os.getenv("NEXUS_SCALP_ENABLED", "true").lower() == "true"
-    scalp_max_risk_pct: float = float(os.getenv("NEXUS_SCALP_MAX_RISK_PCT", "0.02"))  # 2% risk per trade
+    scalp_max_risk_pct: float = float(os.getenv("NEXUS_SCALP_MAX_RISK_PCT", "0.015"))  # 1.5% risk per trade
     scalp_max_leverage: int = min(int(os.getenv("NEXUS_SCALP_MAX_LEVERAGE", "15")), 25)  # Capped at 25x
     scalp_max_positions: int = int(os.getenv("NEXUS_SCALP_MAX_POSITIONS", "1"))
     scalp_daily_loss_limit_pct: float = float(os.getenv("NEXUS_SCALP_DAILY_LOSS_PCT", "0.05"))
-    scalp_min_rrr: float = float(os.getenv("NEXUS_SCALP_MIN_RRR", "2.0"))
+    scalp_min_rrr: float = float(os.getenv("NEXUS_SCALP_MIN_RRR", "1.5"))
     scalp_max_hold_minutes: int = int(os.getenv("NEXUS_SCALP_MAX_HOLD_MINUTES", "25"))
     scalp_funding_rate_extreme: float = float(os.getenv("NEXUS_SCALP_FUNDING_EXTREME", "0.0015"))
     scalp_min_spot_volume_ratio: float = float(os.getenv("NEXUS_SCALP_MIN_VOL_RATIO", "0.60"))
@@ -70,11 +70,11 @@ class Settings:
     scalp_rsi_exhaustion: float = float(os.getenv("NEXUS_SCALP_RSI_EXHAUSTION", "3"))
     scalp_partial_exit_pct: float = float(os.getenv("NEXUS_SCALP_PARTIAL_EXIT", "0.50"))
     scalp_breakeven_premium_pct: float = float(os.getenv("NEXUS_SCALP_BE_PREMIUM_PCT", "0.50"))
-    # Relaxed thresholds for more trading opportunities while maintaining quality
-    scalp_min_confluence_score: float = float(os.getenv("NEXUS_SCALP_MIN_CONFLUENCE", "0.50"))
-    scalp_min_directional_edge: float = float(os.getenv("NEXUS_SCALP_MIN_DIRECTIONAL_EDGE", "0.03"))
-    scalp_min_trend_strength: float = float(os.getenv("NEXUS_SCALP_MIN_TREND_STRENGTH", "0.0003"))
-    scalp_min_volume_impulse: float = float(os.getenv("NEXUS_SCALP_MIN_VOLUME_IMPULSE", "0.45"))
+    # Optimized thresholds for maximum signal quality while maintaining trade frequency
+    scalp_min_confluence_score: float = float(os.getenv("NEXUS_SCALP_MIN_CONFLUENCE", "0.40"))
+    scalp_min_directional_edge: float = float(os.getenv("NEXUS_SCALP_MIN_DIRECTIONAL_EDGE", "0.02"))
+    scalp_min_trend_strength: float = float(os.getenv("NEXUS_SCALP_MIN_TREND_STRENGTH", "0.0002"))
+    scalp_min_volume_impulse: float = float(os.getenv("NEXUS_SCALP_MIN_VOLUME_IMPULSE", "0.35"))
     scalp_require_mtf_alignment: bool = os.getenv("NEXUS_SCALP_REQUIRE_MTF_ALIGNMENT", "false").lower() == "true"
     scalp_require_candle_confirmation: bool = os.getenv("NEXUS_SCALP_REQUIRE_CANDLE_CONFIRMATION", "false").lower() == "true"
     scalp_max_entry_distance_pct: float = float(os.getenv("NEXUS_SCALP_MAX_ENTRY_DISTANCE_PCT", "0.005"))

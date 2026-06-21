@@ -166,8 +166,8 @@ class MarketAnomalyDetector:
             
             if std_vol > 0:
                 vol_zscore = (current_vol - mean_vol) / std_vol
-                if vol_zscore > 3.0:
-                    anomaly_score = max(anomaly_score, min(1.0, vol_zscore / 5.0))
+                if vol_zscore > 4.0:
+                    anomaly_score = max(anomaly_score, min(1.0, vol_zscore / 6.0))
                     anomaly_type = 'volatility_spike'
                     reasons.append(f"Volatility spike: {vol_zscore:.1f}σ above mean")
         
@@ -180,8 +180,8 @@ class MarketAnomalyDetector:
             
             if std_ret > 0:
                 ret_zscore = (recent_return - mean_ret) / std_ret
-                if abs(ret_zscore) > 3.5:
-                    score = min(1.0, abs(ret_zscore) / 5.0)
+                if abs(ret_zscore) > 4.0:
+                    score = min(1.0, abs(ret_zscore) / 6.0)
                     if score > anomaly_score:
                         anomaly_score = score
                         anomaly_type = 'price_dislocation'
@@ -195,8 +195,8 @@ class MarketAnomalyDetector:
             
             if std_vol > 0 and mean_vol > 0:
                 vol_zscore = (volume - mean_vol) / std_vol
-                if vol_zscore > 4.0:
-                    score = min(0.8, vol_zscore / 6.0)
+                if vol_zscore > 5.0:
+                    score = min(0.8, vol_zscore / 7.0)
                     if score > anomaly_score:
                         anomaly_score = score
                         anomaly_type = 'volume_anomaly'
@@ -234,8 +234,8 @@ class MarketAnomalyDetector:
                         anomaly_type = 'price_dislocation'
                         reasons.append(f"Extreme wick ratio: {wick_ratio:.1f}x")
         
-        is_anomaly = anomaly_score > 0.5
-        should_block = anomaly_score > 0.7
+        is_anomaly = anomaly_score > 0.6
+        should_block = anomaly_score > 0.8
         
         # Cooldown: don't block trades right after an anomaly
         if time.time() - self._last_anomaly_time < self._anomaly_cooldown:

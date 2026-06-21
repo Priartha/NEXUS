@@ -290,31 +290,30 @@ class RLSizingAgent:
         self._total_steps += 1
 
     def should_retrain(self) -> bool:
-        return (not self._is_trained and len(self._episode_rewards) >= 50) or \
+        return (not self._is_trained) or \
                (time.time() - self._last_train_ts > self.retrain_interval and len(self._episode_rewards) >= 100)
 
     def train(self) -> dict:
         """Train the policy on collected experience."""
-        if len(self._episode_rewards) < 50:
-            return {"status": "skipped", "reason": f"Need 50 episodes, have {len(self._episode_rewards)}"}
+        if len(self._episode_rewards) >= 50:
+            if self._build_policy():
+                self._is_trained = True
+                self._model_version += 1
+                self._last_train_ts = time.time()
+                avg_reward = np.mean(self._episode_rewards)
+                logger.info(f"RL sizing trained v{self._model_version}: avg_reward={avg_reward:.4f}")
+                return {
+                    "status": "trained",
+                    "version": self._model_version,
+                    "avg_reward": round(avg_reward, 4),
+                    "episodes": len(self._episode_rewards),
+                }
 
-        if not self._build_policy():
-            # Heuristic only — no training needed
-            self._is_trained = True
-            return {"status": "heuristic", "reason": "Using heuristic policy"}
-
+        # Heuristic fallback — mark trained even without enough episodes
         self._is_trained = True
         self._model_version += 1
         self._last_train_ts = time.time()
-
-        avg_reward = np.mean(self._episode_rewards) if self._episode_rewards else 0.0
-        logger.info(f"RL sizing trained v{self._model_version}: avg_reward={avg_reward:.4f}")
-        return {
-            "status": "trained",
-            "version": self._model_version,
-            "avg_reward": round(avg_reward, 4),
-            "episodes": len(self._episode_rewards),
-        }
+        return {"status": "heuristic", "reason": "Using heuristic policy", "version": self._model_version}
 
     def get_state(self) -> dict:
         return {

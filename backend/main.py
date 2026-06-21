@@ -183,6 +183,7 @@ xgboost_task: asyncio.Task | None = None
 hmm_task: asyncio.Task | None = None
 transformer_task: asyncio.Task | None = None
 nlp_task: asyncio.Task | None = None
+rl_task: asyncio.Task | None = None
 onchain_task: asyncio.Task | None = None
 pipeline_task: asyncio.Task | None = None
 cross_exchange_task: asyncio.Task | None = None
@@ -392,11 +393,12 @@ async def lifespan(app: FastAPI):
     auto_research_task = asyncio.create_task(auto_research_loop())
 
     # Phase 2/3 ML background tasks
-    global xgboost_task, nlp_task, onchain_task, pipeline_task, cross_exchange_task, hmm_task, transformer_task
+    global xgboost_task, nlp_task, onchain_task, pipeline_task, cross_exchange_task, hmm_task, transformer_task, rl_task
     xgboost_task = asyncio.create_task(xgboost_train_loop())
     hmm_task = asyncio.create_task(hmm_train_loop())
     hmm_predict_task = asyncio.create_task(hmm_predict_loop())
     transformer_task = asyncio.create_task(transformer_train_loop())
+    rl_task = asyncio.create_task(rl_train_loop())
     nlp_task = asyncio.create_task(refresh_nlp_loop())
     news_trade_plan_task = asyncio.create_task(refresh_news_trade_plan_loop())
     fast_news_task = asyncio.create_task(refresh_fast_news_loop())
@@ -411,6 +413,7 @@ async def lifespan(app: FastAPI):
     self_heal.register("hmm_train", hmm_task, lambda: asyncio.create_task(hmm_train_loop()))
     self_heal.register("hmm_predict", hmm_predict_task, lambda: asyncio.create_task(hmm_predict_loop()))
     self_heal.register("transformer_train", transformer_task, lambda: asyncio.create_task(transformer_train_loop()))
+    self_heal.register("rl_train", rl_task, lambda: asyncio.create_task(rl_train_loop()))
     self_heal.register("nlp_refresh", nlp_task, lambda: asyncio.create_task(refresh_nlp_loop()))
     self_heal.register("news_trade_plan", news_trade_plan_task, lambda: asyncio.create_task(refresh_news_trade_plan_loop()))
     self_heal.register("fast_news", fast_news_task, lambda: asyncio.create_task(refresh_fast_news_loop()))
@@ -462,10 +465,10 @@ async def lifespan(app: FastAPI):
         model_monitor_task.cancel()
         db_backup_task.cancel()
         me_task.cancel()
-        for task in (xgboost_task, hmm_task, transformer_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task):
+        for task in (xgboost_task, hmm_task, transformer_task, rl_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task):
             task.cancel()
         hmm_predict_task.cancel()
-        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task, me_task, auto_research_task, xgboost_task, hmm_task, transformer_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task, hmm_predict_task):
+        for task in (stream_task, sentiment_task, ai_ict_task, model_monitor_task, db_backup_task, futures_task, me_task, auto_research_task, xgboost_task, hmm_task, transformer_task, rl_task, nlp_task, onchain_task, cross_exchange_task, pipeline_task, hmm_predict_task):
             try:
                 await task
             except asyncio.CancelledError:
@@ -2020,6 +2023,28 @@ async def hmm_train_loop() -> None:
             self_heal.heartbeat("hmm_train", ok=False, error=str(e))
             logger.exception("hmm train loop failed")
         await asyncio.sleep(3600)
+
+
+async def rl_train_loop() -> None:
+    """Periodically retrain the RL position sizing agent."""
+    from backend.utils.self_heal import self_heal
+    await asyncio.sleep(120)
+    while True:
+        try:
+            if rl_sizing.should_retrain():
+                result = rl_sizing.train()
+                if result:
+                    logger.info(
+                        f"RL sizing train: {result.get('status', 'ok')} - "
+                        f"avg_reward={result.get('avg_reward', 0):.4f}"
+                    )
+            self_heal.heartbeat("rl_train", ok=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self_heal.heartbeat("rl_train", ok=False, error=str(e))
+            logger.exception("rl sizing train loop failed")
+        await asyncio.sleep(900)
 
 
 async def transformer_train_loop() -> None:

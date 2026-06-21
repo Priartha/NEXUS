@@ -438,33 +438,33 @@ def _trend_signals(
     # Higher timeframe alignment
     price_vs_ema100 = (closed_candle.close - ema100) / ema100 * 100 if ema100 > 0 else 0
     
-    # HTF FILTER: Prefer trading in direction of 100 EMA but allow exceptions
-    if direction == "buy" and price_vs_ema100 < -0.5:
-        return None  # Don't buy when price is far below EMA100
-    if direction == "sell" and price_vs_ema100 > 0.5:
-        return None  # Don't sell when price is far above EMA100
+    # HTF FILTER: Trade in direction of EMA100 bias
+    if direction == "buy" and price_vs_ema100 < -0.3:
+        return None  # Don't buy when price is below EMA100 (bearish HTF)
+    if direction == "sell" and price_vs_ema100 > 0.3:
+        return None  # Don't sell when price is above EMA100 (bullish HTF)
     
-    # Require minimum distance from EMA100 for conviction
-    if abs(price_vs_ema100) < 0.15:
-        return None  # Too close to EMA100, trend unclear
+    # Require price to be trading near EMA100 for pullback entry
+    if abs(price_vs_ema100) > 3.0:
+        return None  # Price too extended from EMA100
     
     if direction == "buy":
         ema_aligned = ema9 > ema20 and ema20 > ema50
         partial = ema9 > ema20 or ema20 > ema50
         trend_strength = (ema20 - ema50) / ema50 * 100 if ema50 > 0 else 0
         
-        if not (ema_aligned or (partial and trend_strength > 0.20)):
+        if not (ema_aligned or (partial and trend_strength > 0.10)):
             return None
-        if trend_strength < 0.30:
+        if trend_strength < 0.15:
             return None
     else:
         ema_aligned = ema9 < ema20 and ema20 < ema50
         partial = ema9 < ema20 or ema20 < ema50
         trend_strength = (ema20 - ema50) / ema50 * 100 if ema50 > 0 else 0
         
-        if not (ema_aligned or (partial and trend_strength < -0.20)):
+        if not (ema_aligned or (partial and trend_strength < -0.10)):
             return None
-        if trend_strength > -0.30:
+        if trend_strength > -0.15:
             return None
 
     # Regime filter
@@ -523,28 +523,23 @@ def _trend_signals(
         return None
 
     # ── FIX: Entry at retracement level, NOT at closed candle close ──────────
-    # Root cause: buying the close of a completed pullback candle means the
-    # pullback has already finished — market reverses from here.
-    # Fix: enter at the EMA or FVG level where the pullback originated.
     if direction == "buy":
-        # Enter near EMA20 (pullback target) or below close for retracement
         entry_target = min(ema20, ema50)
         if entry_target < closed_candle.low:
             entry_target = closed_candle.open
         entry = max(entry_target, closed_candle.low)
-        stop = min(entry - atr14 * 1.5, ema50 - atr14 * 0.5)
+        stop = entry - atr14 * 1.5
         target = entry + abs(entry - stop) * reward_multiple
     else:
-        # Enter near EMA20 (pullback target) or above close for bounce
         entry_target = max(ema20, ema50)
         if entry_target > closed_candle.high:
             entry_target = closed_candle.open
         entry = min(entry_target, closed_candle.high)
-        stop = max(entry + atr14 * 1.5, ema50 + atr14 * 0.5)
+        stop = entry + atr14 * 1.5
         target = entry - abs(stop - entry) * reward_multiple
 
     risk = abs(entry - stop)
-    if risk < atr14 * 0.8 or risk > atr14 * 3.0:
+    if risk < atr14 * 0.5 or risk > atr14 * 5.0:
         return None
 
     reasons = [
@@ -756,29 +751,61 @@ def detect_trade_signals(
     phase = regime.phase if regime else "unknown"
     bias = regime.bias if regime else "neutral"
     
-    # BULLISH FILTER: Allow buy signals when:
-    # 1. Regime is trending (any bias) - strongest signals
-    # 2. Price is above EMA50 and EMA9 > EMA20 (bullish structure)
-    # This catches trending regimes + bullish pullbacks
+    # FILTER: Determine tradable regimes and directions
     price_above_ema50 = closed_candle.close > ema50
+    price_below_ema50 = closed_candle.close < ema50
     ema9_above_ema20 = ema9 > ema20
+    ema9_below_ema20 = ema9 < ema20
     
-    is_bullish = (
-        phase == "trending" or
-        (price_above_ema50 and ema9_above_ema20)
-    )
-    
-    if not is_bullish:
-        return []
-    
-    # Only buy signals (sell signals have 0% WR in backtest)
-    sig = _trend_signals(
-        ordered, "buy", closes, ema9, ema20, ema50, ema100,
-        atr14, rsi_val, swings, fvgs, regime, psychology, readability,
-        metrics, reward_multiple
-    )
-    if sig:
-        signals.append(sig)
+    # In trending regimes, trade in direction of trend
+    if phase == "trending":
+        if bias == "bullish" or bias == "neutral":
+            sig = _trend_signals(
+                ordered, "buy", closes, ema9, ema20, ema50, ema100,
+                atr14, rsi_val, swings, fvgs, regime, psychology, readability,
+                metrics, reward_multiple
+            )
+            if sig:
+                signals.append(sig)
+        if bias == "bearish" or bias == "neutral":
+            sig = _trend_signals(
+                ordered, "sell", closes, ema9, ema20, ema50, ema100,
+                atr14, rsi_val, swings, fvgs, regime, psychology, readability,
+                metrics, reward_multiple
+            )
+            if sig:
+                signals.append(sig)
+    # In accumulation, prefer buys; in distribution, prefer sells
+    elif phase == "accumulation":
+        sig = _trend_signals(
+            ordered, "buy", closes, ema9, ema20, ema50, ema100,
+            atr14, rsi_val, swings, fvgs, regime, psychology, readability,
+            metrics, reward_multiple
+        )
+        if sig:
+            signals.append(sig)
+    elif phase == "distribution":
+        sig = _trend_signals(
+            ordered, "sell", closes, ema9, ema20, ema50, ema100,
+            atr14, rsi_val, swings, fvgs, regime, psychology, readability,
+            metrics, reward_multiple
+        )
+        if sig:
+            signals.append(sig)
+    # In range/consolidation, range trade both sides
+    elif phase in ("range_bound", "consolidation"):
+        sig_buy = _range_signals(
+            ordered, "buy", closes, ema20, atr14, rsi_val, regime,
+            psychology, readability, metrics
+        )
+        if sig_buy:
+            signals.append(sig_buy)
+        sig_sell = _range_signals(
+            ordered, "sell", closes, ema20, atr14, rsi_val, regime,
+            psychology, readability, metrics
+        )
+        if sig_sell:
+            signals.append(sig_sell)
     
     if not signals:
         return []

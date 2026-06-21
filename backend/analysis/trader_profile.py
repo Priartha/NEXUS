@@ -18,7 +18,7 @@ DEFAULT_TRADER_PROFILE: dict[str, Any] = {
     "timezone": "Asia/Kolkata",
     "execution_profile": {
         "high_performance_hours": [2, 3, 4, 14, 16, 20, 22, 23],
-        "blocked_hours": [12, 17, 18, 21],
+        "blocked_hours": [12, 18, 21],
         "reduced_size_hours": [0, 1, 15, 19],
         "good_hour_confidence_delta": -0.03,
         "reduced_hour_confidence_delta": 0.04,

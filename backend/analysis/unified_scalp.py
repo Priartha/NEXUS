@@ -68,13 +68,13 @@ from backend.models.types import (
 
 
 # Momentum thresholds — can be overridden for tuning
-MOMENTUM_STRONG_THRESHOLD = 0.78
-MOMENTUM_MODERATE_THRESHOLD = 0.15
-MOMENTUM_BLOCK_CONFLUENCE_FALLBACK = True  # Skip confluence path if momentum is insufficient
+MOMENTUM_STRONG_THRESHOLD = 0.55
+MOMENTUM_MODERATE_THRESHOLD = 0.12
+MOMENTUM_BLOCK_CONFLUENCE_FALLBACK = False  # Allow confluence path even without momentum
 
 # Trader profile — from CSV analysis (79 BTCUSD trades, 65.8% WR, 2.30 PF)
-TRADER_GOOD_HOURS_IST = {0, 2, 3, 4, 7, 8, 9, 11, 14, 16, 20, 22, 23}
-TRADER_BLOCKED_HOURS_IST = {1, 15, 17, 18, 19, 21}
+TRADER_GOOD_HOURS_IST = {0, 2, 3, 4, 7, 8, 9, 11, 14, 16, 17, 20, 22, 23}
+TRADER_BLOCKED_HOURS_IST = {1, 15, 18, 19, 21}
 TRADER_RISK_PER_TRADE_PCT = 0.008
 TRADER_POST_WIN_COOLDOWN_MIN = 30
 
@@ -1185,11 +1185,11 @@ class UnifiedScalpEngine:
 
     def _filters(self, candles: list[Candle], funding: ScalpFunding, fr: ScalpFundingRate, fc: FuturesContext | dict | None = None) -> list[str]:
         blockers: list[str] = []
-        if funding.is_extreme and abs(funding.current_rate) > 0.002:
+        if funding.is_extreme and abs(funding.current_rate) > 0.003:
             blockers.append(f"Funding extreme: {funding.current_rate * 100:.3f}%")
         if self._spot_vol_avg > 0:
             avg_vol = sum(c.volume for c in candles[-20:]) / 20
-            if avg_vol < self._spot_vol_avg * settings.scalp_min_spot_volume_ratio * 0.8:
+            if avg_vol < self._spot_vol_avg * settings.scalp_min_spot_volume_ratio * 0.5:
                 blockers.append("Spot volume below 30-day average")
         return blockers
 
@@ -1300,18 +1300,18 @@ class UnifiedScalpEngine:
         # Use adaptive edge threshold if provided
         edge_threshold = adaptive_edge if adaptive_edge is not None else settings.scalp_min_directional_edge
 
-        if winning_reasons is not None and len(winning_reasons) < 2:
-            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 2+)")
+        if winning_reasons is not None and len(winning_reasons) < 1:
+            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 1+)")
             return blockers[:6]
         is_trending = regime is not None and regime.phase == "trending"
         is_consolidation = regime is not None and regime.phase == "consolidation"
         is_range_bound = regime is not None and regime.phase == "range_bound"
         if is_consolidation:
-            min_edge = max(0.04, edge_threshold)
-        elif is_range_bound:
             min_edge = max(0.03, edge_threshold)
-        else:
+        elif is_range_bound:
             min_edge = max(0.02, edge_threshold)
+        else:
+            min_edge = max(0.01, edge_threshold)
         if edge < min_edge:
             blockers.append(f"Directional edge {edge:.2f} below {min_edge:.2f}")
 
@@ -1320,10 +1320,10 @@ class UnifiedScalpEngine:
         trend_strength = abs(ema21 - ema50) / price if price > 0 else 0.0
 
         if is_trending:
-            if trend_strength < 0.0003:
+            if trend_strength < 0.00015:
                 blockers.append(f"Trend strength {trend_strength:.4f} too weak for trending")
         else:
-            if trend_strength < 0.0002:
+            if trend_strength < 0.0001:
                 blockers.append(f"Trend strength {trend_strength:.4f} too flat")
 
         recent_volume = sum(c.volume for c in candles[-5:]) / min(len(candles), 5)
@@ -1331,24 +1331,24 @@ class UnifiedScalpEngine:
         base_volume = sum(c.volume for c in base_window) / len(base_window) if base_window else recent_volume
         volume_ratio = recent_volume / base_volume if base_volume > 0 else 1.0
         if is_trending:
-            vol_threshold = 0.40
+            vol_threshold = 0.25
         elif is_consolidation:
-            vol_threshold = 0.30
+            vol_threshold = 0.20
         else:
-            vol_threshold = 0.35
+            vol_threshold = 0.20
         if volume_ratio < vol_threshold:
             blockers.append(f"Volume impulse {volume_ratio:.2f} below {vol_threshold:.2f}")
 
         rsi_current = _rsi(closes[-10:], 10) if len(closes) >= 11 else 50.0
         if is_range_bound:
-            if side == "long" and rsi_current > 70:
+            if side == "long" and rsi_current > 75:
                 blockers.append(f"Range long: RSI {rsi_current:.0f} overbought")
-            if side == "short" and rsi_current < 30:
+            if side == "short" and rsi_current < 25:
                 blockers.append(f"Range short: RSI {rsi_current:.0f} oversold")
         else:
-            if side == "long" and rsi_current > 75:
+            if side == "long" and rsi_current > 80:
                 blockers.append(f"Long: RSI {rsi_current:.0f} overbought, wait for pullback")
-            if side == "short" and rsi_current < 25:
+            if side == "short" and rsi_current < 20:
                 blockers.append(f"Short: RSI {rsi_current:.0f} oversold, wait for rally")
 
         return blockers[:6]
@@ -1684,38 +1684,26 @@ class UnifiedScalpEngine:
         else:
             kelly_boost = 1.0
 
-        # ── FIX: Entry at retracement level, NOT at candle close ──────────────
-        # Root cause: signal fires after candle closes, but entering at close
-        # means buying at the top of a completed move (or selling at the bottom).
-        # The market then reverses because the move is already exhausted.
-        #
-        # Fix: Position entry zone so price must retrace INTO the candle body.
-        # For longs: entry below close (into lower body or wick).
-        # For shorts: entry above close (into upper body or wick).
+        # ── Entry at retracement level for higher win rate ──────────────────
+        # Enter after price retraces into the body of the signal candle,
+        # avoiding buying at the top or selling at the bottom of a completed move.
         if candle:
             candle_range = candle.high - candle.low
             if is_long:
-                # LONG: enter on pullback into the candle body (below close)
-                # Use the candle's lower half as entry zone
                 zone_mid = min(price, candle.open + candle_range * 0.3)
-                zone_buffer = atr * 0.05
+                zone_buffer = atr * 0.08
                 entry = zone_mid
                 entry_zone_low = round(candle.low, 2)
                 entry_zone_high = round(max(zone_mid + zone_buffer, candle.open), 2)
-                # Prevent zone from being above close (never buy at candle top)
-                entry_zone_high = min(entry_zone_high, round(price * 0.9995, 2))
+                entry_zone_high = min(entry_zone_high, round(price * 0.999, 2))
             else:
-                # SHORT: enter on bounce into the candle body (above close)
-                # Use the candle's upper half as entry zone
                 zone_mid = max(price, candle.close - candle_range * 0.3)
-                zone_buffer = atr * 0.05
+                zone_buffer = atr * 0.08
                 entry = zone_mid
                 entry_zone_low = round(min(zone_mid - zone_buffer, candle.close), 2)
                 entry_zone_high = round(candle.high, 2)
-                # Prevent zone from being below close (never sell at candle bottom)
-                entry_zone_low = max(entry_zone_low, round(price * 1.0005, 2))
+                entry_zone_low = max(entry_zone_low, round(price * 1.001, 2))
         else:
-            # Fallback if no candle provided
             entry = price
             entry_dist = atr * 0.1
             entry_zone_low = round(entry - entry_dist, 2)
@@ -1729,12 +1717,19 @@ class UnifiedScalpEngine:
         t1 = entry + t1_dist if is_long else entry - t1_dist
         t2 = entry + t2_dist if is_long else entry - t2_dist
         
+        # Tighten targets for higher win rate: TP1 at 1:1 R:R, TP2 at 2:1 R:R
+        risk_dist = abs(entry - sl)
+        if risk_dist > 0 and t2_dist > risk_dist * 2:
+            t2 = entry + risk_dist * 2 if is_long else entry - risk_dist * 2
+        if risk_dist > 0 and t1_dist > risk_dist:
+            t1 = entry + risk_dist if is_long else entry - risk_dist
+        
         rr = round(abs(t2 - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0.0
         
-        base_leverage = max(3, int(10 * score * kelly_boost))
-        leverage = min(settings.scalp_max_leverage, base_leverage + 5)
+        base_leverage = max(3, int(8 * score * kelly_boost))
+        leverage = min(settings.scalp_max_leverage, base_leverage + 3)
         
-        confidence = "HIGH" if score >= 0.60 else ("MEDIUM" if score >= 0.45 else "LOW")
+        confidence = "HIGH" if score >= 0.65 else ("MEDIUM" if score >= 0.40 else "LOW")
         time_limit = now_ms + settings.scalp_max_hold_minutes * 60 * 1000
         funding_impact = (fr.current_rate * 3 * 100) if fr else 0.0
         if funding_impact != 0:
