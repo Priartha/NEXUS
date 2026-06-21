@@ -866,18 +866,17 @@ class UnifiedScalpEngine:
             else:
                 return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: consolidation regime - no directional edge"])
 
-        # Block signals in range_bound — agent can override if confident
+        # Block signals in range_bound — strictly enforced, no agent override
+        # In range markets, buying after rallies and selling after dips always loses.
+        # The agent is most confident at extremes, which is exactly when to fade.
         if regime and regime.phase == "range_bound":
-            if agent_has_signal and agent_result.get('confidence', 0) > 0.60:
-                range_override = True  # Agent overrides range block with high confidence
-            else:
-                range_high = regime.range_high or max(c.high for c in ordered[-20:])
-                range_low = regime.range_low or min(c.low for c in ordered[-20:])
-                range_mid = (range_high + range_low) / 2
-                if winning_side == "long" and price > range_mid:
-                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: long in range_bound above mid"])
-                if winning_side == "short" and price < range_mid:
-                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: short in range_bound below mid"])
+            range_high = regime.range_high or max(c.high for c in ordered[-20:])
+            range_low = regime.range_low or min(c.low for c in ordered[-20:])
+            range_mid = (range_high + range_low) / 2
+            if winning_side == "long" and price > range_mid:
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: long in range_bound above mid"])
+            if winning_side == "short" and price < range_mid:
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: short in range_bound below mid"])
 
         if settings.scalp_require_candle_confirmation and regime and regime.phase == "range_bound" and not range_override:
             last_candle = ordered[-1]
