@@ -224,12 +224,34 @@ class PaperTradingEngine:
             return events
 
         balance = self._current_balance()
-        risk_per_trade = balance * effective_risk_pct
+
+        # ── Realistic entry: use current candle close, not signal's stale zone_mid ──
+        # Signal entry is a projection into the signal candle's body. By the time
+        # we evaluate, the current candle may be far from that level, making the
+        # risk/reward levels meaningless. Use the current market price and clamp
+        # to the entry zone (same as backtest).
+        realistic_entry = candle.close if candle else best.entry
+        entry_zone_low = getattr(best, 'entry_zone_low', 0) or 0
+        entry_zone_high = getattr(best, 'entry_zone_high', 0) or 0
+        if entry_zone_low > 0 and entry_zone_high > 0:
+            if realistic_entry < entry_zone_low or realistic_entry > entry_zone_high:
+                realistic_entry = max(entry_zone_low, min(entry_zone_high, realistic_entry))
+
         risk_per_unit = abs(best.entry - best.stop_loss)
         qty = risk_per_trade / risk_per_unit if risk_per_unit > 0 else 0.001
 
-        slippage = self._compute_slippage(best.entry, qty, candle)
-        entry_with_slippage = best.entry + slippage if best.side == "buy" else best.entry - slippage
+        slippage = self._compute_slippage(realistic_entry, qty, candle)
+        entry_with_slippage = realistic_entry + slippage if best.side == "buy" else realistic_entry - slippage
+
+        # Recompute SL/TP based on actual entry (same risk distance)
+        if best.side == "buy":
+            sl = entry_with_slippage - risk_per_unit
+            tp = best.target_1 - best.entry
+            tp = entry_with_slippage + tp if tp > 0 else best.exit_price
+        else:
+            sl = entry_with_slippage + risk_per_unit
+            tp = best.entry - best.target_1
+            tp = entry_with_slippage - tp if tp > 0 else best.exit_price
 
         notional = entry_with_slippage * qty
         entry_commission = notional * self.commission_pct
@@ -257,9 +279,9 @@ class PaperTradingEngine:
             "side": best.side,
             "entry_price": round(entry_with_slippage, 2),
             "raw_entry": best.entry,
-            "stop_loss": best.stop_loss,
-            "initial_stop": best.stop_loss,
-            "take_profit": best.exit_price,
+            "stop_loss": round(sl, 2),
+            "initial_stop": round(sl, 2),
+            "take_profit": round(tp, 2),
             "quantity": round(qty, 6),
             "timestamp": best.timestamp,
             "opened_at": now_ms,
@@ -267,10 +289,10 @@ class PaperTradingEngine:
             "confidence": best.confidence,
             "risk_reward": best.risk_reward,
             "reason": best.reason,
-            "highest_price": best.entry if best.side == "buy" else None,
-            "lowest_price": best.entry if best.side == "sell" else None,
+            "highest_price": entry_with_slippage if best.side == "buy" else None,
+            "lowest_price": entry_with_slippage if best.side == "sell" else None,
             "atr_at_entry": best.expected_move if best.expected_move else 0,
-            "slippage_pct": round(slippage / best.entry * 100 if best.entry > 0 else 0, 4),
+            "slippage_pct": round(slippage / realistic_entry * 100 if realistic_entry > 0 else 0, 4),
             "entry_commission": round(entry_commission, 2),
             "commission": round(entry_commission, 2),
             "funding_rate": self.funding_rate_per_8h,

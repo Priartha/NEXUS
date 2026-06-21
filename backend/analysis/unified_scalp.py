@@ -73,8 +73,8 @@ MOMENTUM_MODERATE_THRESHOLD = 0.12
 MOMENTUM_BLOCK_CONFLUENCE_FALLBACK = False  # Allow confluence path even without momentum
 
 # Trader profile — from CSV analysis (79 BTCUSD trades, 65.8% WR, 2.30 PF)
-TRADER_GOOD_HOURS_IST = {0, 2, 3, 4, 7, 8, 9, 11, 14, 16, 17, 20, 22, 23}
-TRADER_BLOCKED_HOURS_IST = {1, 15, 18, 19, 21}
+TRADER_GOOD_HOURS_IST = {0, 2, 3, 4, 7, 8, 9, 11, 14, 16, 20, 22, 23}
+TRADER_BLOCKED_HOURS_IST = {1, 15, 17, 18, 19, 21}
 TRADER_RISK_PER_TRADE_PCT = 0.008
 TRADER_POST_WIN_COOLDOWN_MIN = 30
 
@@ -475,18 +475,27 @@ class UnifiedScalpEngine:
                     candle=ordered[-1], regime=regime,
                 )
             if sig:
-                # Override SL/TP for tight scalping
+                # Override SL to momentum-specific distance, then apply regime-aware TP
                 sig.sl_level = round(sl, 2)
-                sig.target_1 = round(price_mom + tp_dist * 0.5 if momentum.direction == "bullish" else price_mom - tp_dist * 0.5, 2)
-                sig.target_2 = round(tp, 2)
-                sig.risk_reward = round(abs(tp - price_mom) / abs(price_mom - sl), 2)
-                # Sync backtest-required attributes
                 sig.stop_loss = sig.sl_level
                 sig.entry = price_mom
-                sig.exit_price = sig.target_2
                 sig.side = "buy" if momentum.direction == "bullish" else "sell"
-                # Override entry zone to match intended entry — backtest's CompatSignal
-                # uses (entry_zone_low + entry_zone_high) / 2 as entry price
+                momentum_risk = abs(price_mom - sl)
+                if regime:
+                    if regime.phase == "range_bound":
+                        tp1_rr, tp2_rr = 0.7, 1.4
+                    elif regime.phase == "consolidation":
+                        tp1_rr, tp2_rr = 0.5, 1.0
+                    elif regime.phase == "trending":
+                        tp1_rr, tp2_rr = 1.5, 3.0
+                    else:
+                        tp1_rr, tp2_rr = 1.0, 2.0
+                else:
+                    tp1_rr, tp2_rr = 1.0, 2.0
+                sig.target_1 = round(price_mom + momentum_risk * tp1_rr if momentum.direction == "bullish" else price_mom - momentum_risk * tp1_rr, 2)
+                sig.target_2 = round(price_mom + momentum_risk * tp2_rr if momentum.direction == "bullish" else price_mom - momentum_risk * tp2_rr, 2)
+                sig.risk_reward = round(tp2_rr, 2)
+                sig.exit_price = sig.target_2
                 sig.entry_zone_low = round(price_mom * 0.999, 2)
                 sig.entry_zone_high = round(price_mom * 1.001, 2)
                 signals = [sig]
@@ -661,7 +670,7 @@ class UnifiedScalpEngine:
         if missing_sources > 0:
             max_possible = 1.0 - (missing_sources * 0.08)
             normalized_threshold = threshold * (max_possible / 1.0)
-            threshold = max(normalized_threshold, 0.30)
+            threshold = max(normalized_threshold, 0.45)
 
         # Record candle data for pattern intelligence engine
         try:
@@ -1717,12 +1726,24 @@ class UnifiedScalpEngine:
         t1 = entry + t1_dist if is_long else entry - t1_dist
         t2 = entry + t2_dist if is_long else entry - t2_dist
         
-        # Tighten targets for higher win rate: TP1 at 1:1 R:R, TP2 at 2:1 R:R
+        # Regime-aware TP tightening: tighter targets in range/consolidation
+        # where typical moves are smaller, wider in trending where moves run
+        if regime:
+            if regime.phase == "range_bound":
+                tp1_rr, tp2_rr = 0.5, 1.0
+            elif regime.phase == "consolidation":
+                tp1_rr, tp2_rr = 0.3, 0.6
+            elif regime.phase == "trending":
+                tp1_rr, tp2_rr = 1.0, 2.0
+            else:
+                tp1_rr, tp2_rr = 0.7, 1.4
+        else:
+            tp1_rr, tp2_rr = 0.7, 1.4
         risk_dist = abs(entry - sl)
-        if risk_dist > 0 and t2_dist > risk_dist * 2:
-            t2 = entry + risk_dist * 2 if is_long else entry - risk_dist * 2
-        if risk_dist > 0 and t1_dist > risk_dist:
-            t1 = entry + risk_dist if is_long else entry - risk_dist
+        if risk_dist > 0 and t2_dist > risk_dist * tp2_rr:
+            t2 = entry + risk_dist * tp2_rr if is_long else entry - risk_dist * tp2_rr
+        if risk_dist > 0 and t1_dist > risk_dist * tp1_rr:
+            t1 = entry + risk_dist * tp1_rr if is_long else entry - risk_dist * tp1_rr
         
         rr = round(abs(t2 - entry) / abs(entry - sl), 2) if abs(entry - sl) > 0 else 0.0
         

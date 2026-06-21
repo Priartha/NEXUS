@@ -17,18 +17,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_TRADER_PROFILE: dict[str, Any] = {
     "timezone": "Asia/Kolkata",
     "execution_profile": {
-        "high_performance_hours": [2, 3, 4, 14, 16, 20, 22, 23],
-        "blocked_hours": [12, 18, 21],
-        "reduced_size_hours": [0, 1, 15, 19],
-        "good_hour_confidence_delta": -0.03,
-        "reduced_hour_confidence_delta": 0.04,
-        "min_fee_edge_ratio": 3.0,
-        "post_win_cooldown_minutes": 45,
-        "risk_per_trade_pct": 0.0075,
+        "high_performance_hours": [0, 2, 3, 4, 7, 8, 9, 11, 14, 16, 20, 22, 23],
+        "blocked_hours": [1, 15, 17, 18, 19, 21],
+        "reduced_size_hours": [6, 12, 13],
+        "good_hour_confidence_delta": -0.04,
+        "reduced_hour_confidence_delta": 0.05,
+        "min_fee_edge_ratio": 3.5,
+        "post_win_cooldown_minutes": 30,
+        "risk_per_trade_pct": 0.008,
     },
     "notes": [
-        "Default profile inferred from the user's Delta CSV export dated 2026-04-26 to 2026-06-20.",
-        "Cashflow-only win rate was 61.11%; fee drag consumed about 44.23% of cashflow net.",
+        "Default profile inferred from 79 BTCUSD perpetual trades over 28 days.",
+        "Win rate: 65.8%, Profit factor: 2.30",
         "Use this as an execution overlay, not a guarantee of future win rate.",
     ],
 }
