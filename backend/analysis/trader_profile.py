@@ -146,7 +146,11 @@ def get_trader_profile() -> TraderStyleProfile:
         mtime = path.stat().st_mtime
         if _cached_profile is not None and _cached_mtime == mtime:
             return _cached_profile
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_bytes()
+        # Strip UTF-8 BOM if present (Windows often writes one)
+        if raw[:3] == b"\xef\xbb\xbf":
+            raw = raw[3:]
+        payload = json.loads(raw)
         _cached_profile = TraderStyleProfile.from_dict(payload)
         _cached_mtime = mtime
         return _cached_profile

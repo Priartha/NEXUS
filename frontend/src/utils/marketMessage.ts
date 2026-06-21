@@ -323,6 +323,8 @@ const MessageSchema = z.union([
   z.object({ update_type: z.literal('quote'), quote: z.any() }), // Simplified
   z.object({ update_type: z.literal('futures_context'), futures_context: z.any() }).passthrough(),
   z.object({ update_type: z.literal('alert') }).passthrough(),
+  z.object({ update_type: z.literal('news_trade_plan'), news_trade_plan: z.any() }).passthrough(),
+  z.object({ update_type: z.literal('fast_news'), fast_news: z.any() }).passthrough(),
 ])
 
 export function parseMarketMessage(value: unknown): MarketMessage | null {

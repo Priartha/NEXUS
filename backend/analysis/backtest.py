@@ -46,11 +46,11 @@ class BacktestEngine:
         max_concurrent: int = 1,
         slippage_pct: float = 0.0001,
         commission_pct: float = 0.0002,
-        max_hold_bars: int = 6,
+        max_hold_bars: int = 12,
         breakeven_threshold: float = 1.0,
         trailing_stop: bool = True,
         trailing_atr_multiplier: float = 1.5,
-        funding_rate_per_8h: float = 0.0001,
+        funding_rate_per_8h: float = -0.0001,
         signal_side_mode: str = "normal",
         avoid_reason_tokens: list[str] | None = None,
         tp_atr_multiplier: float = 2.0,
@@ -416,8 +416,8 @@ class BacktestEngine:
                     continue
                 # Map confidence based on score relative to threshold
                 # Scores range from ~0.20 to ~0.70 in backtest mode
-                raw_score = ss.risk_reward  # Not ideal, but use signal strength
-                conf_map = {"HIGH": 0.75, "MEDIUM": 0.60, "LOW": 0.45}
+                raw_score = ss.score if hasattr(ss, 'score') and ss.score else ss.risk_reward
+                conf_map = {"HIGH": 0.75, "MEDIUM": 0.65, "LOW": 0.55}
                 entry = (ss.entry_zone_low + ss.entry_zone_high) / 2
                 side = "buy" if "LONG" in ss.signal_type else "sell"
                 stop_loss = ss.sl_level
@@ -446,6 +446,8 @@ class BacktestEngine:
                     "timestamp": ss.timestamp,
                     "side": side,
                     "entry": entry,
+                    "entry_zone_low": ss.entry_zone_low,
+                    "entry_zone_high": ss.entry_zone_high,
                     "stop_loss": stop_loss,
                     "exit_price": exit_price,
                     "confidence": conf_map.get(ss.confidence, 0.50),
@@ -466,18 +468,33 @@ class BacktestEngine:
                         continue
                 if len([t for t in open_trades if t["status"] == "open"]) >= self.max_concurrent:
                     continue
-                if sig.confidence < 0.42:
+                if sig.confidence < 0.50:
                     continue
 
+                # Use next candle's open as entry (signal fires at current close, executes next bar)
+                if i + 1 < len(candles):
+                    next_candle = candles[i + 1]
+                    actual_entry = next_candle.open
+                    # Only enter if price is within entry zone from signal
+                    entry_zone_low = getattr(sig, 'entry_zone_low', 0)
+                    entry_zone_high = getattr(sig, 'entry_zone_high', 0)
+                    if entry_zone_low > 0 and entry_zone_high > 0:
+                        if actual_entry < entry_zone_low or actual_entry > entry_zone_high:
+                            actual_entry = max(entry_zone_low, min(entry_zone_high, actual_entry))
+                else:
+                    actual_entry = sig.entry
+
                 risk_per_trade = balance * self.position_size_pct
-                risk_per_unit = abs(sig.entry - sig.stop_loss)
+                risk_per_unit = abs(actual_entry - sig.stop_loss)
+                if risk_per_unit <= 0:
+                    continue
                 quantity = risk_per_trade / risk_per_unit if risk_per_unit > 0 else 0
                 if not math.isfinite(quantity) or quantity <= 0:
                     logger.warning("Skipping backtest trade with invalid quantity for signal %s", sig.id)
                     continue
 
-                slippage = sig.entry * self.slippage_pct
-                entry_with_slippage = sig.entry + slippage if sig.side == "buy" else sig.entry - slippage
+                slippage = actual_entry * self.slippage_pct
+                entry_with_slippage = actual_entry + slippage if sig.side == "buy" else actual_entry - slippage
                 if not math.isfinite(entry_with_slippage) or entry_with_slippage <= 0:
                     logger.warning("Skipping backtest trade with invalid entry for signal %s", sig.id)
                     continue
@@ -490,14 +507,22 @@ class BacktestEngine:
 
                 tp = sig.exit_price
                 sl = sig.stop_loss
+                # Recompute SL/TP based on actual entry price (keeps same risk distance)
+                risk_distance = abs(sig.entry - sig.stop_loss)
+                if sig.side == "buy":
+                    sl = entry_with_slippage - risk_distance
+                    tp_base = sig.exit_price - sig.entry
+                    tp = entry_with_slippage + tp_base if tp_base > 0 else sig.exit_price
+                else:
+                    sl = entry_with_slippage + risk_distance
+                    tp_base = sig.entry - sig.exit_price
+                    tp = entry_with_slippage - tp_base if tp_base > 0 else sig.exit_price
                 if self.tp_atr_multiplier > 0:
-                    # Override TP: entry +/- tp_atr_multiplier * (risk_per_unit / 2.0)
-                    atr_frac = risk_per_unit / 2.0
-                    tp = sig.entry + self.tp_atr_multiplier * atr_frac if sig.side == "buy" else sig.entry - self.tp_atr_multiplier * atr_frac
+                    atr_frac = risk_distance / 2.0
+                    tp = entry_with_slippage + self.tp_atr_multiplier * atr_frac if sig.side == "buy" else entry_with_slippage - self.tp_atr_multiplier * atr_frac
                 if self.sl_atr_multiplier > 0:
-                    # Override SL: entry -/+ sl_atr_multiplier * (risk_per_unit / 2.0)
-                    atr_frac = risk_per_unit / 2.0
-                    sl = sig.entry - self.sl_atr_multiplier * atr_frac if sig.side == "buy" else sig.entry + self.sl_atr_multiplier * atr_frac
+                    atr_frac = risk_distance / 2.0
+                    sl = entry_with_slippage - self.sl_atr_multiplier * atr_frac if sig.side == "buy" else entry_with_slippage + self.sl_atr_multiplier * atr_frac
                 trade = {
                     "id": str(uuid.uuid4()),
                     "signal_id": sig.id,
@@ -541,12 +566,18 @@ class BacktestEngine:
                             profit_r = (current.high - entry) / risk
                             if profit_r >= self.breakeven_threshold:
                                 trade["stop_loss"] = max(trade["stop_loss"], entry)
-                                sl = trade["stop_loss"]
+                            if profit_r >= 1.5:
+                                trail_stop = current.high - risk * self.trailing_atr_multiplier
+                                trade["stop_loss"] = max(trade["stop_loss"], trail_stop)
+                            sl = trade["stop_loss"]
                         else:
                             profit_r = (entry - current.low) / risk
                             if profit_r >= self.breakeven_threshold:
                                 trade["stop_loss"] = min(trade["stop_loss"], entry)
-                                sl = trade["stop_loss"]
+                            if profit_r >= 1.5:
+                                trail_stop = current.low + risk * self.trailing_atr_multiplier
+                                trade["stop_loss"] = min(trade["stop_loss"], trail_stop)
+                            sl = trade["stop_loss"]
 
                 def apply_exit_costs(raw_exit_price: float) -> tuple[float, float, float, float]:
                     exit_slippage = raw_exit_price * self.slippage_pct

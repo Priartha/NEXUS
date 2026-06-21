@@ -39,7 +39,7 @@ const DEFAULT_CONFIG: StrategyConfig = {
   breakevenThreshold: 0.5,
   partialTp1R: 1.0,
   partialTp2R: 1.5,
-  maxHoldBars: 6,
+  maxHoldBars: 12,
   positionSizePct: 2.0,
   maxConcurrent: 1,
 }
@@ -58,7 +58,7 @@ const PRESETS: Record<string, { name: string; config: StrategyConfig; descriptio
       breakevenThreshold: 0.5,
       partialTp1R: 1.0,
       partialTp2R: 1.5,
-      maxHoldBars: 6,
+      maxHoldBars: 12,
       positionSizePct: 2.0,
       maxConcurrent: 1,
     },

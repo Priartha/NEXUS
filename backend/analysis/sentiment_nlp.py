@@ -352,6 +352,10 @@ class NLPSentimentEngine:
         self._last_refresh = time.time()
         return result
 
+    @property
+    def current(self) -> NLPSentimentResult | None:
+        return self._cache
+
     def get_state(self) -> dict:
         return {
             "use_finbert": self.use_finbert,

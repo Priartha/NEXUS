@@ -50,8 +50,8 @@ class SelfOptimizationEngine:
         self.state_version = 2
         self.attempts: deque[OptimizationAttempt] = deque(maxlen=200)
         self._last_optimization: float = 0
-        self._optimization_interval: float = 7200  # 2 hours
-        self._min_trades_for_optimization: int = 15
+        self._optimization_interval: float = 3600  # 1 hour (faster adaptation)
+        self._min_trades_for_optimization: int = 5
         
         # Current adaptive parameters
         self.params = {
@@ -177,11 +177,20 @@ class SelfOptimizationEngine:
         to keep signals in tune with current market conditions. Returns the
         result of the optimization run (or skipped if no changes needed).
         """
-        # Trigger optimization more aggressively after bootstrap (no interval wait)
         if len(self.performance_window) < 3:
             return {'status': 'skipped', 'reason': 'insufficient_data'}
 
-        # Force optimization to run regardless of interval
+        # Check if we should optimize: either time interval passed OR enough new trades
+        recent_closes = [t for t in list(self.performance_window)[-3:] if t.get('won') is not None]
+        recent_losses = sum(1 for t in recent_closes if not t.get('won'))
+        if recent_losses >= 2:
+            # After 2 consecutive losses, optimize immediately
+            self._last_optimization = 0
+        elif time.time() - self._last_optimization < self._optimization_interval:
+            if len(self.performance_window) < self._min_trades_for_optimization:
+                return {'status': 'skipped', 'reason': 'not_enough_trades'}
+            return {'status': 'skipped', 'reason': 'too_soon'}
+
         self._last_optimization = 0
         result = self.run_optimization()
         return result
@@ -333,44 +342,63 @@ class SelfOptimizationEngine:
         return proposed
 
     def _evaluate_changes(self, proposed: dict, analysis: dict) -> dict:
-        """Evaluate if proposed changes would improve performance."""
-        # Simplified evaluation: estimate improvement based on parameter changes
+        """Evaluate if proposed changes would improve performance.
+        
+        Uses a statistical approach based on historical trade data rather than
+        pure heuristics, making the optimizer actually learn from outcomes.
+        """
         current_wr = analysis['win_rate']
         current_pnl = analysis['avg_pnl']
+        trades = list(self.performance_window)
         
-        # Estimate impact of confidence threshold change
-        conf_delta = proposed['min_confidence'] - self.params['min_confidence']
-        # Higher confidence threshold -> fewer trades but higher win rate
-        estimated_wr_change = conf_delta * 0.5  # rough estimate
+        # Analyze trade outcomes by confidence bucket
+        if len(trades) >= 5:
+            high_conf_trades = [t for t in trades if t.get('confidence', 0) >= proposed['min_confidence']]
+            low_conf_trades = [t for t in trades if t.get('confidence', 0) < proposed['min_confidence']]
+            
+            actual_high_wr = sum(1 for t in high_conf_trades if t.get('won')) / max(len(high_conf_trades), 1)
+            actual_low_wr = sum(1 for t in low_conf_trades if t.get('won')) / max(len(low_conf_trades), 1)
+            
+            # If raising threshold would filter out losing trades, it's beneficial
+            trade_quality_gain = 0.0
+            if low_conf_trades:
+                low_wr = actual_low_wr
+                if low_wr < current_wr - 0.05:
+                    trade_quality_gain = (current_wr - low_wr) * 0.5
+            
+            # If raising edge threshold, check if low-edge trades are losers
+            edge_gain = 0.0
+            if proposed.get('min_edge', 0) > self.params.get('min_edge', 0):
+                low_edge = [t for t in trades if abs(t.get('pnl_pct', 0)) < proposed['min_edge'] * 10]
+                if low_edge:
+                    low_edge_wr = sum(1 for t in low_edge if t.get('won')) / len(low_edge)
+                    if low_edge_wr < 0.40:
+                        edge_gain = (0.50 - low_edge_wr) * 0.3
+            
+            # Check if regime-specific improvements are warranted
+            regime_gain = 0.0
+            for regime, stats in analysis.get('regimes', {}).items():
+                if stats['trades'] >= 3:
+                    wr = stats['wins'] / stats['trades']
+                    if wr < 0.35:
+                        regime_gain += 0.05  # Benefit from blocking this regime
+        else:
+            trade_quality_gain = 0.0
+            edge_gain = 0.0
+            regime_gain = 0.0
         
-        # Estimate impact of edge threshold change
-        edge_delta = proposed['min_edge'] - self.params['min_edge']
-        estimated_wr_change += edge_delta * 0.3
-        
-        # Estimate impact of SL/TP changes
-        sl_change = proposed['sl_multiplier_base'] - self.params['sl_multiplier_base']
-        tp_change = proposed['tp_multiplier_base'] - self.params['tp_multiplier_base']
-        estimated_pnl_change = tp_change * 0.1 - sl_change * 0.05
-        
-        estimated_new_wr = min(0.75, max(0.30, current_wr + estimated_wr_change))
-        estimated_new_pnl = current_pnl + estimated_pnl_change
-        
-        # Calculate improvement score
-        improvement = 0
-        if estimated_new_wr > current_wr:
-            improvement += (estimated_new_wr - current_wr) * 2
-        if estimated_new_pnl > current_pnl:
-            improvement += (estimated_new_pnl - current_pnl) * 0.5
+        improvement = trade_quality_gain + edge_gain + regime_gain
         
         # Penalty for reducing trade count too much
-        trade_reduction = conf_delta * 0.3 + edge_delta * 0.2
+        conf_delta = proposed['min_confidence'] - self.params['min_confidence']
+        trade_reduction = max(0, conf_delta * 0.5)
         if trade_reduction > 0.1:
-            improvement -= trade_reduction * 0.5
+            improvement -= trade_reduction * 0.3
         
         return {
             'improvement': improvement,
-            'estimated_wr': estimated_new_wr,
-            'estimated_pnl': estimated_new_pnl,
+            'estimated_wr': current_wr + trade_quality_gain,
+            'estimated_pnl': current_pnl + 0.0,
         }
 
     def get_adaptive_params(self, regime: str | None = None) -> dict:

@@ -5,6 +5,7 @@ import {
   type BtcPatternContext,
   type ChartCandle,
   type ConnectionStatus,
+  type FastNewsSnapshot,
   type FVG,
   type LiquidityEvent,
   type LiquidityLevel,
@@ -13,6 +14,7 @@ import {
   type MarketQuote,
   type MarketRegime,
   type MarketStats,
+  type NewsTradePlanSnapshot,
   type OrderBlock,
   type OrderbookData,
   type PaperTradeStats,
@@ -52,6 +54,8 @@ interface ChartStore {
   paperTrading: PaperTradeStats | null
   scalpContext: ScalpContext | null
   scalpRisk: ScalpRiskSummary | null
+  newsTradePlan: NewsTradePlanSnapshot | null
+  fastNews: FastNewsSnapshot | null
   availableTimeframes: string[]
   selectedTimeframe: string
   symbol: string
@@ -167,6 +171,8 @@ export const useChartStore = create<ChartStore>((set) => {
   paperTrading: null,
   scalpContext: cached.scalpContext ?? null,
   scalpRisk: cached.scalpRisk ?? null,
+  newsTradePlan: null,
+  fastNews: null,
   availableTimeframes: ['1m', '5m', '15m', '1h'],
   selectedTimeframe: '5m',
   symbol: 'BTCUSD',
@@ -294,6 +300,8 @@ export const useChartStore = create<ChartStore>((set) => {
       if (message.paper_trading !== undefined) next.paperTrading = message.paper_trading
       if (message.scalp !== undefined) next.scalpContext = message.scalp
       if (message.scalp_risk !== undefined) next.scalpRisk = message.scalp_risk
+      if (message.news_trade_plan !== undefined) next.newsTradePlan = message.news_trade_plan
+      if (message.fast_news !== undefined) next.fastNews = message.fast_news
 
       const shouldPersist =
         message.signals !== undefined ||

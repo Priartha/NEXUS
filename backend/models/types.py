@@ -571,6 +571,51 @@ class ChartUpdate:
     update_type: str
 
 
+@dataclass
+class NewsDrivenPlan:
+    id: str
+    timestamp: int
+    source: str
+    headline: str
+    url: str = ""
+    impact: str = "medium"
+    direction: str = "neutral"
+    confidence: float = 0.0
+    entry_zone_low: Optional[float] = None
+    entry_zone_high: Optional[float] = None
+    stop_loss: Optional[float] = None
+    target_1: Optional[float] = None
+    target_2: Optional[float] = None
+    rationale: str = ""
+    status: str = "active"
+    resolved_at: Optional[int] = None
+    resolution: str = ""  # hit_target, stopped, expired, cancelled
+
+
+@dataclass
+class NewsActivityEntry:
+    id: str
+    timestamp: int
+    event_type: str  # headline, sentiment_shift, macro_event, volatility_anomaly, trade_plan
+    source: str
+    title: str
+    detail: str = ""
+    direction: str = "neutral"
+    score: float = 0.0
+    related_plan_id: Optional[str] = None
+
+
+@dataclass
+class NewsTradePlanSnapshot:
+    active_plans: list[NewsDrivenPlan] = field(default_factory=list)
+    recent_activity: list[NewsActivityEntry] = field(default_factory=list)
+    macro_events: list[dict] = field(default_factory=list)
+    sentiment_label: str = "neutral"
+    sentiment_score: float = 0.0
+    updated_at: Optional[int] = None
+    source_count: int = 0
+
+
 def to_wire(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value

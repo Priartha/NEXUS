@@ -71,13 +71,13 @@ class Settings:
     scalp_partial_exit_pct: float = float(os.getenv("NEXUS_SCALP_PARTIAL_EXIT", "0.50"))
     scalp_breakeven_premium_pct: float = float(os.getenv("NEXUS_SCALP_BE_PREMIUM_PCT", "0.50"))
     # Relaxed thresholds for more trading opportunities while maintaining quality
-    scalp_min_confluence_score: float = float(os.getenv("NEXUS_SCALP_MIN_CONFLUENCE", "0.60"))
-    scalp_min_directional_edge: float = float(os.getenv("NEXUS_SCALP_MIN_DIRECTIONAL_EDGE", "0.04"))
-    scalp_min_trend_strength: float = float(os.getenv("NEXUS_SCALP_MIN_TREND_STRENGTH", "0.0005"))
-    scalp_min_volume_impulse: float = float(os.getenv("NEXUS_SCALP_MIN_VOLUME_IMPULSE", "0.55"))
+    scalp_min_confluence_score: float = float(os.getenv("NEXUS_SCALP_MIN_CONFLUENCE", "0.50"))
+    scalp_min_directional_edge: float = float(os.getenv("NEXUS_SCALP_MIN_DIRECTIONAL_EDGE", "0.03"))
+    scalp_min_trend_strength: float = float(os.getenv("NEXUS_SCALP_MIN_TREND_STRENGTH", "0.0003"))
+    scalp_min_volume_impulse: float = float(os.getenv("NEXUS_SCALP_MIN_VOLUME_IMPULSE", "0.45"))
     scalp_require_mtf_alignment: bool = os.getenv("NEXUS_SCALP_REQUIRE_MTF_ALIGNMENT", "false").lower() == "true"
     scalp_require_candle_confirmation: bool = os.getenv("NEXUS_SCALP_REQUIRE_CANDLE_CONFIRMATION", "false").lower() == "true"
-    scalp_max_entry_distance_pct: float = float(os.getenv("NEXUS_SCALP_MAX_ENTRY_DISTANCE_PCT", "0.003"))
+    scalp_max_entry_distance_pct: float = float(os.getenv("NEXUS_SCALP_MAX_ENTRY_DISTANCE_PCT", "0.005"))
 
     # Wick rejection analysis
     scalp_wick_lookback: int = int(os.getenv("NEXUS_SCALP_WICK_LOOKBACK", "5"))

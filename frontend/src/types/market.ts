@@ -500,7 +500,7 @@ export interface InstitutionalMetrics {
 }
 
 export interface MarketMessage {
-  update_type: 'snapshot' | 'tick' | 'close' | 'status' | 'sentiment' | 'ai_ict' | 'quote' | 'futures_context'
+  update_type: 'snapshot' | 'tick' | 'close' | 'status' | 'sentiment' | 'ai_ict' | 'quote' | 'futures_context' | 'news_trade_plan' | 'fast_news'
   symbol?: string
   timeframe?: string
   quote?: MarketQuote | null
@@ -530,6 +530,8 @@ export interface MarketMessage {
   retry_in_seconds?: number
   available_timeframes?: string[]
   paper_trading?: PaperTradeStats
+  news_trade_plan?: NewsTradePlanSnapshot
+  fast_news?: FastNewsSnapshot
 }
 
 export type ChartCandle = CandlestickData<UTCTimestamp> & {
@@ -923,4 +925,63 @@ export interface ScalpRiskSummary {
   total_trades?: number
   total_win_rate?: number
   kelly_fraction?: number
+}
+
+export interface NewsDrivenPlan {
+  id: string
+  timestamp: number
+  source: string
+  headline: string
+  url: string
+  impact: string
+  direction: string
+  confidence: number
+  entry_zone_low?: number | null
+  entry_zone_high?: number | null
+  stop_loss?: number | null
+  target_1?: number | null
+  target_2?: number | null
+  rationale: string
+  status: string
+  resolved_at?: number | null
+  resolution: string
+}
+
+export interface NewsActivityEntry {
+  id: string
+  timestamp: number
+  event_type: string
+  source: string
+  title: string
+  detail: string
+  direction: string
+  score: number
+  related_plan_id?: string | null
+}
+
+export interface NewsTradePlanSnapshot {
+  active_plans: NewsDrivenPlan[]
+  recent_activity: NewsActivityEntry[]
+  macro_events: { name: string; hours_until: number; impact: string; date: string }[]
+  sentiment_label: string
+  sentiment_score: number
+  updated_at?: number | null
+  source_count: number
+}
+
+export interface FastHeadline {
+  title: string
+  source: string
+  url: string
+  published_at: number
+  score: number
+  is_breaking: boolean
+  categories: string[]
+}
+
+export interface FastNewsSnapshot {
+  headlines: FastHeadline[]
+  breaking: FastHeadline[]
+  source_count: number
+  updated_at?: number | null
 }

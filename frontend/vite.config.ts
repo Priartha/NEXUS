@@ -20,7 +20,7 @@ export default defineConfig({
       '/sentiment': 'http://127.0.0.1:8000',
       '/snapshot': 'http://127.0.0.1:8000',
       '/ai-ict': 'http://127.0.0.1:8000',
-      '/news': 'http://127.0.0.1:8000',
+      '/news': { target: 'http://127.0.0.1:8000', changeOrigin: true },
       '/scanner': 'http://127.0.0.1:8000',
       '/risk': 'http://127.0.0.1:8000',
       '/demo': 'http://127.0.0.1:8000',

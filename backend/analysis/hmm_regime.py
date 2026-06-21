@@ -198,8 +198,6 @@ class HMMRegimeClassifier:
         # Predict regimes and store
         if hasattr(self._model, "predict"):
             states = self._model.predict(features)
-        elif hasattr(self._model, "predict"):
-            states = self._model.predict(features)
         else:
             states = np.zeros(len(features))
 

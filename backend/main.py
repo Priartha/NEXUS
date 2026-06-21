@@ -53,6 +53,7 @@ from backend.utils.cache import global_cache, CACHE_TTLS, invalidate_pattern
 
 # Phase 2/3 ML module imports
 from backend.analysis.xgboost_model import xgboost_model
+from backend.analysis.events_calendar import scan_for_events as scan_events
 from backend.analysis.hmm_regime import hmm_classifier
 from backend.analysis.sentiment_nlp import nlp_sentiment
 from backend.analysis.transformer_forecaster import transformer_forecaster
@@ -63,6 +64,8 @@ from backend.analysis.cvd_divergence import cvd_divergence_detector
 from backend.analysis.position_manager import position_manager
 from backend.storage.feature_store import feature_store
 from backend.analysis.pipeline_async import async_pipeline
+from backend.analysis.news_driven_trade_plan import NewsDrivenTradePlanService
+from backend.ingestion.fast_news import FastNewsSource
 
 paper_trading = PaperTradingEngine()
 risk_manager = RiskManager()
@@ -134,6 +137,12 @@ sentiment_service = SentimentService(
     gemini_model=settings.gemini_model,
     gemini_api_key=settings.gemini_api_key,
     gemini_base_url=settings.gemini_base_url,
+)
+fast_news_source = FastNewsSource(refresh_interval=30.0)
+news_trade_plan_service = NewsDrivenTradePlanService(
+    sentiment_service=sentiment_service,
+    nlp_engine=nlp_sentiment,
+    fast_news=fast_news_source,
 )
 supported_timeframes = tuple(dict.fromkeys((*settings.timeframes, settings.timeframe)))
 stores = {
@@ -389,6 +398,8 @@ async def lifespan(app: FastAPI):
     hmm_predict_task = asyncio.create_task(hmm_predict_loop())
     transformer_task = asyncio.create_task(transformer_train_loop())
     nlp_task = asyncio.create_task(refresh_nlp_loop())
+    news_trade_plan_task = asyncio.create_task(refresh_news_trade_plan_loop())
+    fast_news_task = asyncio.create_task(refresh_fast_news_loop())
     onchain_task = asyncio.create_task(refresh_onchain_loop())
     cross_exchange_task = asyncio.create_task(refresh_cross_exchange_loop())
     pipeline_task = asyncio.create_task(pipeline_health_loop())
@@ -401,6 +412,8 @@ async def lifespan(app: FastAPI):
     self_heal.register("hmm_predict", hmm_predict_task, lambda: asyncio.create_task(hmm_predict_loop()))
     self_heal.register("transformer_train", transformer_task, lambda: asyncio.create_task(transformer_train_loop()))
     self_heal.register("nlp_refresh", nlp_task, lambda: asyncio.create_task(refresh_nlp_loop()))
+    self_heal.register("news_trade_plan", news_trade_plan_task, lambda: asyncio.create_task(refresh_news_trade_plan_loop()))
+    self_heal.register("fast_news", fast_news_task, lambda: asyncio.create_task(refresh_fast_news_loop()))
     self_heal.register("onchain_refresh", onchain_task, lambda: asyncio.create_task(refresh_onchain_loop()))
     self_heal.register("cross_exchange", cross_exchange_task, lambda: asyncio.create_task(refresh_cross_exchange_loop()))
     self_heal.register("pipeline_health", pipeline_task, lambda: asyncio.create_task(pipeline_health_loop()))
@@ -426,6 +439,8 @@ async def lifespan(app: FastAPI):
         panel_freshness.register_panel("ml_xgboost", threshold=1200.0)
         panel_freshness.register_panel("transformer_forecast", threshold=1500.0)
         panel_freshness.register_panel("hmm_regime", threshold=180.0)
+        panel_freshness.register_panel("news_trade_plan", threshold=150.0)
+        panel_freshness.register_panel("fast_news", threshold=45.0)
         await panel_freshness.start()
     except Exception:
         logger.exception("Panel freshness monitor registration failed")
@@ -1108,6 +1123,19 @@ async def scan_symbols(symbols: str | None = None) -> list[dict]:
     ]
 
 
+@app.get("/scanner/events")
+async def scanner_events(tf: str = Query(default=None)) -> dict:
+    """Get macro events calendar near current market time."""
+    use_tf = tf if tf and tf in supported_timeframes else settings.timeframe
+    store = stores.get(use_tf)
+    candles = store.get_candles() if store else []
+    if not candles:
+        return {"is_event_day": False, "events_in_48h": 0, "calendar": [], "anomalies": []}
+    wire_candles = [{"t": c.timestamp, "o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume} for c in candles]
+    result = scan_events(wire_candles, lookback=100)
+    return result
+
+
 @app.get("/risk")
 async def get_risk_status() -> dict:
     """Get current risk management status."""
@@ -1415,6 +1443,32 @@ def _fallback_headlines() -> list[dict]:
     ]
 
 
+@app.get("/news/trade-plan")
+@limiter.limit("30/minute")
+async def news_trade_plan(request: Request) -> dict:
+    try:
+        snapshot = news_trade_plan_service.get_snapshot()
+        if snapshot is None:
+            primary_tf = _valid_timeframe(settings.timeframe)
+            store = stores.get(primary_tf) if stores else None
+            wire_candles = []
+            current_price = None
+            if store and store.candles:
+                try:
+                    wire_candles = [_candle_to_event_format(c) for c in list(store.candles)[-200:]]
+                    current_price = store.live_candle.close if store.live_candle else store.candles[-1].close
+                except Exception as e:
+                    logger.warning(f"news_trade_plan candle conversion: {e}")
+            snapshot = news_trade_plan_service.refresh(
+                candles=wire_candles,
+                current_price=current_price,
+            )
+        return to_wire(snapshot)
+    except Exception as e:
+        logger.exception("news/trade-plan failed")
+        return {"error": str(e), "active_plans": [], "recent_activity": [], "macro_events": [], "sentiment_label": "neutral", "sentiment_score": 0.0, "updated_at": None, "source_count": 0}
+
+
 @app.get("/ai-ict")
 async def ai_ict(
     request: Request,
@@ -1654,6 +1708,11 @@ def _payload_analysis_timestamp(payload: dict) -> int | None:
     if isinstance(candle, dict) and candle.get("timestamp"):
         return int(candle["timestamp"])
     return None
+
+
+def _candle_to_event_format(c) -> dict:
+    """Convert a Candle dataclass to the dict format expected by scan_for_events."""
+    return {"t": c.timestamp, "h": c.high, "l": c.low, "c": c.close, "v": c.volume}
 
 
 def _review_matches_payload(review, payload: dict) -> bool:
@@ -2049,6 +2108,49 @@ async def refresh_nlp_loop() -> None:
             self_heal.heartbeat("nlp_refresh", ok=False, error=str(e))
             logger.exception("nlp sentiment refresh failed")
         await asyncio.sleep(300)
+
+
+async def refresh_news_trade_plan_loop() -> None:
+    """Refresh news-driven trade plans and broadcast to frontend."""
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(15)
+    while True:
+        try:
+            primary_tf = _valid_timeframe(settings.timeframe)
+            store = stores.get(primary_tf)
+            wire_candles = [_candle_to_event_format(c) for c in (list(store.candles)[-200:] if store.candles else [])] if store else []
+            current_price = store.live_candle.close if store and store.live_candle else (store.candles[-1].close if store and store.candles else None)
+            snapshot = news_trade_plan_service.refresh(
+                candles=wire_candles,
+                current_price=current_price,
+            )
+            await manager.broadcast({
+                "update_type": "news_trade_plan",
+                "symbol": settings.symbol,
+                "news_trade_plan": to_wire(snapshot),
+            })
+            panel_freshness.mark_updated("news_trade_plan")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("news trade plan refresh failed")
+        await asyncio.sleep(120)
+
+
+async def refresh_fast_news_loop() -> None:
+    """Fast news ingestion and broadcast — runs every 30s."""
+    from backend.utils.panel_freshness import panel_freshness
+    await asyncio.sleep(5)
+    async for snapshot in fast_news_source.continuous_refresh():
+        try:
+            await manager.broadcast({
+                "update_type": "fast_news",
+                "symbol": settings.symbol,
+                "fast_news": to_wire(snapshot),
+            })
+            panel_freshness.mark_updated("fast_news")
+        except Exception:
+            logger.exception("fast news broadcast failed")
 
 
 async def refresh_onchain_loop() -> None:

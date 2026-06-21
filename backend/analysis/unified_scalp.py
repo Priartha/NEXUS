@@ -38,6 +38,7 @@ from backend.analysis.cvd_divergence import cvd_divergence_detector
 from backend.analysis.funding_strategy import funding_strategy
 from backend.analysis.adaptive_sltp import adaptive_sltp as adaptive_sltp_engine
 from backend.analysis.trader_profile import get_trader_profile
+from backend.analysis.momentum import momentum_engine
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,18 @@ from backend.models.types import (
     Swing,
     FuturesContext,
 )
+
+
+# Momentum thresholds — can be overridden for tuning
+MOMENTUM_STRONG_THRESHOLD = 0.78
+MOMENTUM_MODERATE_THRESHOLD = 0.15
+MOMENTUM_BLOCK_CONFLUENCE_FALLBACK = True  # Skip confluence path if momentum is insufficient
+
+# Trader profile — from CSV analysis (79 BTCUSD trades, 65.8% WR, 2.30 PF)
+TRADER_GOOD_HOURS_IST = {0, 2, 3, 4, 7, 8, 9, 11, 14, 16, 20, 22, 23}
+TRADER_BLOCKED_HOURS_IST = {1, 15, 17, 18, 19, 21}
+TRADER_RISK_PER_TRADE_PCT = 0.008
+TRADER_POST_WIN_COOLDOWN_MIN = 30
 
 
 def _ema(values: list[float], period: int) -> float:
@@ -134,7 +147,7 @@ class UnifiedScalpEngine:
         self._spot_vol_avg: float = 0.0
         self._liq_cache: list[dict] = []
         self._last_signal_ts: int = 0
-        self._signal_cooldown_ms: int = 1 * 60 * 1000
+        self._signal_cooldown_ms: int = 45 * 1000
         self._use_candle_timestamp_for_cooldown: bool = True
         # Multi-exchange aggregated price for cross-validation
         self._last_aggregated_price: float | None = None
@@ -279,6 +292,24 @@ class UnifiedScalpEngine:
             now_ms = int(candles[-1].timestamp)
         else:
             now_ms = int(time.time() * 1000)
+
+        # ── Trader profile hour filter ──
+        # Only generate signals during the user's best trading hours (IST)
+        try:
+            utc_dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+            ist_hour = (utc_dt.hour + 5) % 24
+            ist_min = utc_dt.minute + 30
+            if ist_min >= 60:
+                ist_hour = (ist_hour + 1) % 24
+            if ist_hour in TRADER_BLOCKED_HOURS_IST or ist_hour not in TRADER_GOOD_HOURS_IST:
+                ctx = ScalpContext(timestamp=now_ms)
+                ctx.trade_blocked_reasons = [f"Outside trading hours (IST hour {ist_hour})"]
+                ctx.ai_brain_active = True
+                ctx.ai_intelligence = get_agent().get_agent_status()
+                return ctx
+        except Exception:
+            pass
+
         if len(candles) < 20:
             ctx = ScalpContext(timestamp=now_ms)
             ctx.ai_brain_active = True
@@ -328,6 +359,13 @@ class UnifiedScalpEngine:
 
         # Detect CVD divergences
         cvd_divs = cvd_divergence_detector.detect()
+
+        # ── PRIMARY SIGNAL: Genuine Momentum Detection ─────────────────
+        # This runs FIRST, before any ICT/confluence analysis.
+        # If momentum is real and strong enough, we trade it directly.
+        momentum = momentum_engine.detect(ordered, order_flow)
+        momentum_strong = momentum.is_valid(min_strength=MOMENTUM_STRONG_THRESHOLD)
+        momentum_moderate = momentum.is_valid(min_strength=MOMENTUM_MODERATE_THRESHOLD)
 
         # Compute funding rate strategy signal
         funding_strat_signal = funding_strategy.compute(
@@ -396,6 +434,116 @@ class UnifiedScalpEngine:
                 macro_event_block=has_macro_event_block,
                 trade_blocked_reasons=blockers,
                 common_sense_warnings=common_sense_blockers,
+            )
+            ctx.futures_leverage = settings.futures_leverage
+            ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
+            ctx.ai_brain_active = True
+            ctx.ai_intelligence = get_agent().get_agent_status()
+            return ctx
+
+        signals: list[ScalpSignal] = []
+
+        # ── MOMENTUM-FIRST SIGNAL PATH ─────────────────────────────────
+        # Genuine momentum beats everything else. If momentum is real, trade it.
+        if momentum_strong and not self._sl_cooldown_active(now_ms, momentum.direction, self._sl_breached_at_ms):
+            try:
+                import sys as _sys; getattr(_sys, 'stderr').write(f"MOMENTUM_FIRED: strength={momentum.strength:.3f} dir={momentum.direction}\n")
+            except Exception: pass
+            atr_mom = _atr(ordered, 14)
+            # Scale SL/TP with momentum strength
+            sl_mult = 1.2 + momentum.strength * 1.8
+            tp_mult = 2.0 + momentum.strength * 3.0
+            sl_dist = atr_mom * sl_mult
+            tp_dist = atr_mom * tp_mult
+            price_mom = closes[-1]
+            if momentum.direction == "bullish":
+                sl = price_mom - sl_dist
+                tp = price_mom + tp_dist
+                sig = self._build_signal(
+                    "LONG BTCUSD", price_mom, atr_mom, momentum.strength,
+                    momentum.reasons + [f"Momentum {momentum.strength:.0%}"],
+                    now_ms, funding_rate,
+                    candle=ordered[-1], regime=regime,
+                )
+            else:
+                sl = price_mom + sl_dist
+                tp = price_mom - tp_dist
+                sig = self._build_signal(
+                    "SHORT BTCUSD", price_mom, atr_mom, momentum.strength,
+                    momentum.reasons + [f"Momentum {momentum.strength:.0%}"],
+                    now_ms, funding_rate,
+                    candle=ordered[-1], regime=regime,
+                )
+            if sig:
+                # Override SL/TP for tight scalping
+                sig.sl_level = round(sl, 2)
+                sig.target_1 = round(price_mom + tp_dist * 0.5 if momentum.direction == "bullish" else price_mom - tp_dist * 0.5, 2)
+                sig.target_2 = round(tp, 2)
+                sig.risk_reward = round(abs(tp - price_mom) / abs(price_mom - sl), 2)
+                # Sync backtest-required attributes
+                sig.stop_loss = sig.sl_level
+                sig.entry = price_mom
+                sig.exit_price = sig.target_2
+                sig.side = "buy" if momentum.direction == "bullish" else "sell"
+                # Override entry zone to match intended entry — backtest's CompatSignal
+                # uses (entry_zone_low + entry_zone_high) / 2 as entry price
+                sig.entry_zone_low = round(price_mom * 0.999, 2)
+                sig.entry_zone_high = round(price_mom * 1.001, 2)
+                signals = [sig]
+                logger.info("MOMENTUM SIGNAL: %s (strength=%.2f, sl=%.1f, tp=%.1f)",
+                            sig.signal_type, momentum.strength, sl, tp)
+                self._last_signal_ts = int(ordered[-1].timestamp if self._use_candle_timestamp_for_cooldown else now_ms)
+
+        # If momentum is moderate, boost confluence scores with it
+        # Otherwise, fall through to the existing ICT/confluence scoring path
+
+        if signals:
+            ctx = ScalpContext(
+                timestamp=now_ms,
+                order_flow=order_flow,
+                funding=funding,
+                funding_rate=funding_rate,
+                open_interest=oi,
+                liquidation_levels=liq_levels,
+                vwap=vwap,
+                volume_profile=vol_profile,
+                liquidity_sweeps=sweeps,
+                wick_rejection=wick,
+                signals=signals,
+                rsi_3=round(rsi_3, 2),
+                spot_volume_ok=True,
+                macro_event_block=False,
+                trade_blocked_reasons=[],
+                common_sense_warnings=cs_advisory,
+            )
+            ctx.futures_leverage = min(settings.scalp_max_leverage, 10)
+            ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
+            ctx.ai_brain_active = True
+            ctx.ai_intelligence = get_agent().get_agent_status()
+            return ctx
+
+        # ── NO MOMENTUM → NO TRADE ─────────────────────────────────────────
+        # When momentum is insufficient, skip the ICT/confluence path entirely.
+        # The confluence path was designed for ICT patterns and produces mostly
+        # losing trades when run without those pattern inputs.
+        if MOMENTUM_BLOCK_CONFLUENCE_FALLBACK:
+            ctx = ScalpContext(
+                timestamp=now_ms,
+                order_flow=order_flow,
+                funding=funding,
+                funding_rate=funding_rate,
+                open_interest=oi,
+                liquidation_levels=liq_levels,
+                vwap=vwap,
+                volume_profile=vol_profile,
+                liquidity_sweeps=sweeps,
+                wick_rejection=wick,
+                signals=[],
+                rsi_3=round(rsi_3, 2),
+                spot_volume_ok=all(b != "Spot volume below 30-day average" for b in blockers),
+                macro_event_block=has_macro_event_block,
+                trade_blocked_reasons=blockers,
+                common_sense_warnings=cs_advisory,
             )
             ctx.futures_leverage = settings.futures_leverage
             ctx.estimated_funding_cost_8h = round(funding_rate.current_rate * 3 * 100, 4) if funding_rate else 0.0
@@ -474,6 +622,24 @@ class UnifiedScalpEngine:
             # Correlation check — cross-asset confirmation
             if not correlation.get("aligned", True):
                 long_score -= 0.03; short_score -= 0.03
+            # Momentum boost (moderate momentum amplifies confluence)
+            if momentum_moderate:
+                if momentum.direction == "bullish":
+                    long_score += 0.12 * momentum.strength
+                    long_reasons.append(f"Momentum boost ({momentum.strength:.0%})")
+                elif momentum.direction == "bearish":
+                    short_score += 0.12 * momentum.strength
+                    short_reasons.append(f"Momentum boost ({momentum.strength:.0%})")
+                if momentum.volume_confirmation:
+                    if momentum.direction == "bullish":
+                        long_score += 0.05; long_reasons.append("Momentum vol confirmed")
+                    elif momentum.direction == "bearish":
+                        short_score += 0.05; short_reasons.append("Momentum vol confirmed")
+                if momentum.breakout_confirmation:
+                    if momentum.direction == "bullish":
+                        long_score += 0.08; long_reasons.append("Momentum breakout")
+                    elif momentum.direction == "bearish":
+                        short_score += 0.08; short_reasons.append("Momentum breakout")
         except Exception:
             pass
 
@@ -493,9 +659,9 @@ class UnifiedScalpEngine:
         has_funding = self._cur_funding != 0.0
         missing_sources = sum([not has_oi, not has_funding])
         if missing_sources > 0:
-            max_possible = 1.0 - (missing_sources * 0.11)
+            max_possible = 1.0 - (missing_sources * 0.08)
             normalized_threshold = threshold * (max_possible / 1.0)
-            threshold = max(normalized_threshold, 0.35)
+            threshold = max(normalized_threshold, 0.30)
 
         # Record candle data for pattern intelligence engine
         try:
@@ -550,7 +716,7 @@ class UnifiedScalpEngine:
             xgboost_score=xgb_score_val, xgboost_reasons=xgb_reasons,
         )
 
-        # ── Blend Agent + Ensemble (60% agent, 40% ensemble) ──
+        # ── Blend Agent + Ensemble (dynamic weight based on agreement) ──
         agent_has_signal = agent_result.get('signal') in ('LONG', 'SHORT')
         ensemble_direction = ensemble_result.direction
         ensemble_confidence = ensemble_result.confidence
@@ -565,9 +731,16 @@ class UnifiedScalpEngine:
         # Ensemble score: map direction + confidence to [0, 1]
         ensemble_long_score = 0.5 + (ensemble_confidence * 0.5 if ensemble_direction == 'long' else -ensemble_confidence * 0.5)
 
-        # Final blend
-        blended_long = agent_long * 0.6 + ensemble_long_score * 0.4
-        blended_confidence = agent_conf * 0.6 + ensemble_confidence * 0.4
+        # Dynamic blend: when agent and ensemble agree, weight more heavily
+        agent_agrees = (agent_long >= 0.5 and ensemble_long_score >= 0.5) or (agent_long < 0.5 and ensemble_long_score < 0.5)
+        if agent_agrees:
+            agent_weight = 0.65 if agent_has_signal else 0.50
+        else:
+            agent_weight = 0.55 if agent_has_signal else 0.40
+
+        # Final blend with dynamic weights
+        blended_long = agent_long * agent_weight + ensemble_long_score * (1.0 - agent_weight)
+        blended_confidence = agent_conf * agent_weight + ensemble_confidence * (1.0 - agent_weight)
 
         # Apply signal quality multiplier from self-optimizer's historical learning
         if hasattr(self_optimizer, 'score_signal'):
@@ -676,14 +849,17 @@ class UnifiedScalpEngine:
             ctx.ai_intelligence = get_agent().get_agent_status()
             return ctx
 
-        # Block signals in consolidation regime - no clear directional edge
+        # Block signals in consolidation regime - allow only if agent has high confidence
+        range_override = False
         if regime and regime.phase == "consolidation":
-            return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: consolidation regime - no directional edge"])
+            if agent_has_signal and agent_result.get('confidence', 0) > 0.70:
+                range_override = True
+            else:
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: consolidation regime - no directional edge"])
 
         # Block signals in range_bound — agent can override if confident
-        range_override = False
         if regime and regime.phase == "range_bound":
-            if agent_has_signal and agent_result.get('confidence', 0) > 0.65:
+            if agent_has_signal and agent_result.get('confidence', 0) > 0.60:
                 range_override = True  # Agent overrides range block with high confidence
             else:
                 range_high = regime.range_high or max(c.high for c in ordered[-20:])
@@ -1049,7 +1225,7 @@ class UnifiedScalpEngine:
                 tr = max(c.high - c.low, abs(c.high - p.close), abs(c.low - p.close))
                 atr_values.append(tr)
             median_atr = sorted(atr_values)[len(atr_values) // 2] if atr_values else atr
-            if median_atr > 0 and atr > median_atr * 3.0:
+            if median_atr > 0 and atr > median_atr * 5.0:
                 blockers.append(f"ATR spike: {atr:.2f} vs median {median_atr:.2f} ({atr/median_atr:.1f}x) — abnormal volatility")
 
         # 2. Stale Data Guard — feed failure detection
@@ -1124,18 +1300,18 @@ class UnifiedScalpEngine:
         # Use adaptive edge threshold if provided
         edge_threshold = adaptive_edge if adaptive_edge is not None else settings.scalp_min_directional_edge
 
-        if winning_reasons is not None and len(winning_reasons) < 3:
-            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 3+)")
+        if winning_reasons is not None and len(winning_reasons) < 2:
+            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 2+)")
             return blockers[:6]
         is_trending = regime is not None and regime.phase == "trending"
         is_consolidation = regime is not None and regime.phase == "consolidation"
         is_range_bound = regime is not None and regime.phase == "range_bound"
         if is_consolidation:
-            min_edge = max(0.05, edge_threshold)
-        elif is_range_bound:
             min_edge = max(0.04, edge_threshold)
-        else:
+        elif is_range_bound:
             min_edge = max(0.03, edge_threshold)
+        else:
+            min_edge = max(0.02, edge_threshold)
         if edge < min_edge:
             blockers.append(f"Directional edge {edge:.2f} below {min_edge:.2f}")
 
@@ -1144,10 +1320,10 @@ class UnifiedScalpEngine:
         trend_strength = abs(ema21 - ema50) / price if price > 0 else 0.0
 
         if is_trending:
-            if trend_strength < 0.0005:
+            if trend_strength < 0.0003:
                 blockers.append(f"Trend strength {trend_strength:.4f} too weak for trending")
         else:
-            if trend_strength < 0.0003:
+            if trend_strength < 0.0002:
                 blockers.append(f"Trend strength {trend_strength:.4f} too flat")
 
         recent_volume = sum(c.volume for c in candles[-5:]) / min(len(candles), 5)
@@ -1155,11 +1331,11 @@ class UnifiedScalpEngine:
         base_volume = sum(c.volume for c in base_window) / len(base_window) if base_window else recent_volume
         volume_ratio = recent_volume / base_volume if base_volume > 0 else 1.0
         if is_trending:
-            vol_threshold = 0.50
-        elif is_consolidation:
             vol_threshold = 0.40
+        elif is_consolidation:
+            vol_threshold = 0.30
         else:
-            vol_threshold = 0.45
+            vol_threshold = 0.35
         if volume_ratio < vol_threshold:
             blockers.append(f"Volume impulse {volume_ratio:.2f} below {vol_threshold:.2f}")
 
@@ -1485,9 +1661,9 @@ class UnifiedScalpEngine:
                 tp2_mult = asltp_result.tp_atr_multiple * 1.5
                 reasons.append(asltp_result.description)
             else:
-                sl_mult = max(2.0, 4.0 - score * 2)
-                tp1_mult = 3.0 + score * 3
-                tp2_mult = 5.0 + score * 6
+                sl_mult = max(1.8, 3.5 - score * 2)
+                tp1_mult = 2.5 + score * 3
+                tp2_mult = 4.5 + score * 6
         except Exception:
             # Fallback to V4 adaptive SL/TP
             if adaptive_sltp:
@@ -1558,7 +1734,7 @@ class UnifiedScalpEngine:
         base_leverage = max(3, int(10 * score * kelly_boost))
         leverage = min(settings.scalp_max_leverage, base_leverage + 5)
         
-        confidence = "HIGH" if score >= 0.65 else ("MEDIUM" if score >= 0.50 else "LOW")
+        confidence = "HIGH" if score >= 0.60 else ("MEDIUM" if score >= 0.45 else "LOW")
         time_limit = now_ms + settings.scalp_max_hold_minutes * 60 * 1000
         funding_impact = (fr.current_rate * 3 * 100) if fr else 0.0
         if funding_impact != 0:
@@ -1575,7 +1751,14 @@ class UnifiedScalpEngine:
             max_hold_minutes=settings.scalp_max_hold_minutes,
             partial_exit_pct=settings.scalp_partial_exit_pct,
             funding_impact_pct=round(funding_impact, 4),
+            entry=round(entry, 2),
+            stop_loss=round(sl, 2),
+            exit_price=round(t2, 2),
+            side="buy" if is_long else "sell",
+            model="momentum" if "Momentum" in (reasons[-1] if reasons else "") else "confluence",
         )
+        signal.entry_zone_low = round(entry_zone_low, 2)
+        signal.entry_zone_high = round(entry_zone_high, 2)
         if enriched_features:
             signal.enriched_features = enriched_features
         return signal

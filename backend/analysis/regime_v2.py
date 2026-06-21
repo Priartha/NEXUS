@@ -79,23 +79,26 @@ def detect_market_regime(
     # 1. TRENDING: requires structure + EMA alignment + price direction + efficiency
     is_structured_trend = structure["is_trending"] and structure["direction"] != "neutral"
     is_ema_aligned = emas_aligned_bullish or emas_aligned_bearish
-    is_efficient = efficiency > 0.40  # Stricter threshold
+    is_efficient = efficiency > 0.30
 
-    # Require price direction to match structure (stronger threshold)
+    # Require price direction to match structure
     price_direction_matches = (
         (structure["direction"] == "bullish" and is_price_rising) or
         (structure["direction"] == "bearish" and is_price_falling)
     )
     
     # Require minimum EMA spread for trending
-    has_ema_spread = ema_spread_pct > 0.20
+    has_ema_spread = ema_spread_pct > 0.15
+
+    # Count how many trending conditions are met (out of 5)
+    trend_conditions_met = sum([is_structured_trend, is_ema_aligned, is_efficient, price_direction_matches, has_ema_spread])
 
     # Classify regime in priority order (first match wins)
-    if is_structured_trend and is_ema_aligned and is_efficient and price_direction_matches and has_ema_spread:
+    if trend_conditions_met >= 4:
         # Strong trending
         phase = "trending"
         bias = structure["direction"]
-        confidence = min(0.92, 0.55 + efficiency * 0.25 + (0.10 if is_ema_aligned else 0))
+        confidence = min(0.92, 0.50 + efficiency * 0.25 + (0.10 if is_ema_aligned else 0))
         reasons = [
             f"Structure: {structure['pattern']}",
             f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned",
@@ -103,11 +106,11 @@ def detect_market_regime(
             f"Price: {price_change_pct:+.2f}%",
             f"EMA spread: {ema_spread_pct:.2f}%",
         ]
-    elif is_structured_trend and is_ema_aligned and price_direction_matches and has_ema_spread:
-        # Weaker trend - still trending but lower confidence
+    elif trend_conditions_met >= 3:
+        # Moderate trending - still trending but lower confidence
         phase = "trending"
         bias = structure["direction"]
-        confidence = min(0.80, 0.45 + efficiency * 0.20)
+        confidence = min(0.75, 0.40 + efficiency * 0.20)
         reasons = [
             f"Structure: {structure['pattern']}",
             f"EMA {'bull' if emas_aligned_bullish else 'bear'} aligned",
@@ -125,7 +128,7 @@ def detect_market_regime(
         bias = "bearish"
         confidence = 0.70
         reasons = ["Buy-side sweep rejected below mid"]
-    elif width_pct < 1.5 and atr_compression < 0.20:
+    elif width_pct < 1.0 and atr_compression < 0.15:
         # 3. CONSOLIDATION: tight range, low volatility
         phase = "consolidation"
         bias = "neutral"
@@ -135,7 +138,7 @@ def detect_market_regime(
             f"ATR compressed: {atr_compression:.2f}",
             f"Volume: {volume_state}",
         ]
-    elif not is_structured_trend and atr_compression < 0.30:
+    elif not is_structured_trend and atr_compression < 0.35:
         # 2. RANGING: no structure, price oscillating
         phase = "range_bound"
         bias = "neutral"
@@ -145,6 +148,12 @@ def detect_market_regime(
             f"ATR compressed: {atr_compression:.2f}",
             f"Width: {width_pct:.2f}%",
         ]
+    elif is_structured_trend:
+        # Has structure direction but doesn't meet all criteria - still trending
+        phase = "trending"
+        bias = structure["direction"]
+        confidence = 0.50
+        reasons = [f"Weak trend: {structure['pattern']} (eff={efficiency:.2f}, ema={ema_spread_pct:.2f}%)"]
     else:
         # Default: trending with neutral bias (will be caught by safety check below)
         phase = "trending"

@@ -4,10 +4,10 @@ import {
   AlertTriangle,
   Brain,
   Activity,
-  Cpu,
   Target,
   Shield,
   DollarSign,
+  Zap,
 } from 'lucide-react'
 
 interface XGBState {
@@ -40,6 +40,20 @@ interface FundingState {
   max_leverage: number
 }
 
+interface HMMState {
+  is_trained: boolean
+  n_regimes: number
+  version: number
+  history_length: number
+  last_train_ts: number
+}
+
+interface OptimizerState {
+  total_attempts: number
+  kept_attempts: number
+  current_params: Record<string, number>
+}
+
 interface CVDState {
   active_divergences: number
   last_divergence_ts?: number
@@ -56,6 +70,8 @@ interface AdaptiveSLTPState {
 
 export function MLDashboardPanel() {
   const [xgboost, setXGBoost] = useState<XGBState | null>(null)
+  const [hmm, setHMM] = useState<HMMState | null>(null)
+  const [optimizer, setOptimizer] = useState<OptimizerState | null>(null)
   const [rl, setRL] = useState<RLState | null>(null)
   const [funding, setFunding] = useState<FundingState | null>(null)
   const [cvd, setCVD] = useState<CVDState | null>(null)
@@ -67,8 +83,10 @@ export function MLDashboardPanel() {
   const fetchAll = useCallback(async () => {
     setTrainMsg(null)
     try {
-      const [xgbRes, rlRes, fundRes, cvdRes, adaptRes] = await Promise.allSettled([
+      const [xgbRes, hmmRes, optRes, rlRes, fundRes, cvdRes, adaptRes] = await Promise.allSettled([
         fetch('/ml/xgboost/state'),
+        fetch('/hmm/regime'),
+        fetch('/ml/optimizer/status'),
         fetch('/rl/sizing'),
         fetch('/funding/strategy/state'),
         fetch('/cvd/divergence'),
@@ -78,6 +96,14 @@ export function MLDashboardPanel() {
       if (xgbRes.status === 'fulfilled') {
         const json = await xgbRes.value.json()
         setXGBoost(json)
+      }
+      if (hmmRes.status === 'fulfilled') {
+        const json = await hmmRes.value.json()
+        setHMM({ is_trained: json.is_trained, n_regimes: json.n_regimes, version: json.version, history_length: json.history_length, last_train_ts: json.last_train_ts })
+      }
+      if (optRes.status === 'fulfilled') {
+        const json = await optRes.value.json()
+        setOptimizer({ total_attempts: json.total_attempts, kept_attempts: json.kept_attempts, current_params: json.current_params || json.params })
       }
       if (rlRes.status === 'fulfilled') {
         const json = await rlRes.value.json()
@@ -109,11 +135,22 @@ export function MLDashboardPanel() {
     return () => clearInterval(interval)
   }, [fetchAll])
 
-  const triggerTrain = async () => {
+  const triggerTrainXGB = async () => {
     try {
       const res = await fetch('/ml/xgboost/train', { method: 'POST' })
       const json = await res.json()
-      setTrainMsg(json.status === 'ok' ? `Trained: accuracy=${json.result?.accuracy?.toFixed(3) ?? '?'}` : `Error: ${json.detail}`)
+      setTrainMsg(json.status === 'ok' ? `XGBoost trained: accuracy=${json.result?.accuracy?.toFixed(3) ?? '?'}` : `Error: ${json.detail}`)
+      fetchAll()
+    } catch (e: any) {
+      setTrainMsg(`Failed: ${e.message}`)
+    }
+  }
+
+  const triggerTrainHMM = async () => {
+    try {
+      const res = await fetch('/hmm/train', { method: 'POST' })
+      const json = await res.json()
+      setTrainMsg(json.status === 'ok' ? `HMM trained: ${json.result?.message ?? 'OK'}` : `Error: ${json.detail}`)
       fetchAll()
     } catch (e: any) {
       setTrainMsg(`Failed: ${e.message}`)
@@ -159,7 +196,7 @@ export function MLDashboardPanel() {
   return (
     <div className="ml-dashboard-panel">
       <div className="dsp-header">
-        <h2><Cpu size={14} /> ML Model Dashboard</h2>
+        <h2><Brain size={14} /> ML Model Dashboard</h2>
         <div className="dsp-controls">
           {trainMsg && <span className="dsp-badge">{trainMsg}</span>}
           <button className="dsp-btn" onClick={fetchAll} title="Refresh">
@@ -177,11 +214,12 @@ export function MLDashboardPanel() {
       )}
 
       <div className="ml-dashboard-grid">
-        <ModelCard title="XGBoost Classifier" icon={<Brain size={14} />} onAction={triggerTrain} actionLabel="Retrain">
-          <StatRow label="Trained" value={xgboost?.is_trained ? 'Yes' : 'No'} color={xgboost?.is_trained ? '#22c55e' : '#ef4444'} />
+        <ModelCard title="XGBoost Classifier" icon={<Brain size={14} />} onAction={triggerTrainXGB} actionLabel="Retrain">
+          <StatRow label="Trained" value={xgboost?.is_trained ? 'Yes (Auto)' : 'No'} color={xgboost?.is_trained ? '#22c55e' : '#ef4444'} />
           <StatRow label="Accuracy" value={xgboost?.accuracy !== null && xgboost?.accuracy !== undefined ? `${(xgboost.accuracy * 100).toFixed(1)}%` : '--'} />
           <StatRow label="Predictions" value={xgboost?.total_predictions?.toLocaleString() ?? '0'} />
           {(xgboost?.last_train_ts ?? 0) > 0 && <StatRow label="Last Train" value={new Date(xgboost!.last_train_ts!).toLocaleString()} />}
+          <StatRow label="Auto-Training" value="Every 15 min" color="#8ab4f8" />
           {xgboost?.top_features && xgboost.top_features.length > 0 && (
             <div className="ml-features">
               <span className="ml-stat-label">Top Features:</span>
@@ -196,6 +234,27 @@ export function MLDashboardPanel() {
               ))}
             </div>
           )}
+        </ModelCard>
+
+        <ModelCard title="HMM Regime Classifier" icon={<Activity size={14} />} onAction={triggerTrainHMM} actionLabel="Retrain">
+          <StatRow label="Trained" value={hmm?.is_trained ? 'Yes (Auto)' : 'No'} color={hmm?.is_trained ? '#22c55e' : '#ef4444'} />
+          <StatRow label="Regime Count" value={hmm?.n_regimes?.toString() ?? '--'} />
+          <StatRow label="History Samples" value={hmm?.history_length?.toLocaleString() ?? '0'} />
+          <StatRow label="Version" value={`v${hmm?.version ?? 0}`} />
+          {(hmm?.last_train_ts ?? 0) > 0 && <StatRow label="Last Train" value={new Date(hmm!.last_train_ts!).toLocaleString()} />}
+          <StatRow label="Auto-Training" value="Every 60 min" color="#8ab4f8" />
+        </ModelCard>
+
+        <ModelCard title="Self-Optimizer" icon={<Zap size={14} />}>
+          <StatRow label="Optimizations" value={optimizer?.total_attempts?.toString() ?? '0'} />
+          <StatRow label="Kept (Improved)" value={optimizer?.kept_attempts?.toString() ?? '0'} color={optimizer?.kept_attempts ? '#22c55e' : undefined} />
+          {optimizer?.current_params && (
+            <>
+              <StatRow label="Min Confidence" value={optimizer.current_params.min_confidence ? `${(optimizer.current_params.min_confidence * 100).toFixed(0)}%` : '--'} />
+              <StatRow label="Risk/Trade" value={optimizer.current_params.risk_per_trade_pct ? `${(optimizer.current_params.risk_per_trade_pct * 100).toFixed(1)}%` : '--'} />
+            </>
+          )}
+          <StatRow label="Auto-Optimization" value="Every 60 min" color="#8ab4f8" />
         </ModelCard>
 
         <ModelCard title="RL Position Sizing" icon={<Target size={14} />}>

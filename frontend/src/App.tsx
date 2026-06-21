@@ -2,29 +2,16 @@ import { Component, useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   AlertTriangle,
-  BarChart2,
-  BarChart3,
-  Bell,
   Brain,
   BrainCircuit,
   Compass,
-  Crosshair,
-  Cpu,
-  Database,
-  Globe,
   Gauge,
-  Layers,
-  MessageSquare,
   Orbit,
-  Radar,
   RefreshCw,
   Settings,
-  Shield,
   Target,
-  Timer,
   TrendingDown,
   TrendingUp,
-  Users,
   Zap,
 } from 'lucide-react'
 import './App.css'
@@ -56,8 +43,10 @@ import { PositionManagerPanel } from './components/PositionManagerPanel'
 import { HMMRegimePanel } from './components/HMMRegimePanel'
 import { OnChainPanel } from './components/OnChainPanel'
 import { NLPSentimentPanel } from './components/NLPSentimentPanel'
+import { NewsDrivenTradePlanPanel } from './components/NewsDrivenTradePlanPanel'
 import { TransformerForecastPanel } from './components/TransformerForecastPanel'
 import { MLDashboardPanel } from './components/MLDashboardPanel'
+import { PanelNav } from './components/PanelNav'
 import { useAudioAlerts } from './hooks/useAudioAlerts'
 import { useMarketSocket } from './hooks/useMarketSocket'
 import { useChartStore } from './store/chartStore'
@@ -67,37 +56,7 @@ import {
   formatTimestamp,
 } from './types/market'
 
-export type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab' | 'position' | 'hmm' | 'onchain' | 'nlp' | 'forecast' | 'ml-dash'
-const PANEL_VIEWS: readonly PanelView[] = [
-  'signals',
-  'scalp',
-  'brain',
-  'ai-lab',
-  'risk',
-  'momentum',
-  'patterns',
-  'depth',
-  'institutional',
-  'trades',
-  'backtest',
-  'forward',
-  'log',
-  'position',
-  'ml-dash',
-  'hmm',
-  'nlp',
-  'forecast',
-  'onchain',
-  'alerts',
-  'alert-config',
-  'analytics',
-  'config',
-  'multi-exchange',
-  'model',
-  'db-status',
-  'psychology',
-]
-
+export type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab' | 'position' | 'hmm' | 'onchain' | 'nlp' | 'news' | 'forecast' | 'ml-dash'
 type RuntimeGuardProps = {
   children: ReactNode
 }
@@ -418,181 +377,7 @@ function AppShell() {
         </div>
 
         <aside className="side-panel">
-          <div className="panel-nav">
-            <div className="panel-switch">
-            {PANEL_VIEWS.map((view) => (
-              <button
-                key={view}
-                className={panelView === view ? 'active' : ''}
-                onClick={() => setPanelView(view)}
-              >
-                {view === 'signals' && (
-                  <>
-                    <Target size={11} />
-                    Signals
-                  </>
-                )}
-                {view === 'patterns' && (
-                  <>
-                    <Layers size={11} />
-                    Pats
-                    {patterns.length > 0 && <span className="badge-count">{patterns.length}</span>}
-                  </>
-                )}
-                {view === 'depth' && (
-                  <>
-                    <Activity size={11} />
-                    Depth
-                  </>
-                )}
-                {view === 'alerts' && (
-                  <>
-                    <AlertTriangle size={11} />
-                    Alerts
-                  </>
-                )}
-                {view === 'institutional' && (
-                  <>
-                    <Cpu size={11} />
-                    Inst.
-                  </>
-                )}
-                {view === 'risk' && (
-                  <>
-                    <Shield size={11} />
-                    Risk
-                  </>
-                )}
-                {view === 'momentum' && (
-                  <>
-                    <Zap size={11} />
-                    Momentum
-                  </>
-                )}
-                {view === 'scalp' && (
-                  <>
-                    <Crosshair size={11} />
-                    Scalp
-                  </>
-                )}
-                {view === 'brain' && (
-                  <>
-                    <BrainCircuit size={11} />
-                    AI Brain
-                  </>
-                )}
-                {view === 'ai-lab' && (
-                  <>
-                    <Radar size={11} />
-                    AI Lab
-                  </>
-                )}
-                {view === 'psychology' && (
-                  <>
-                    <Brain size={11} />
-                    Psych
-                  </>
-                )}
-                {view === 'trades' && (
-                  <>
-                    <TrendingUp size={11} />
-                    Paper
-                  </>
-                )}
-                {view === 'backtest' && (
-                  <>
-                    <Timer size={11} />
-                    BT
-                  </>
-                )}
-                {view === 'log' && (
-                  <>
-                    <Activity size={11} />
-                    Log
-                  </>
-                )}
-                {view === 'position' && (
-                  <>
-                    <Target size={11} />
-                    Positions
-                  </>
-                )}
-                {view === 'ml-dash' && (
-                  <>
-                    <Cpu size={11} />
-                    ML
-                  </>
-                )}
-                {view === 'hmm' && (
-                  <>
-                    <Activity size={11} />
-                    Regime
-                  </>
-                )}
-                {view === 'nlp' && (
-                  <>
-                    <MessageSquare size={11} />
-                    NLP
-                  </>
-                )}
-                {view === 'forecast' && (
-                  <>
-                    <BarChart3 size={11} />
-                    Forecast
-                  </>
-                )}
-                {view === 'onchain' && (
-                  <>
-                    <Users size={11} />
-                    OnChain
-                  </>
-                )}
-                {view === 'forward' && (
-                  <>
-                    <Activity size={11} />
-                    Demo
-                  </>
-                )}
-                {view === 'config' && (
-                  <>
-                    <Settings size={11} />
-                    Config
-                  </>
-                )}
-                {view === 'analytics' && (
-                  <>
-                    <BarChart2 size={11} />
-                    Analytics
-                  </>
-                )}
-                {view === 'multi-exchange' && (
-                  <>
-                    <Globe size={11} />
-                    Exchanges
-                  </>
-                )}
-                {view === 'model' && (
-                  <>
-                    <BrainCircuit size={11} />
-                    Model
-                  </>
-                )}
-                {view === 'db-status' && (
-                  <>
-                    <Database size={11} />
-                    DB
-                  </>
-                )}
-                {view === 'alert-config' && (
-                  <>
-                    <Bell size={11} />
-                    Alert CFG
-                  </>
-                )}
-              </button>
-            ))}
-            </div>
-          </div>
+          <PanelNav panelView={panelView} setPanelView={setPanelView} />
 
           <div className="panel-main">
           <PanelGuard key={panelView} panelView={panelView}>
@@ -961,6 +746,12 @@ function AppShell() {
           {panelView === 'nlp' && (
             <div className="panel-content">
               <NLPSentimentPanel />
+            </div>
+          )}
+
+          {panelView === 'news' && (
+            <div className="panel-content">
+              <NewsDrivenTradePlanPanel />
             </div>
           )}
 

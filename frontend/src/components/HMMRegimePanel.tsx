@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { RefreshCw, AlertTriangle, TrendingUp, TrendingDown, Minus, Activity } from 'lucide-react'
+import { RefreshCw, AlertTriangle, TrendingUp, TrendingDown, Minus, Activity, Play } from 'lucide-react'
 
 interface HMMState {
   is_trained: boolean
@@ -35,6 +35,8 @@ export function HMMRegimePanel() {
   const [state, setState] = useState<HMMState | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [trainMsg, setTrainMsg] = useState<string | null>(null)
+  const [training, setTraining] = useState(false)
 
   const fetchState = useCallback(async () => {
     try {
@@ -55,6 +57,21 @@ export function HMMRegimePanel() {
     const interval = setInterval(fetchState, 30000)
     return () => clearInterval(interval)
   }, [fetchState])
+
+  const triggerTrain = async () => {
+    setTraining(true)
+    setTrainMsg(null)
+    try {
+      const res = await fetch('/hmm/train', { method: 'POST' })
+      const json = await res.json()
+      setTrainMsg(json.status === 'ok' ? 'Training complete' : `Error: ${json.detail}`)
+      fetchState()
+    } catch (e: any) {
+      setTrainMsg(`Failed: ${e.message}`)
+    } finally {
+      setTraining(false)
+    }
+  }
 
   const getRegimeIcon = (regime: string) => {
     if (regime.includes('bull')) return <TrendingUp size={14} />
@@ -84,11 +101,20 @@ export function HMMRegimePanel() {
       <div className="dsp-header">
         <h2><Activity size={14} /> HMM Regime Classifier</h2>
         <div className="dsp-controls">
+          <button className="dsp-btn" onClick={triggerTrain} disabled={training} title="Train Now">
+            <Play size={12} /> {training ? 'Training...' : 'Train'}
+          </button>
           <button className="dsp-btn" onClick={fetchState} title="Refresh">
             <RefreshCw size={12} />
           </button>
         </div>
       </div>
+
+      {trainMsg && (
+        <div className="dsp-info" style={{ padding: '6px 12px', fontSize: 12, color: '#8ab4f8', background: 'rgba(138, 180, 248, 0.08)', borderRadius: 6, marginBottom: 8 }}>
+          {trainMsg}
+        </div>
+      )}
 
       {error && (
         <div className="dsp-error">
@@ -125,6 +151,12 @@ export function HMMRegimePanel() {
               <div className="dsp-stat-info">
                 <span className="dsp-stat-label">Version</span>
                 <span className="dsp-stat-value">v{state.version}</span>
+              </div>
+            </div>
+            <div className="dsp-stat">
+              <div className="dsp-stat-info">
+                <span className="dsp-stat-label">Auto-Training</span>
+                <span className="dsp-stat-value" style={{ color: '#8ab4f8' }}>Every 60m</span>
               </div>
             </div>
           </div>

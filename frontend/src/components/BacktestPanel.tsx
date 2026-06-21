@@ -111,7 +111,7 @@ export default function BacktestPanel() {
   const [running, setRunning] = useState(false)
   const [candleCount, setCandleCount] = useState(5000)
   const [positionSize, setPositionSize] = useState(2.0)
-  const [maxHoldBars, setMaxHoldBars] = useState(6)
+  const [maxHoldBars, setMaxHoldBars] = useState(12)
   const [trailingStop, setTrailingStop] = useState(true)
   const [tpMultiplier, setTpMultiplier] = useState(1.5)
   const [trades, setTrades] = useState<any[]>([])
@@ -143,11 +143,6 @@ export default function BacktestPanel() {
     }
   }, [])
 
-  useEffect(() => {
-    fetchRuns()
-    fetchFormats()
-  }, [fetchRuns])
-
   const fetchFormats = useCallback(async () => {
     try {
       const data = await safeFetchJson('/csv-import/formats')
@@ -156,6 +151,11 @@ export default function BacktestPanel() {
       console.error('Failed to fetch CSV formats')
     }
   }, [])
+
+  useEffect(() => {
+    fetchRuns()
+    fetchFormats()
+  }, [fetchRuns, fetchFormats])
 
   const runBacktest = async () => {
     setRunning(true)
