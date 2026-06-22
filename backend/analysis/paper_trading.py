@@ -238,6 +238,7 @@ class PaperTradingEngine:
                 realistic_entry = max(entry_zone_low, min(entry_zone_high, realistic_entry))
 
         risk_per_unit = abs(best.entry - best.stop_loss)
+        risk_per_trade = balance * effective_risk_pct
         qty = risk_per_trade / risk_per_unit if risk_per_unit > 0 else 0.001
 
         slippage = self._compute_slippage(realistic_entry, qty, candle)

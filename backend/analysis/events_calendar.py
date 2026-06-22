@@ -263,8 +263,8 @@ def scan_for_events(candles: list[dict], lookback: int = 100) -> dict[str, Any]:
     latest = candles[-1]
     ts = latest["t"]
 
-    # Calendar events within 48h
-    calendar = get_events_near(ts, window_hours=48)
+    # Calendar events within 7 days
+    calendar = get_events_near(ts, window_hours=168)
 
     # Volatility anomalies
     anomalies = detect_event_volatility(candles, lookback)

@@ -635,6 +635,25 @@
   border: 1px solid var(--border-subtle);
 }
 
+.hero-volume-badge,
+.hero-sentiment-badge,
+.hero-trend-blocked {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-left: 4px;
+}
+.hero-volume-badge.expanding { background: var(--accent-green-dim); color: var(--accent-green); border: 1px solid var(--accent-green-glow); }
+.hero-volume-badge.compressed { background: var(--accent-yellow-dim); color: var(--accent-yellow); border: 1px solid var(--accent-yellow-glow); }
+.hero-volume-badge.normal { background: var(--accent-blue-dim); color: var(--accent-blue); border: 1px solid var(--accent-blue-glow); }
+.hero-sentiment-badge.bullish { background: var(--accent-green-dim); color: var(--accent-green); border: 1px solid var(--accent-green-glow); }
+.hero-sentiment-badge.bearish { background: var(--accent-red-dim); color: var(--accent-red); border: 1px solid var(--accent-red-glow); }
+.hero-sentiment-badge.neutral { background: var(--accent-yellow-dim); color: var(--accent-yellow); border: 1px solid var(--accent-yellow-glow); }
+.hero-trend-blocked { background: var(--accent-red-dim); color: var(--accent-red); border: 1px solid var(--accent-red-glow); }
+
 .feed-alert {
   margin: 8px 20px;
   padding: 8px 12px;
@@ -1118,6 +1137,16 @@
 .note:hover {
   border-left-color: var(--accent-blue-glow);
 }
+
+.facts dd.bullish { color: var(--accent-green); }
+.facts dd.bearish { color: var(--accent-red); }
+.facts dd.trend-blocked { color: var(--accent-red); }
+.vol-expanding { color: var(--accent-green); }
+.vol-compressed { color: var(--accent-yellow); }
+.vol-normal { color: var(--accent-blue); }
+.bias-source { font-size: 9px; font-weight: 500; }
+.bias-source.sentiment { color: var(--accent-yellow); }
+.bias-source.technical { color: var(--text-muted); }
 
 /* ═══════════════════════════════════════════════════════════
    SR GRID
@@ -4582,6 +4611,16 @@
   text-overflow: ellipsis;
 }
 
+.headline-backend-score {
+  font-variant-numeric: tabular-nums;
+}
+
+.headline-trusted-badge {
+  color: var(--accent-green);
+  font-size: 10px;
+  margin-left: 2px;
+}
+
 .headline-title {
   color: var(--text-primary);
   font-size: 10px;
@@ -7134,6 +7173,19 @@
   border-radius: 4px;
   background: var(--bg-card);
 }
+
+.scalping-signal .signal-trend {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-left: auto;
+  margin-right: 6px;
+}
+.scalping-signal .signal-trend.aligned { background: var(--accent-green-dim); color: var(--accent-green); }
+.scalping-signal .signal-trend.blocked { background: var(--accent-red-dim); color: var(--accent-red); }
 
 .scalping-signal .signal-zones {
   display: flex;

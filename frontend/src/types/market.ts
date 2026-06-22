@@ -963,6 +963,8 @@ export interface NewsTradePlanSnapshot {
   active_plans: NewsDrivenPlan[]
   recent_activity: NewsActivityEntry[]
   macro_events: { name: string; hours_until: number; impact: string; date: string }[]
+  live_headlines?: FastHeadline[]
+  breaking_headlines?: FastHeadline[]
   sentiment_label: string
   sentiment_score: number
   updated_at?: number | null

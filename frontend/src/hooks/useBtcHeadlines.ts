@@ -7,6 +7,8 @@ export interface BtcHeadline {
   url: string
   published_at: number
   sentiment: 'bullish' | 'bearish' | 'neutral'
+  score?: number
+  source_reputation?: number
   body?: string
 }
 
@@ -37,8 +39,10 @@ export function useBtcHeadlines() {
             source: item.source,
             url: item.url,
             published_at: item.published_at,
+            score: item.score,
+            source_reputation: item.source_reputation,
             body: item.body ?? '',
-            sentiment: inferSentiment(item.title, item.body ?? '', sentiment?.label),
+            sentiment: inferSentiment(item.title, sentiment?.label, item.score),
           }))
           setHeadlines(withSentiment)
           setActiveSource('NEXUS Proxy')
@@ -81,7 +85,8 @@ function getFallbackHeadlines(_marketSentiment?: string): BtcHeadline[] {
       url: '#',
       published_at: now,
       sentiment: 'bullish',
-      body: 'Bitcoin hash rate data shows network security is robust.',
+      score: 0.5,
+      source_reputation: 1.0,
     },
     {
       title: 'On-chain metrics: BTC exchange reserves declining — long-term holders accumulating',
@@ -89,7 +94,8 @@ function getFallbackHeadlines(_marketSentiment?: string): BtcHeadline[] {
       url: '#',
       published_at: now - 3600,
       sentiment: 'bullish',
-      body: 'Exchange outflows suggest accumulation by long-term holders.',
+      score: 0.4,
+      source_reputation: 1.0,
     },
     {
       title: 'BTC dominance holding steady — market in consolidation phase',
@@ -97,7 +103,8 @@ function getFallbackHeadlines(_marketSentiment?: string): BtcHeadline[] {
       url: '#',
       published_at: now - 7200,
       sentiment: 'neutral',
-      body: 'Bitcoin dominance metrics show consolidation.',
+      score: 0.0,
+      source_reputation: 1.0,
     },
     {
       title: 'Lightning Network capacity reaches new highs — adoption growing',
@@ -105,7 +112,8 @@ function getFallbackHeadlines(_marketSentiment?: string): BtcHeadline[] {
       url: '#',
       published_at: now - 10800,
       sentiment: 'bullish',
-      body: 'Lightning Network growth indicates increasing BTC utility.',
+      score: 0.6,
+      source_reputation: 1.0,
     },
     {
       title: 'BTC institutional inflows continue — ETF demand remains steady',
@@ -113,13 +121,18 @@ function getFallbackHeadlines(_marketSentiment?: string): BtcHeadline[] {
       url: '#',
       published_at: now - 14400,
       sentiment: 'bullish',
-      body: 'Institutional Bitcoin products seeing consistent inflows.',
+      score: 0.3,
+      source_reputation: 1.0,
     },
   ]
 }
 
-function inferSentiment(title: string, body: string, marketSentiment?: string): 'bullish' | 'bearish' | 'neutral' {
-  const text = `${title} ${body}`.toLowerCase()
+function inferSentiment(title: string, marketSentiment?: string, backendScore?: number): 'bullish' | 'bearish' | 'neutral' {
+  if (backendScore != null) {
+    if (backendScore > 0.1) return 'bullish'
+    if (backendScore < -0.1) return 'bearish'
+  }
+  const text = title.toLowerCase()
   const bullishKeywords = ['surge', 'rally', 'bull', 'breakout', 'all-time high', 'ath', 'gain', 'up', 'rise', 'soar', 'adoption', 'institutional', 'etf', 'halving', 'accumulation', 'accumulating', 'hash rate', 'lightning', 'growing', 'new high', 'strong', 'robust', 'outflow', 'declining reserves', 'inflows', 'demand']
   const bearishKeywords = ['crash', 'dump', 'bear', 'breakdown', 'sell-off', 'selloff', 'drop', 'down', 'fall', 'plunge', 'regulation', 'ban', 'hack', 'scam', 'fraud', 'liquidation', 'fear', 'weak', 'decline', 'inflow rising reserves']
 

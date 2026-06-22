@@ -16,6 +16,7 @@ from backend.models.types import (
     NewsDrivenPlan,
     NewsTradePlanSnapshot,
     SentimentSnapshot,
+    to_wire,
 )
 
 
@@ -260,10 +261,20 @@ class NewsDrivenTradePlanService:
         if len(self._active_plans) > self._max_plans:
             self._active_plans = self._active_plans[: self._max_plans]
 
+        # Include live headlines from fast news in snapshot for REST fallback
+        live_h = []
+        breaking_h = []
+        if self._fast_news and self._fast_news.current:
+            fh = self._fast_news.current
+            live_h = [to_wire(h) for h in (fh.headlines or [])[:15]]
+            breaking_h = [to_wire(h) for h in (fh.breaking or [])[:10]]
+
         snapshot = NewsTradePlanSnapshot(
             active_plans=self._active_plans[:10],
             recent_activity=self._activity_log[-50:],
             macro_events=macro.get("calendar", [])[:15],
+            live_headlines=live_h,
+            breaking_headlines=breaking_h,
             sentiment_label=sentiment_snapshot.label,
             sentiment_score=sentiment_snapshot.score,
             updated_at=now_ms,

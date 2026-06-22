@@ -20,6 +20,7 @@ function SentimentIcon({ sentiment, size = 12 }: { sentiment: string; size?: num
 function HeadlineItem({ headline }: { headline: BtcHeadline }) {
   const colors = SENTIMENT_COLORS[headline.sentiment] ?? SENTIMENT_COLORS.neutral
   const timeAgo = getTimeAgo(headline.published_at)
+  const rep = headline.source_reputation ?? 0.5
 
   return (
     <a
@@ -33,9 +34,15 @@ function HeadlineItem({ headline }: { headline: BtcHeadline }) {
         <div className="headline-sentiment" style={{ color: colors.text }}>
           <SentimentIcon sentiment={headline.sentiment} size={11} />
           <span>{headline.sentiment.toUpperCase()}</span>
+          {headline.score != null && (
+            <span className="headline-backend-score" style={{ color: headline.score > 0 ? 'var(--accent-green)' : headline.score < 0 ? 'var(--accent-red)' : 'var(--text-muted)', fontSize: 9, marginLeft: 4 }}>
+              {headline.score > 0 ? '+' : ''}{headline.score.toFixed(2)}
+            </span>
+          )}
         </div>
         <div className="headline-meta">
           <span className="headline-source">{headline.source}</span>
+          {rep >= 0.9 && <span className="headline-trusted-badge" title="Trusted source">✓</span>}
           <span className="headline-time">{timeAgo}</span>
         </div>
       </div>

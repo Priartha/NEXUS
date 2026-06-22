@@ -12,6 +12,9 @@ export const SignalView = memo(function SignalView() {
   const sentiment = useChartStore((s) => s.sentiment)
   const aiIct = useChartStore((s) => s.aiIct)
   const liquidityEvents = useChartStore((s) => s.liquidityEvents)
+  const scalpContext = useChartStore((s) => s.scalpContext)
+  const primaryScalpSignal = scalpContext?.signals?.[0] ?? null
+  const sentimentOverride = sentiment && sentiment.score > 0.3 && sentiment.confidence > 0.3
   const latest = candles.at(-1)
   const latestLiquidityEvent = liquidityEvents.at(-1)
   const fallbackSR = (() => {
@@ -69,14 +72,18 @@ export const SignalView = memo(function SignalView() {
         <section>
           <h2><Activity size={13} /> Regime Detail</h2>
           <dl className="facts compact">
-            <div><dt>Volume State</dt><dd>{regime.volume_state}</dd></div>
+            <div><dt>Phase</dt><dd>{regime.phase.replaceAll('_', ' ')}</dd></div>
+            <div><dt>Bias</dt><dd className={regime.bias === 'bullish' ? 'bullish' : regime.bias === 'bearish' ? 'bearish' : ''}>{regime.bias} {sentimentOverride ? <span className="bias-source sentiment">(sentiment)</span> : <span className="bias-source technical">(technical)</span>}</dd></div>
+            <div><dt>Confidence</dt><dd>{(regime.confidence * 100).toFixed(0)}%</dd></div>
+            <div><dt>Volume State</dt><dd className={`vol-${regime.volume_state}`}>{regime.volume_state}</dd></div>
             <div><dt>Efficiency</dt><dd>{regime.efficiency_ratio.toFixed(2)}</dd></div>
             <div><dt>ATR Compression</dt><dd>{regime.atr_compression.toFixed(2)}</dd></div>
             <div><dt>Width %</dt><dd>{(regime.width_pct * 100).toFixed(1)}%</dd></div>
             <div><dt>Range High</dt><dd>{formatPrice(regime.range_high)}</dd></div>
             <div><dt>Range Low</dt><dd>{formatPrice(regime.range_low)}</dd></div>
-            <div><dt>Bias</dt><dd>{regime.bias}</dd></div>
-            <div><dt>Confidence</dt><dd>{(regime.confidence * 100).toFixed(0)}%</dd></div>
+            {primaryScalpSignal && (
+              <div><dt>Trend Aligned</dt><dd className={(primaryScalpSignal.signal_type.includes('LONG') && regime.bias === 'bullish') || (primaryScalpSignal.signal_type.includes('SHORT') && regime.bias === 'bearish') ? 'bullish' : 'trend-blocked'}>{(primaryScalpSignal.signal_type.includes('LONG') && regime.bias === 'bullish') || (primaryScalpSignal.signal_type.includes('SHORT') && regime.bias === 'bearish') ? 'YES' : 'BLOCKED'}</dd></div>
+            )}
           </dl>
         </section>
       )}
@@ -139,7 +146,9 @@ export const SignalView = memo(function SignalView() {
         <dl className="facts compact">
           <div><dt>Stop Loss</dt><dd>0.5× ATR</dd></div>
           <div><dt>Breakeven</dt><dd>@ 0.5R</dd></div>
-          <div><dt>TP1 / TP2</dt><dd>1.0R / 1.5R</dd></div>
+          <div><dt>TP1 / TP2</dt><dd>{(() => { if (!regime) return '1.0R / 1.5R'; if (regime.phase === 'range_bound') return '0.5R / 1.0R'; if (regime.phase === 'consolidation') return '0.3R / 0.6R'; if (regime.phase === 'trending') return '1.0R / 2.0R'; return '0.7R / 1.4R'; })()}</dd></div>
+          <div><dt>Regime Context</dt><dd>{regime ? `TP tightened for ${regime.phase.replaceAll('_', ' ')}` : '--'}</dd></div>
+          <div><dt>Trend Alignment</dt><dd>{regime && regime.bias !== 'neutral' ? `Longs only in ${regime.bias === 'bullish' ? 'bullish' : 'bearish'} bias` : 'No active bias'}</dd></div>
           <div><dt>Max Hold</dt><dd>12 bars (1h)</dd></div>
           <div><dt>ADX Filter</dt><dd>Yes (&gt;20)</dd></div>
           <div><dt>Limit Orders</dt><dd>Yes</dd></div>

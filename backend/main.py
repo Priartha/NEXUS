@@ -8,7 +8,6 @@ import logging
 import logging.config
 import time
 import uuid
-import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -1295,64 +1294,31 @@ async def sentiment(request: Request) -> dict:
 @limiter.limit("30/minute")
 async def btc_news(request: Request) -> list[dict]:
     headlines: list[dict] = []
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
-        tasks = [
-            _fetch_rss(client, "CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
-            _fetch_rss(client, "CoinTelegraph", "https://cointelegraph.com/rss"),
-            _fetch_rss(client, "Decrypt", "https://decrypt.co/feed"),
+
+    # Use fast_news cache (refreshes every 15s) instead of re-fetching RSS
+    if fast_news_source and fast_news_source.current and fast_news_source.current.headlines:
+        for h in fast_news_source.current.headlines[:25]:
+            h_dict = to_wire(h)
+            h_dict["body"] = ""
+            headlines.append(h_dict)
+
+    # Still fetch auxiliary data (Fear & Greed, price) fresh
+    async with httpx.AsyncClient(timeout=5.0, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+        aux_results = await asyncio.gather(
             _fetch_fear_greed(client),
             _fetch_coinbase_price(client),
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for result in results:
+            return_exceptions=True,
+        )
+    for result in aux_results:
         if isinstance(result, list):
             headlines.extend(result)
-        elif isinstance(result, Exception):
-            logger.warning(f"News source failed: {result}")
 
     headlines.sort(key=lambda h: h.get("published_at", 0), reverse=True)
 
     if not headlines:
         headlines = _fallback_headlines()
 
-    return headlines[:20]
-
-
-async def _fetch_rss(client: httpx.AsyncClient, source_name: str, url: str) -> list[dict]:
-    try:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        root = ET.fromstring(resp.text)
-        items = root.findall(".//item")
-        headlines = []
-        for item in items[:15]:
-            title = item.findtext("title", "").strip()
-            link = item.findtext("link", "#").strip()
-            desc = item.findtext("description", "").strip()
-            pub_date = item.findtext("pubDate", "")
-
-            ts = 0
-            if pub_date:
-                try:
-                    from email.utils import parsedate_to_datetime
-                    ts = int(parsedate_to_datetime(pub_date).timestamp())
-                except Exception:
-                    ts = int(time.time())
-
-            if title:
-                headlines.append({
-                    "title": title,
-                    "source": source_name,
-                    "url": link,
-                    "published_at": ts,
-                    "body": _strip_html(desc)[:300],
-                })
-        logger.info(f"Loaded {len(headlines)} headlines from {source_name} RSS")
-        return headlines
-    except Exception as e:
-        logger.warning(f"RSS fetch failed for {source_name}: {e}")
-        return []
+    return headlines[:25]
 
 
 async def _fetch_fear_greed(client: httpx.AsyncClient) -> list[dict]:
@@ -1394,15 +1360,6 @@ async def _fetch_coinbase_price(client: httpx.AsyncClient) -> list[dict]:
     except Exception as e:
         logger.warning(f"Coinbase price fetch failed: {e}")
         return []
-
-
-def _strip_html(text: str) -> str:
-    import re
-    if not text:
-        return ""
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"&\w+;", " ", text)
-    return text.strip()
 
 
 def _fallback_headlines() -> list[dict]:
@@ -2022,7 +1979,7 @@ async def hmm_train_loop() -> None:
         except Exception as e:
             self_heal.heartbeat("hmm_train", ok=False, error=str(e))
             logger.exception("hmm train loop failed")
-        await asyncio.sleep(3600)
+        await asyncio.sleep(300)
 
 
 async def rl_train_loop() -> None:

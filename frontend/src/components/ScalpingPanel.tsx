@@ -5,6 +5,7 @@ import { useChartStore } from '../store/chartStore'
 export const ScalpingPanel = memo(function ScalpingPanel() {
   const scalp = useChartStore((state) => state.scalpContext)
   const scalpRisk = useChartStore((state) => state.scalpRisk)
+  const regime = useChartStore((state) => state.regime)
 
   const data = useMemo(() => {
     if (!scalp) return null
@@ -24,8 +25,9 @@ export const ScalpingPanel = memo(function ScalpingPanel() {
       spotVolumeOk: scalp.spot_volume_ok,
       macroBlocked: scalp.macro_event_block,
       risk: scalpRisk,
+      bias: regime?.bias ?? 'neutral',
     }
-  }, [scalp, scalpRisk])
+  }, [scalp, scalpRisk, regime])
 
   if (!data) {
     return (
@@ -45,6 +47,12 @@ export const ScalpingPanel = memo(function ScalpingPanel() {
     if (type.includes('LONG')) return '#22c55e'
     if (type.includes('SHORT')) return '#ef4444'
     return '#94a3b8'
+  }
+  const isTrendAligned = (type: string, bias: string) => {
+    if (bias === 'neutral') return true
+    if (type.includes('LONG') && bias === 'bullish') return true
+    if (type.includes('SHORT') && bias === 'bearish') return true
+    return false
   }
 
   return (
@@ -305,6 +313,11 @@ export const ScalpingPanel = memo(function ScalpingPanel() {
                   <span className="signal-type" style={{ color: getSignalTypeColor(signal.signal_type) }}>
                     {signal.signal_type}
                   </span>
+                  {data.bias !== 'neutral' && (
+                    <span className={`signal-trend ${isTrendAligned(signal.signal_type, data.bias) ? 'aligned' : 'blocked'}`}>
+                      {isTrendAligned(signal.signal_type, data.bias) ? 'TREND' : 'BLOCKED'}
+                    </span>
+                  )}
                   <span className="signal-confidence" style={{ color: getConfidenceColor(signal.confidence) }}>
                     {signal.confidence}
                   </span>

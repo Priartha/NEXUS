@@ -4,6 +4,7 @@ import asyncio
 import html
 import json
 import logging
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -21,9 +22,26 @@ FAST_RSS_FEEDS: list[tuple[str, str]] = [
     ("Decrypt", "https://decrypt.co/feed"),
     ("Bitcoin Magazine", "https://bitcoinmagazine.com/.rss/full/"),
     ("CryptoSlate", "https://cryptoslate.com/feed/"),
+    ("The Block", "https://www.theblock.co/rss"),
+    ("Blockworks", "https://blockworks.co/feed/"),
 ]
 
 CRYPTOCOMPARE_NEWS_URL = "https://min-api.cryptocompare.com/data/v2/news/"
+
+# Source reputation weight (higher = more trusted)
+SOURCE_REPUTATION: dict[str, float] = {
+    "CoinDesk": 1.0,
+    "CoinTelegraph": 0.9,
+    "The Block": 1.0,
+    "Blockworks": 0.9,
+    "Decrypt": 0.8,
+    "Bitcoin Magazine": 1.0,
+    "CryptoSlate": 0.7,
+    "CryptoCompare": 0.6,
+}
+
+MIN_HEADLINE_LENGTH = 15
+URL_REGEX = re.compile(r'^https?://[^\s/$.?#].[^\s]*$', re.IGNORECASE)
 
 BULLISH_TERMS = {
     "surge": 1.2, "rally": 1.1, "breakout": 1.2, "bull": 0.8, "buy": 0.5,
@@ -53,6 +71,7 @@ class FastHeadline:
     score: float = 0.0
     is_breaking: bool = False
     categories: list[str] = field(default_factory=list)
+    source_reputation: float = 1.0
 
 
 @dataclass
@@ -88,13 +107,14 @@ def _parse_rss(source: str, xml_text: str) -> list[FastHeadline]:
     headlines: list[FastHeadline] = []
     try:
         root = ET.fromstring(xml_text)
-        for item in root.findall(".//item")[:15]:
+        for item in root.findall(".//item")[:20]:
             title = item.findtext("title", "").strip()
             link = item.findtext("link", "#").strip()
             pub_date = item.findtext("pubDate", "")
             desc = item.findtext("description", "")
             text = f"{title} {desc}".lower()
-            if not title or not _is_relevant(text):
+            title_clean = html.unescape(title).strip()
+            if not _is_valid_headline(title_clean, link) or not _is_relevant(text):
                 continue
             ts = 0
             if pub_date:
@@ -104,16 +124,27 @@ def _parse_rss(source: str, xml_text: str) -> list[FastHeadline]:
                 except Exception:
                     ts = int(time.time())
             headlines.append(FastHeadline(
-                title=html.unescape(title).strip(),
+                title=title_clean,
                 source=source,
                 url=link,
                 published_at=ts,
                 score=round(_score_text(text), 3),
                 is_breaking=_is_breaking(title),
+                source_reputation=SOURCE_REPUTATION.get(source, 0.5),
             ))
     except ET.ParseError as e:
         logger.warning(f"RSS parse error for {source}: {e}")
     return headlines
+
+
+def _is_valid_headline(title: str, url: str) -> bool:
+    if not title or len(title.strip()) < MIN_HEADLINE_LENGTH:
+        return False
+    if not url or url == "#":
+        return False
+    if not URL_REGEX.match(url):
+        return False
+    return True
 
 
 def _is_breaking(title: str) -> bool:
@@ -125,7 +156,7 @@ def _is_breaking(title: str) -> bool:
 
 
 class FastNewsSource:
-    def __init__(self, refresh_interval: float = 30.0, max_headlines: int = 50):
+    def __init__(self, refresh_interval: float = 15.0, max_headlines: int = 75):
         self._refresh_interval = refresh_interval
         self._max_headlines = max_headlines
         self._headlines: list[FastHeadline] = []
@@ -144,7 +175,7 @@ class FastNewsSource:
     async def refresh(self) -> FastNewsSnapshot:
         new_headlines: list[FastHeadline] = []
 
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
             rss_tasks = [
                 self._fetch_rss(client, source, url)
                 for source, url in FAST_RSS_FEEDS
@@ -165,6 +196,13 @@ class FastNewsSource:
                 self._seen_urls.add(h.url)
                 deduped.append(h)
 
+        # Boost score from source reputation
+        for h in deduped:
+            rep = SOURCE_REPUTATION.get(h.source.split(":")[-1].strip(), 0.5)
+            h.source_reputation = rep
+            if rep > 0:
+                h.score = round(max(-1.0, min(1.0, h.score * (0.7 + 0.3 * rep))), 3)
+
         deduped.sort(key=lambda h: h.published_at or 0, reverse=True)
         self._headlines = (deduped + self._headlines)[:self._max_headlines]
 
@@ -173,7 +211,7 @@ class FastNewsSource:
 
         breaking = [h for h in deduped if h.is_breaking]
         self._snapshot = FastNewsSnapshot(
-            headlines=self._headlines[:30],
+            headlines=self._headlines[:40],
             breaking=breaking[:10],
             source_count=len({h.source for h in self._headlines}),
             updated_at=int(time.time() * 1000),
@@ -189,12 +227,6 @@ class FastNewsSource:
         except Exception as e:
             logger.debug(f"RSS fetch failed for {source}: {e}")
             return []
-
-    async def continuous_refresh(self) -> AsyncIterator[FastNewsSnapshot]:
-        while True:
-            snapshot = await self.refresh()
-            yield snapshot
-            await asyncio.sleep(self._refresh_interval)
 
     async def _fetch_cryptocompare(self, client: httpx.AsyncClient) -> list[FastHeadline]:
         try:
@@ -214,7 +246,8 @@ class FastNewsSource:
                 published = item.get("published_on", 0)
                 categories = item.get("categories", "")
                 text = f"{title} {body}".lower()
-                if not title or not _is_relevant(text):
+                title_clean = html.unescape(title).strip()
+                if not _is_valid_headline(title_clean, url) or not _is_relevant(text):
                     continue
                 headlines.append(FastHeadline(
                     title=html.unescape(title).strip(),
@@ -224,6 +257,7 @@ class FastNewsSource:
                     score=round(_score_text(text), 3),
                     is_breaking=_is_breaking(title),
                     categories=[c.strip() for c in categories.split("|") if c.strip()],
+                    source_reputation=SOURCE_REPUTATION.get(source_name, 0.5),
                 ))
             return headlines
         except Exception as e:

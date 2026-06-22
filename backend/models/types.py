@@ -610,6 +610,8 @@ class NewsTradePlanSnapshot:
     active_plans: list[NewsDrivenPlan] = field(default_factory=list)
     recent_activity: list[NewsActivityEntry] = field(default_factory=list)
     macro_events: list[dict] = field(default_factory=list)
+    live_headlines: list[dict] = field(default_factory=list)
+    breaking_headlines: list[dict] = field(default_factory=list)
     sentiment_label: str = "neutral"
     sentiment_score: float = 0.0
     updated_at: Optional[int] = None

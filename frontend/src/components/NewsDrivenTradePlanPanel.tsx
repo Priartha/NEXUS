@@ -136,9 +136,10 @@ export function NewsDrivenTradePlanPanel() {
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<'plans' | 'activity' | 'events'>('plans')
 
+  const display = wsSnapshot ?? snapshot
   const fastNews = wsFastNews
-  const breakingHeadlines = fastNews?.breaking ?? []
-  const recentFastHeadlines = fastNews?.headlines?.slice(0, 10) ?? []
+  const breakingHeadlines = fastNews?.breaking ?? display?.breaking_headlines ?? []
+  const recentFastHeadlines = fastNews?.headlines?.slice(0, 10) ?? display?.live_headlines?.slice(0, 10) ?? []
 
   const fetchPlan = useCallback(async () => {
     try {
@@ -169,8 +170,6 @@ export function NewsDrivenTradePlanPanel() {
     }
     return () => { clearInterval(id); setLoading(false); setError(null) }
   }, [planFetcher])
-
-  const display = wsSnapshot ?? snapshot
 
   return (
     <div className="ntp-panel">
@@ -313,7 +312,7 @@ export function NewsDrivenTradePlanPanel() {
         {tab === 'events' && (
           <>
             {!display || display.macro_events.length === 0 ? (
-              <p className="empty-state">No macro events in the next 48h.</p>
+              <p className="empty-state">No macro events in the next 7 days.</p>
             ) : (
               <div className="ntp-events-list ntp-events-detailed">
                 {display.macro_events.map((ev, i) => (

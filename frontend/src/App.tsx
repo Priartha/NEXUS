@@ -213,6 +213,8 @@ function AppShell() {
   const scalpRiskStatus = scalpRisk
     ? `Risk ${scalpRisk.total_open}/${scalpRisk.max_positions} | loss ${scalpRisk.daily_loss_pct.toFixed(2)}%/${scalpRisk.max_daily_loss_pct.toFixed(2)}%`
     : 'Risk --'
+  const trendBlocked = scalpBlockers.some((r) => r.startsWith('Blocked:') && r.includes('against'))
+  const sentimentOverride = sentiment && sentiment.score > 0.3 && sentiment.confidence > 0.3
   const selectedRiskReward: number | 'best' = 'best'
   const [panelView, setPanelView] = useState<PanelView>('signals')
   const latestLiquidityEvent = liquidityEvents.at(-1)
@@ -307,7 +309,7 @@ function AppShell() {
           <Metric
             icon={<Compass size={16} />}
             label="Regime"
-            value={regime.phase.replaceAll('_', ' ')}
+            value={`${regime.phase.replaceAll('_', ' ')} / ${regime.volume_state}`}
           />
         )}
         {psychology && (
@@ -333,6 +335,21 @@ function AppShell() {
             <div className="hero-signal-group">
               <span className="hero-label">SCALP SIGNAL</span>
               <strong className="hero-action">{finalAction}</strong>
+              {regime && (
+                <span className={`hero-volume-badge ${regime.volume_state}`}>
+                  VOL {regime.volume_state.toUpperCase()}
+                </span>
+              )}
+              {sentimentOverride && (
+                <span className={`hero-sentiment-badge ${sentiment.label === 'bullish' ? 'bullish' : sentiment.label === 'bearish' ? 'bearish' : 'neutral'}`}>
+                  SENTIMENT {sentiment.label.toUpperCase()}
+                </span>
+              )}
+              {trendBlocked && (
+                <span className="hero-trend-blocked">
+                  TREND BLOCKED
+                </span>
+              )}
             </div>
             <div className="hero-grade">
               <span className="hero-grade-value">{scalpGrade}</span>
@@ -341,7 +358,7 @@ function AppShell() {
           </div>
           <div className="confidence-gauge">
             <div className="cg-track">
-              <div className={`cg-fill ${finalSideClass}`} style={{ width: primaryScalpSignal ? (primaryScalpSignal.confidence === 'HIGH' ? '80' : '65') + '%' : '0%' }} />
+              <div className={`cg-fill ${finalSideClass}`} style={{ width: primaryScalpSignal ? Math.min(100, (primaryScalpSignal.score || 0.5) * 100) + '%' : '0%' }} />
             </div>
             <div className="cg-labels">
               <span>Confidence</span>
@@ -417,14 +434,18 @@ function AppShell() {
                 <section>
                   <h2><Activity size={13} /> Regime Detail</h2>
                   <dl className="facts compact">
-                    <div><dt>Volume State</dt><dd>{regime.volume_state}</dd></div>
+                    <div><dt>Phase</dt><dd>{regime.phase.replaceAll('_', ' ')}</dd></div>
+                    <div><dt>Bias</dt><dd className={regime.bias === 'bullish' ? 'bullish' : regime.bias === 'bearish' ? 'bearish' : ''}>{regime.bias} {sentimentOverride ? <span className="bias-source sentiment">(sentiment)</span> : <span className="bias-source technical">(technical)</span>}</dd></div>
+                    <div><dt>Confidence</dt><dd>{(regime.confidence * 100).toFixed(0)}%</dd></div>
+                    <div><dt>Volume State</dt><dd className={`vol-${regime.volume_state}`}>{regime.volume_state}</dd></div>
                     <div><dt>Efficiency</dt><dd>{regime.efficiency_ratio.toFixed(2)}</dd></div>
                     <div><dt>ATR Compression</dt><dd>{regime.atr_compression.toFixed(2)}</dd></div>
                     <div><dt>Width %</dt><dd>{(regime.width_pct * 100).toFixed(1)}%</dd></div>
                     <div><dt>Range High</dt><dd>{formatPrice(regime.range_high)}</dd></div>
                     <div><dt>Range Low</dt><dd>{formatPrice(regime.range_low)}</dd></div>
-                    <div><dt>Bias</dt><dd>{regime.bias}</dd></div>
-                    <div><dt>Confidence</dt><dd>{(regime.confidence * 100).toFixed(0)}%</dd></div>
+                    {primaryScalpSignal && (
+                      <div><dt>Trend Aligned</dt><dd className={(primaryScalpSignal.signal_type.includes('LONG') && regime.bias === 'bullish') || (primaryScalpSignal.signal_type.includes('SHORT') && regime.bias === 'bearish') ? 'bullish' : 'trend-blocked'}>{(primaryScalpSignal.signal_type.includes('LONG') && regime.bias === 'bullish') || (primaryScalpSignal.signal_type.includes('SHORT') && regime.bias === 'bearish') ? 'YES' : 'BLOCKED'}</dd></div>
+                    )}
                   </dl>
                 </section>
               )}
@@ -503,7 +524,9 @@ function AppShell() {
                 <dl className="facts compact">
                   <div><dt>Stop Loss</dt><dd>0.5× ATR</dd></div>
                   <div><dt>Breakeven</dt><dd>@ 0.5R</dd></div>
-                  <div><dt>TP1 / TP2</dt><dd>1.0R / 1.5R</dd></div>
+                  <div><dt>TP1 / TP2</dt><dd>{(() => { if (!regime) return '1.0R / 1.5R'; if (regime.phase === 'range_bound') return '0.5R / 1.0R'; if (regime.phase === 'consolidation') return '0.3R / 0.6R'; if (regime.phase === 'trending') return '1.0R / 2.0R'; return '0.7R / 1.4R'; })()}</dd></div>
+                  <div><dt>Regime Context</dt><dd>{regime ? `TP tightened for ${regime.phase.replaceAll('_', ' ')}` : '--'}</dd></div>
+                  <div><dt>Trend Alignment</dt><dd>{regime && regime.bias !== 'neutral' ? `Longs only in ${regime.bias === 'bullish' ? 'bullish' : 'bearish'} bias` : 'No active bias'}</dd></div>
                   <div><dt>Max Hold</dt><dd>12 bars (1h)</dd></div>
                   <div><dt>ADX Filter</dt><dd>Yes (&gt;20)</dd></div>
                   <div><dt>Limit Orders</dt><dd>Yes</dd></div>
