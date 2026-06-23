@@ -244,15 +244,15 @@ class PaperTradingEngine:
         slippage = self._compute_slippage(realistic_entry, qty, candle)
         entry_with_slippage = realistic_entry + slippage if best.side == "buy" else realistic_entry - slippage
 
-        # Recompute SL/TP based on actual entry (same risk distance)
+        exit_price = best.exit_price or (best.entry + abs(best.entry - best.stop_loss) * 2 if best.side == "buy" else best.entry - abs(best.entry - best.stop_loss) * 2)
         if best.side == "buy":
             sl = entry_with_slippage - risk_per_unit
-            tp = best.target_1 - best.entry
-            tp = entry_with_slippage + tp if tp > 0 else best.exit_price
+            tp = exit_price - best.entry
+            tp = entry_with_slippage + tp if tp > 0 else exit_price
         else:
             sl = entry_with_slippage + risk_per_unit
-            tp = best.entry - best.target_1
-            tp = entry_with_slippage - tp if tp > 0 else best.exit_price
+            tp = best.entry - exit_price
+            tp = entry_with_slippage - tp if tp > 0 else exit_price
 
         notional = entry_with_slippage * qty
         entry_commission = notional * self.commission_pct
@@ -283,6 +283,7 @@ class PaperTradingEngine:
             "stop_loss": round(sl, 2),
             "initial_stop": round(sl, 2),
             "take_profit": round(tp, 2),
+            "target_2": round(getattr(best, "target_2", tp) or tp, 2),
             "quantity": round(qty, 6),
             "timestamp": best.timestamp,
             "opened_at": now_ms,
@@ -372,6 +373,37 @@ class PaperTradingEngine:
                 exit_price, pnl, pnl_pct, funding_cost = self._net_pnl(side, entry, candle.close, qty, trade, candle)
                 repo.close_paper_trade(trade["id"], exit_price, round(pnl, 2), round(pnl_pct, 4), "max_hold_exceeded")
                 self.risk_manager.record_trade_result(pnl)
+                try:
+                    get_agent().record_trade_outcome(
+                        signal={
+                            "signal": side.upper(),
+                            "entry": entry,
+                            "stop_loss": trade.get("stop_loss", 0),
+                            "pattern_type": f"{side}_max_hold",
+                            "features": {
+                                "atr_pct": trade.get("atr_at_entry", 0),
+                                "confidence": trade.get("confidence", 0),
+                                "risk_reward": trade.get("risk_reward", 0),
+                            },
+                            "regime": trade.get("regime", "unknown"),
+                            "reason": trade.get("reason", ""),
+                            "opened_at": trade.get("opened_at", 0),
+                        },
+                        exit_price=exit_price,
+                        won=pnl > 0,
+                        pnl_pct=round(pnl_pct, 4),
+                        timed_out=True,
+                        close_reason="max_hold_exceeded",
+                        bars_held=trade.get("bars_held", 0),
+                        hold_minutes=int(hold_minutes),
+                        max_hold_minutes=max_hold,
+                        risk_reward=trade.get("risk_reward", 0),
+                        confidence_score=trade.get("confidence", 0),
+                        slippage_pct=trade.get("slippage_pct", 0),
+                        atr_at_entry=trade.get("atr_at_entry", 0),
+                    )
+                except Exception:
+                    logger.exception("Failed to record agent outcome for timeout")
                 events.append({
                     "type": "trade_closed",
                     "trade_id": trade["id"],
@@ -384,6 +416,7 @@ class PaperTradingEngine:
 
             funding_cost = self.funding_rate_per_8h * entry * qty
 
+            tp2 = trade.get("target_2", tp) or tp or 0.0
             if side == "buy":
                 highest = max(trade.get("highest_price", entry), candle.high)
                 trade["highest_price"] = highest
@@ -406,6 +439,7 @@ class PaperTradingEngine:
                             events.append({"type": "trailing_stop_updated", "trade_id": trade["id"], "new_sl": new_sl})
                 hit_stop = candle.low <= sl
                 hit_target = candle.high >= tp
+                hit_target2 = candle.high >= tp2
             else:
                 lowest = min(trade.get("lowest_price", entry), candle.low)
                 trade["lowest_price"] = lowest
@@ -426,6 +460,7 @@ class PaperTradingEngine:
                             events.append({"type": "trailing_stop_updated", "trade_id": trade["id"], "new_sl": new_sl})
                 hit_stop = candle.high >= sl
                 hit_target = candle.low <= tp
+                hit_target2 = candle.low <= tp2
 
             if hit_stop or hit_target:
                 exit_price, pnl, pnl_pct, funding_cost = self._net_pnl(side, entry, sl if hit_stop else tp, qty, trade, candle)
@@ -438,6 +473,7 @@ class PaperTradingEngine:
                         signal={
                             "signal": side.upper(),
                             "entry": entry,
+                            "stop_loss": trade.get("stop_loss", 0),
                             "pattern_type": f"{side}_{reason}",
                             "features": {
                                 "atr_pct": trade.get("atr_at_entry", 0),
@@ -448,10 +484,22 @@ class PaperTradingEngine:
                             "enriched_features": enriched_features if isinstance(enriched_features, dict) else None,
                             "regime": trade.get("regime", "unknown"),
                             "reason": trade.get("reason", ""),
+                            "opened_at": trade.get("opened_at", 0),
                         },
                         exit_price=exit_price,
                         won=pnl > 0,
                         pnl_pct=round(pnl_pct, 4),
+                        sl_hit=hit_stop,
+                        tp1_hit=hit_target,
+                        tp2_hit=hit_target2,
+                        close_reason=reason,
+                        bars_held=trade.get("bars_held", 0),
+                        hold_minutes=int((now_ms - trade.get("opened_at", now_ms)) / 60000),
+                        max_hold_minutes=trade.get("max_hold_minutes", 0),
+                        risk_reward=trade.get("risk_reward", 0),
+                        confidence_score=trade.get("confidence", 0),
+                        slippage_pct=trade.get("slippage_pct", 0),
+                        atr_at_entry=trade.get("atr_at_entry", 0),
                     )
                 except Exception:
                     logger.exception("Failed to record AI agent trade outcome")

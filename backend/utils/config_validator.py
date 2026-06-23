@@ -29,7 +29,7 @@ class ConfigValidator:
 
     VALID_TIMEFRAMES = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"}
     VALID_PROVIDERS = {"binance", "delta", "auto", "local"}
-    VALID_AI_PROVIDERS = {"auto", "gemini", "openai", "local"}
+    VALID_AI_PROVIDERS = {"auto", "groq", "openai", "local"}
     VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
     def validate_all(self) -> list[ValidationIssue]:
@@ -77,21 +77,21 @@ class ConfigValidator:
         provider = (settings.ai_ict_provider or "").lower()
         if provider not in self.VALID_AI_PROVIDERS:
             issues.append(ValidationIssue("ICT_AI_ICT_PROVIDER", "error", f"Invalid AI provider: {provider}"))
-        if provider == "gemini" and not settings.gemini_api_key:
-            issues.append(ValidationIssue("GEMINI_API_KEY", "warning", "Gemini provider selected but API key is empty. Falling back to local."))
+        if provider == "groq" and not settings.groq_api_key:
+            issues.append(ValidationIssue("GROQ_API_KEY", "warning", "Groq provider selected but API key is empty. Falling back to local."))
         if provider == "openai" and not settings.openai_api_key:
             issues.append(ValidationIssue("OPENAI_API_KEY", "warning", "OpenAI provider selected but API key is empty. Falling back to local."))
-        if not settings.gemini_api_key and not settings.openai_api_key:
+        if not settings.groq_api_key and not settings.openai_api_key:
             issues.append(ValidationIssue("AI_API_KEYS", "info", "No AI API keys configured. Using deterministic local analysis only."))
         return issues
 
     def _validate_sentiment_config(self) -> list[ValidationIssue]:
         issues = []
         provider = (settings.sentiment_provider or "").lower()
-        if provider not in {"auto", "gemini", "openai", "local"}:
+        if provider not in {"auto", "groq", "openai", "local"}:
             issues.append(ValidationIssue("ICT_SENTIMENT_PROVIDER", "error", f"Invalid sentiment provider: {provider}"))
-        if provider == "gemini" and not settings.gemini_api_key:
-            issues.append(ValidationIssue("GEMINI_API_KEY", "warning", "Gemini sentiment selected but API key is empty."))
+        if provider == "groq" and not settings.groq_api_key:
+            issues.append(ValidationIssue("GROQ_API_KEY", "warning", "Groq sentiment selected but API key is empty."))
         return issues
 
     def _validate_urls(self) -> list[ValidationIssue]:
@@ -100,7 +100,7 @@ class ConfigValidator:
             ("ICT_MARKET_DATA_REST_BASE_URL", settings.market_data_rest_base_url),
             ("ICT_REST_BASE_URL", settings.rest_base_url),
             ("ICT_WS_URL", settings.ws_url),
-            ("GEMINI_BASE_URL", settings.gemini_base_url),
+            ("GROQ_BASE_URL", settings.groq_base_url),
             ("OPENAI_BASE_URL", settings.openai_base_url),
         ]
         for field_name, url in url_fields:

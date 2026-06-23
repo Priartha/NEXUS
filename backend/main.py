@@ -123,9 +123,9 @@ class ErrorResponse(BaseModel):
     details: dict | None = None
 ai_ict_service = AiIctService(
     provider=settings.ai_ict_provider,
-    gemini_model=settings.gemini_model,
-    gemini_api_key=settings.gemini_api_key,
-    gemini_base_url=settings.gemini_base_url,
+    groq_model=settings.groq_model,
+    groq_api_key=settings.groq_api_key,
+    groq_base_url=settings.groq_base_url,
 )
 sentiment_service = SentimentService(
     symbol=settings.symbol,
@@ -133,9 +133,9 @@ sentiment_service = SentimentService(
     openai_model=settings.sentiment_model,
     openai_api_key=settings.openai_api_key,
     openai_base_url=settings.openai_base_url,
-    gemini_model=settings.gemini_model,
-    gemini_api_key=settings.gemini_api_key,
-    gemini_base_url=settings.gemini_base_url,
+    groq_model=settings.groq_model,
+    groq_api_key=settings.groq_api_key,
+    groq_base_url=settings.groq_base_url,
 )
 fast_news_source = FastNewsSource(refresh_interval=30.0)
 news_trade_plan_service = NewsDrivenTradePlanService(
@@ -1457,7 +1457,7 @@ async def chart_ws(websocket: WebSocket, tf: str = settings.timeframe, api_key: 
     try:
         payload = await asyncio.wait_for(
             pipelines[timeframe].snapshot_async(stores[timeframe]),
-            timeout=10.0,
+            timeout=settings.snapshot_timeout_seconds,
         )
         payload = _attach_realtime_context(payload, timeframe)
         await websocket.send_json(payload)
@@ -2584,7 +2584,7 @@ async def config_validate() -> dict:
 async def rate_limit_status() -> dict:
     """Get current rate limit usage for all endpoints."""
     from backend.utils.rate_limiter import rate_limiter
-    endpoints = ["binance_rest", "coinbase_rest", "kraken_rest", "okx_rest", "bybit_rest", "gemini_api", "openai_api"]
+    endpoints = ["binance_rest", "coinbase_rest", "kraken_rest", "okx_rest", "bybit_rest", "groq_api", "openai_api"]
     return {ep: rate_limiter.get_usage(ep) for ep in endpoints}
 
 

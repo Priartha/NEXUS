@@ -293,22 +293,8 @@ class UnifiedScalpEngine:
         else:
             now_ms = int(time.time() * 1000)
 
-        # ── Trader profile hour filter ──
-        # Only generate signals during the user's best trading hours (IST)
-        try:
-            utc_dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
-            ist_hour = (utc_dt.hour + 5) % 24
-            ist_min = utc_dt.minute + 30
-            if ist_min >= 60:
-                ist_hour = (ist_hour + 1) % 24
-            if ist_hour in TRADER_BLOCKED_HOURS_IST or ist_hour not in TRADER_GOOD_HOURS_IST:
-                ctx = ScalpContext(timestamp=now_ms)
-                ctx.trade_blocked_reasons = [f"Outside trading hours (IST hour {ist_hour})"]
-                ctx.ai_brain_active = True
-                ctx.ai_intelligence = get_agent().get_agent_status()
-                return ctx
-        except Exception:
-            pass
+        # ── Trader profile hour filter (disabled) ──
+        # Hour-based blockers removed by user request — was causing missed trades.
 
         if len(candles) < 20:
             ctx = ScalpContext(timestamp=now_ms)
@@ -464,7 +450,8 @@ class UnifiedScalpEngine:
 
         # ── MOMENTUM-FIRST SIGNAL PATH ─────────────────────────────────
         # Genuine momentum beats everything else. If momentum is real, trade it.
-        if momentum_strong and not self._sl_cooldown_active(now_ms, momentum.direction, self._sl_breached_at_ms):
+        cooldown_remaining = now_ms - self._last_signal_ts
+        if momentum_strong and cooldown_remaining >= self._signal_cooldown_ms and not self._sl_cooldown_active(now_ms, momentum.direction, self._sl_breached_at_ms):
             # Trend filter: even strong momentum must align with the trend bias
             if regime and regime.bias in ("bullish", "bearish"):
                 if (regime.bias == "bullish" and momentum.direction != "bullish") or \

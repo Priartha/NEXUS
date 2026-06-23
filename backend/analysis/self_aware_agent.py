@@ -54,32 +54,52 @@ class MarketPattern:
 
 @dataclass
 class TradeMemory:
-    """Complete memory of a trade decision."""
+    """Complete memory of a trade decision with scalp outcome detail."""
     trade_id: str
     timestamp: int
     entry_price: float
     exit_price: float | None
     side: str  # 'long' or 'short'
-    
+
     # Market context at entry
     price_level: float
     volatility: float
     volume_ratio: float
     trend_strength: float
     regime: str
-    
+
     # Pattern that triggered entry
     pattern_features: dict
     pattern_type: str
-    
+
     # Reasoning
     entry_reason: str
     exit_reason: str | None
-    
+
     # Outcome
     pnl_pct: float | None = None
     won: bool | None = None
-    
+
+    # ── Scalp-specific outcome detail ──────────────────────────────
+    tp1_hit: bool = False       # Target 1 was reached
+    tp2_hit: bool = False       # Target 2 was reached
+    sl_hit: bool = False        # Stop loss was hit
+    timed_out: bool = False     # Max hold exceeded
+    close_reason: str = ""      # stop_loss | target_hit | max_hold_exceeded
+
+    # Execution timing (critical for self-optimization)
+    bars_held: int = 0          # Candles the trade was alive
+    hold_minutes: int = 0       # Actual wall-clock hold duration
+    execution_latency_ms: int = 0  # Signal → entry time
+    max_hold_minutes: int = 0   # Max allowed hold assigned at entry
+    hour_of_day: int = -1       # UTC hour when entry happened
+
+    # Trade quality
+    slippage_pct: float = 0.0
+    atr_at_entry: float = 0.0
+    risk_reward: float = 0.0
+    confidence_score: float = 0.0
+
     # Learning
     was_correct: bool | None = None
     lessons: list[str] = field(default_factory=list)
@@ -145,38 +165,89 @@ class MarketMemory:
     MAX_TRADE_HISTORY = 500
     MAX_PATTERNS = 1000
 
-    def add_trade(self, trade: TradeMemory) -> None:
-        """Add trade to memory and learn."""
-        self.trade_history.append(trade)
-        if len(self.trade_history) > self.MAX_TRADE_HISTORY:
-            self.trade_history = self.trade_history[-self.MAX_TRADE_HISTORY:]
-        self.total_trades += 1
-        
-        if trade.pnl_pct is not None:
-            self.total_pnl += trade.pnl_pct
-            if trade.pnl_pct > 0:
-                self.winning_trades += 1
-        
-        # Update pattern knowledge
+    # ── helpers ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _pattern_importance(p: MarketPattern) -> float:
+        """Score how valuable this pattern is for retention.
+        Considers raw outcome, confidence, and how often it has appeared.
+        """
+        abs_outcome = abs(p.outcome)
+        return (abs_outcome * p.confidence * math.log(p.sample_count + 1)
+                + (1.0 if p.outcome > 0 else 0.0) * 0.1)
+
+    def _add_or_update_pattern(self, trade: TradeMemory) -> None:
+        """Learn from trade by creating or updating the matched pattern."""
         features_str = json.dumps(trade.pattern_features, sort_keys=True, default=str)
         pattern_key = f"{trade.pattern_type}_{hashlib.md5(features_str.encode()).hexdigest()[:12]}"
-        if pattern_key in self.patterns:
-            self.patterns[pattern_key].update_outcome(trade.pnl_pct or 0)
+
+        ctx = {
+            'regime': trade.regime,
+            'hour': trade.hour_of_day,
+            'bars_held': trade.bars_held,
+            'exit_reason': trade.close_reason,
+        }
+
+        existing = self.patterns.get(pattern_key)
+        if existing is not None and isinstance(existing, MarketPattern):
+            existing.update_outcome(trade.pnl_pct or 0)
+            # Merge context
+            existing.context.update({k: v for k, v in ctx.items() if v not in (None, -1, '')})
         else:
             self.patterns[pattern_key] = MarketPattern(
                 pattern_id=pattern_key,
                 pattern_type=trade.pattern_type,
                 features=trade.pattern_features,
-                context={'regime': trade.regime},
+                context=ctx,
                 outcome=trade.pnl_pct or 0,
                 confidence=0.5,
                 sample_count=1,
-                timestamp=trade.timestamp
+                timestamp=trade.timestamp,
             )
-        # Keep patterns dict bounded — evict lowest sample_count when over limit
-        if len(self.patterns) > self.MAX_PATTERNS:
-            sorted_pats = sorted(self.patterns.items(), key=lambda x: x[1].sample_count, reverse=True)[:self.MAX_PATTERNS]
-            self.patterns = dict(sorted_pats)
+
+    def _evict_patterns(self) -> None:
+        """Evict least-valuable patterns when over capacity."""
+        if len(self.patterns) <= self.MAX_PATTERNS * 1.1:
+            return
+        scored = [(k, v, self._pattern_importance(v))
+                  for k, v in self.patterns.items()]
+        scored.sort(key=lambda x: x[2], reverse=True)
+        self.patterns = dict((k, v) for k, v, _ in scored[:self.MAX_PATTERNS])
+
+    def _evict_trade_history(self) -> None:
+        """Evict oldest trades; keep low-scoring ones at the end
+        so we maintain a good diversity of recent + high-value trades.
+        """
+        if len(self.trade_history) <= self.MAX_TRADE_HISTORY:
+            return
+        # score each trade — high |pnl| trades are more valuable
+        def _trade_score(t: TradeMemory) -> float:
+            return abs(t.pnl_pct or 0) + (2.0 if t.sl_hit else 0.0) + (1.0 if t.tp1_hit else 0.0)
+        # keep top 80% by score, plus most recent 20% by recency
+        keep_count = self.MAX_TRADE_HISTORY
+        scored = [(i, t, _trade_score(t)) for i, t in enumerate(self.trade_history)]
+        scored.sort(key=lambda x: x[2], reverse=True)
+        top_score = set(s[0] for s in scored[:max(keep_count // 2, 50)])
+        # fill remaining with most recent not already selected
+        recent = [i for i in range(len(self.trade_history) - 1, -1, -1) if i not in top_score]
+        keep = top_score | set(recent[:keep_count - len(top_score)])
+        self.trade_history = [t for i, t in enumerate(self.trade_history) if i in keep][-keep_count:]
+
+    # ── public ─────────────────────────────────────────────────────
+
+    def add_trade(self, trade: TradeMemory) -> None:
+        """Add trade to memory and learn from outcome."""
+        self.trade_history.append(trade)
+        self._evict_trade_history()
+        self.total_trades += 1
+
+        if trade.pnl_pct is not None:
+            self.total_pnl += trade.pnl_pct
+            if trade.pnl_pct > 0:
+                self.winning_trades += 1
+
+        self._add_or_update_pattern(trade)
+        self._evict_patterns()
     
     def get_pattern_reliability(self, pattern_type: str, features: dict) -> float:
         """Get reliability score for a pattern."""
@@ -261,9 +332,24 @@ class MarketMemory:
     def save(self, path: str = "data/market_memory.pkl") -> None:
         import json, os
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        patterns_dict: dict[str, dict] = {}
+        for k, v in self.patterns.items():
+            if isinstance(v, MarketPattern):
+                patterns_dict[k] = {
+                    "pattern_id": v.pattern_id,
+                    "pattern_type": v.pattern_type,
+                    "features": v.features,
+                    "context": v.context,
+                    "outcome": v.outcome,
+                    "confidence": v.confidence,
+                    "sample_count": v.sample_count,
+                    "timestamp": v.timestamp,
+                }
+            elif isinstance(v, dict):
+                patterns_dict[k] = v
         data = {
-            "patterns": self.patterns,
-            "trade_history": self.trade_history,
+            "patterns": patterns_dict,
+            "trade_history": [t.__dict__ if hasattr(t, '__dict__') else t for t in self.trade_history],
             "price_levels": list(self.price_levels),
             "volume_profile": list(self.volume_profile),
             "regime_history": list(self.regime_history),
@@ -286,8 +372,60 @@ class MarketMemory:
         try:
             with open(path, "r") as f:
                 data = json.load(f)
-            mem.patterns = data.get("patterns", {})
-            mem.trade_history = data.get("trade_history", [])
+            raw_patterns = data.get("patterns", {})
+            mem.patterns = {}
+            for k, v in raw_patterns.items():
+                if isinstance(v, dict):
+                    mem.patterns[k] = MarketPattern(
+                        pattern_id=v.get("pattern_id", k),
+                        pattern_type=v.get("pattern_type", "unknown"),
+                        features=v.get("features", {}),
+                        context=v.get("context", {}),
+                        outcome=v.get("outcome", 0.0),
+                        confidence=v.get("confidence", 0.5),
+                        sample_count=v.get("sample_count", 1),
+                        timestamp=v.get("timestamp", 0),
+                    )
+            raw_history = data.get("trade_history", [])
+            mem.trade_history = []
+            for t in raw_history:
+                if isinstance(t, dict):
+                    mem.trade_history.append(TradeMemory(
+                        trade_id=t.get("trade_id", ""),
+                        timestamp=t.get("timestamp", 0),
+                        entry_price=t.get("entry_price", 0.0),
+                        exit_price=t.get("exit_price"),
+                        side=t.get("side", "unknown"),
+                        price_level=t.get("price_level", 0.0),
+                        volatility=t.get("volatility", 0.0),
+                        volume_ratio=t.get("volume_ratio", 1.0),
+                        trend_strength=t.get("trend_strength", 0.0),
+                        regime=t.get("regime", "unknown"),
+                        pattern_features=t.get("pattern_features", {}),
+                        pattern_type=t.get("pattern_type", "unknown"),
+                        entry_reason=t.get("entry_reason", ""),
+                        exit_reason=t.get("exit_reason"),
+                        pnl_pct=t.get("pnl_pct"),
+                        won=t.get("won"),
+                        tp1_hit=t.get("tp1_hit", False),
+                        tp2_hit=t.get("tp2_hit", False),
+                        sl_hit=t.get("sl_hit", False),
+                        timed_out=t.get("timed_out", False),
+                        close_reason=t.get("close_reason", ""),
+                        bars_held=t.get("bars_held", 0),
+                        hold_minutes=t.get("hold_minutes", 0),
+                        execution_latency_ms=t.get("execution_latency_ms", 0),
+                        max_hold_minutes=t.get("max_hold_minutes", 0),
+                        hour_of_day=t.get("hour_of_day", -1),
+                        slippage_pct=t.get("slippage_pct", 0.0),
+                        atr_at_entry=t.get("atr_at_entry", 0.0),
+                        risk_reward=t.get("risk_reward", 0.0),
+                        confidence_score=t.get("confidence_score", 0.0),
+                        was_correct=t.get("was_correct"),
+                        lessons=t.get("lessons", []),
+                    ))
+                else:
+                    mem.trade_history.append(t)
             mem.price_levels = deque(data.get("price_levels", []), maxlen=10000)
             mem.volume_profile = deque(data.get("volume_profile", []), maxlen=5000)
             mem.regime_history = deque(data.get("regime_history", []), maxlen=1000)
@@ -1072,12 +1210,52 @@ class SelfAwareTradingAgent:
         score = min(0.95, max(0.05, score))
         return score, reasons
 
-    def record_trade_outcome(self, signal: dict, exit_price: float, won: bool, pnl_pct: float) -> None:
-        """Record trade outcome to memory with full enriched context for learning."""
+    def record_trade_outcome(self, signal: dict, exit_price: float, won: bool, pnl_pct: float,
+                              tp1_hit: bool = False, tp2_hit: bool = False,
+                              sl_hit: bool = False, timed_out: bool = False,
+                              close_reason: str = "",
+                              bars_held: int = 0, hold_minutes: int = 0,
+                              execution_latency_ms: int = 0,
+                              max_hold_minutes: int = 0,
+                              risk_reward: float = 0.0,
+                              confidence_score: float = 0.0,
+                              slippage_pct: float = 0.0,
+                              atr_at_entry: float = 0.0) -> None:
+        """Record trade outcome with full scalp detail for self-optimization."""
+        import time
+        now_ms = int(time.time() * 1000)
         enriched = signal.get('enriched_features') or signal.get('features', {})
+        hour = -1
+        opened_at = signal.get('opened_at', 0)
+        if opened_at:
+            from datetime import datetime, timezone
+            hour = datetime.fromtimestamp(opened_at / 1000, tz=timezone.utc).hour
+
+        lessons = []
+        if won:
+            details = []
+            if tp2_hit: details.append("TP2 HIT")
+            elif tp1_hit: details.append("TP1 HIT")
+            if sl_hit: details.append("SL HIT")
+            if timed_out: details.append("TIMEOUT")
+            details.append(f"{pnl_pct:.2f}%")
+            lessons.append(f"WIN ({' | '.join(details)}) | {signal.get('signal', '?')}")
+        else:
+            reasons = []
+            if sl_hit: reasons.append("SL")
+            if timed_out: reasons.append("TIMEOUT")
+            if not reasons: reasons.append("LOSS")
+            details = f"{'+' if pnl_pct >= 0 else ''}{pnl_pct:.2f}%"
+            lessons.append(f"LOSS ({' | '.join(reasons)}) {details} | bars={bars_held} | {signal.get('signal', '?')}")
+
+        if bars_held > 0:
+            lessons.append(f"Held {hold_minutes}m / {bars_held} bars, max allowed {max_hold_minutes}m")
+        if slippage_pct:
+            lessons.append(f"Slippage {slippage_pct:.3f}%")
+
         trade = TradeMemory(
-            trade_id=f"{signal.get('pattern_type', 'unknown')}_{int(time.time())}",
-            timestamp=int(time.time() * 1000),
+            trade_id=f"{signal.get('pattern_type', 'unknown')}_{now_ms}",
+            timestamp=now_ms,
             entry_price=signal.get('entry', 0),
             exit_price=exit_price,
             side=signal.get('signal', 'UNKNOWN'),
@@ -1089,15 +1267,28 @@ class SelfAwareTradingAgent:
             pattern_features=enriched if isinstance(enriched, dict) else {},
             pattern_type=signal.get('pattern_type', 'unknown'),
             entry_reason=signal.get('reason', ''),
-            exit_reason=signal.get('exit_reason', 'trade_closed'),
+            exit_reason=close_reason or signal.get('exit_reason', 'trade_closed'),
             pnl_pct=pnl_pct,
             won=won,
+            tp1_hit=tp1_hit,
+            tp2_hit=tp2_hit,
+            sl_hit=sl_hit,
+            timed_out=timed_out,
+            close_reason=close_reason or signal.get('close_reason', ''),
+            bars_held=bars_held,
+            hold_minutes=hold_minutes,
+            execution_latency_ms=execution_latency_ms,
+            max_hold_minutes=max_hold_minutes,
+            hour_of_day=hour,
+            slippage_pct=slippage_pct,
+            atr_at_entry=atr_at_entry,
+            risk_reward=risk_reward or signal.get('risk_reward', 0),
+            confidence_score=confidence_score,
             was_correct=won,
-            lessons=[f"Outcome: {'WIN' if won else 'LOSS'} ({pnl_pct:.2f}%) | Side: {signal.get('signal', '?')} | Enriched context: {len(enriched)} features"],
+            lessons=lessons,
         )
 
         self.memory.add_trade(trade)
-
         self.total_decisions += 1
         if won:
             self.correct_decisions += 1
@@ -1340,7 +1531,9 @@ class SelfAwareTradingAgent:
         return " | ".join(reasons)
 
     def bootstrap_from_paper_trades(self, trades: list[dict]) -> int:
-        """Load closed paper-trade outcomes into memory after restart."""
+        """Load closed paper-trade outcomes into memory after restart.
+        Captures full scalp detail: TP1/TP2/SL/timeout, timing, regime, etc."""
+        from datetime import datetime, timezone
         loaded = 0
         for trade in trades:
             trade_id = str(trade.get('id') or '')
@@ -1354,8 +1547,45 @@ class SelfAwareTradingAgent:
             pnl_pct = float(trade.get('pnl_pct') or 0)
             entry_price = float(trade.get('entry_price') or 0)
             exit_price = float(trade.get('exit_price') or 0)
-            timestamp = int(trade.get('opened_at') or trade.get('closed_at') or time.time() * 1000)
+            opened_at = int(trade.get('opened_at') or 0)
+            closed_at = int(trade.get('closed_at') or 0)
+            timestamp = opened_at or closed_at or int(time.time() * 1000)
             won = pnl_pct > 0
+
+            # Map close_reason → scalp outcome flags
+            close_reason = str(trade.get('close_reason') or '')
+            sl_hit = close_reason == 'stop_loss'
+            timed_out = close_reason == 'max_hold_exceeded'
+            tp_hit = close_reason == 'target_hit'
+            # For target_hit, we can't distinguish TP1 vs TP2 from the DB,
+            # so mark tp1_hit for any target_hit. If pnl is >= ~0.5% it's likely TP2.
+            tp1_hit = tp_hit
+            tp2_hit = tp_hit and pnl_pct >= 0.5
+
+            bars_held = int(trade.get('bars_held') or 0)
+            hold_minutes = int((closed_at - opened_at) / 60000) if opened_at and closed_at else 0
+            max_hold_minutes = int(trade.get('max_hold_minutes') or 0)
+
+            hour_of_day = -1
+            if opened_at:
+                hour_of_day = datetime.fromtimestamp(opened_at / 1000, tz=timezone.utc).hour
+
+            atr = float(trade.get('atr_at_entry') or 0)
+            rr = float(trade.get('risk_reward') or 0)
+            conf = float(trade.get('confidence') or 0)
+            slp = float(trade.get('slippage_pct') or 0)
+            regime = str(trade.get('regime') or 'paper_history')
+
+            features = {
+                'confidence': conf,
+                'risk_reward': rr,
+                'atr_pct': atr,
+                'bars_held': bars_held,
+                'hold_minutes': hold_minutes,
+                'close_reason': close_reason,
+            }
+
+            lessons = [f"Restored: {'WIN' if won else 'LOSS'} ({pnl_pct:+.2f}%) | {close_reason} | {bars_held}bars/{hold_minutes}m"]
 
             memory = TradeMemory(
                 trade_id=trade_id,
@@ -1364,28 +1594,35 @@ class SelfAwareTradingAgent:
                 exit_price=exit_price,
                 side=side,
                 price_level=entry_price,
-                volatility=0,
-                volume_ratio=1,
-                trend_strength=0,
-                regime='paper_history',
-                pattern_features={
-                    'confidence': float(trade.get('confidence') or 0),
-                    'risk_reward': float(trade.get('risk_reward') or 0),
-                },
+                volatility=atr,
+                volume_ratio=1.0,
+                trend_strength=0.0,
+                regime=regime,
+                pattern_features=features,
                 pattern_type=pattern_type,
                 entry_reason=str(trade.get('reason') or ''),
-                exit_reason=str(trade.get('close_reason') or ''),
+                exit_reason=close_reason,
                 pnl_pct=pnl_pct,
                 won=won,
+                tp1_hit=tp1_hit,
+                tp2_hit=tp2_hit,
+                sl_hit=sl_hit,
+                timed_out=timed_out,
+                close_reason=close_reason,
+                bars_held=bars_held,
+                hold_minutes=hold_minutes,
+                max_hold_minutes=max_hold_minutes,
+                hour_of_day=hour_of_day,
+                slippage_pct=slp,
+                atr_at_entry=atr,
+                risk_reward=rr,
+                confidence_score=conf,
                 was_correct=won,
-                lessons=[f"Restored paper outcome: {'WIN' if won else 'LOSS'} ({pnl_pct:.2f}%)"],
+                lessons=lessons,
             )
             self.memory.add_trade(memory)
             self._loaded_trade_ids.add(trade_id)
             loaded += 1
-        # Sync decision counters from memory to discard any inflation from
-        # the old _record_decision() path (which counted every candle analysis
-        # as a decision). Now only actual trade outcomes count.
         if loaded > 0:
             self.total_decisions = self.memory.total_trades
             self.correct_decisions = self.memory.winning_trades

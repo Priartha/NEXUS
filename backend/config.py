@@ -36,13 +36,13 @@ class Settings:
     futures_default_funding: float = float(os.getenv("DELTA_FUTURES_DEFAULT_FUNDING", "-0.0001"))
 
     ai_ict_refresh_seconds: float = float(os.getenv("ICT_AI_ICT_REFRESH_SECONDS", "180"))
-    ai_ict_provider: str = os.getenv("ICT_AI_ICT_PROVIDER", "auto")
+    ai_ict_provider: str = os.getenv("ICT_AI_ICT_PROVIDER", "auto").lower().replace("gemini", "groq")
     sentiment_refresh_seconds: float = float(os.getenv("ICT_SENTIMENT_REFRESH_SECONDS", "300"))
-    sentiment_provider: str = os.getenv("ICT_SENTIMENT_PROVIDER", "auto")
+    sentiment_provider: str = os.getenv("ICT_SENTIMENT_PROVIDER", "auto").lower().replace("gemini", "groq")
     sentiment_model: str = os.getenv("ICT_SENTIMENT_MODEL", "gpt-4o-mini")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_base_url: str = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
+    groq_model: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    groq_base_url: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     cors_origins: tuple[str, ...] = tuple(

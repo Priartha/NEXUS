@@ -68,18 +68,18 @@ class SentimentService:
         openai_model: str = "gpt-5.4-mini",
         openai_api_key: str = "",
         openai_base_url: str = "https://api.openai.com/v1",
-        gemini_model: str = "gemini-2.5-flash",
-        gemini_api_key: str = "",
-        gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta",
+        groq_model: str = "llama-3.3-70b-versatile",
+        groq_api_key: str = "",
+        groq_base_url: str = "https://api.groq.com/openai/v1",
     ) -> None:
         self.symbol = symbol
         self.provider = provider.lower().strip()
         self.openai_model = openai_model
         self.openai_api_key = openai_api_key
         self.openai_base_url = openai_base_url.rstrip("/")
-        self.gemini_model = gemini_model
-        self.gemini_api_key = gemini_api_key
-        self.gemini_base_url = gemini_base_url.rstrip("/")
+        self.groq_model = groq_model
+        self.groq_api_key = groq_api_key
+        self.groq_base_url = groq_base_url.rstrip("/")
         self.current = SentimentSnapshot(
             label="loading",
             score=0.0,
@@ -97,8 +97,8 @@ class SentimentService:
             headlines = await self._fetch_headlines()
             local_snapshot = self._score_headlines(headlines)
             active_provider = self._active_provider_name()
-            if active_provider == "gemini" and headlines:
-                self.current = await self._score_with_gemini(headlines, local_snapshot)
+            if active_provider == "groq" and headlines:
+                self.current = await self._score_with_groq(headlines, local_snapshot)
             elif active_provider == "openai" and headlines:
                 self.current = await self._score_with_openai(headlines, local_snapshot)
             else:
@@ -278,57 +278,38 @@ class SentimentService:
             fallback.error = f"OpenAI sentiment unavailable; local fallback used: {exc}"
             return fallback
 
-    async def _score_with_gemini(
+    async def _score_with_groq(
         self,
         headlines: list[SentimentHeadline],
         fallback: SentimentSnapshot,
     ) -> SentimentSnapshot:
-        schema = {
-            "type": "object",
-            "properties": {
-                "label": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
-                "score": {"type": "number"},
-                "confidence": {"type": "number"},
-                "summary": {"type": "string"},
-                "drivers": {"type": "array", "items": {"type": "string"}},
-                "risk_flags": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["label", "score", "confidence", "summary", "drivers", "risk_flags"],
-        }
+        system_prompt = (
+            "You are a crypto market sentiment analyst for a BTC trading terminal. "
+            "Use only the supplied headlines. Return JSON sentiment for BTC, not trade advice. "
+            "score must be from -1 bearish to +1 bullish."
+        )
+        user_prompt = self._provider_input(headlines)
         payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "text": (
-                                "You are a crypto market sentiment analyst for a BTC trading terminal. "
-                                "Use only the supplied headlines. Return JSON sentiment for BTC, not trade advice. "
-                                "score must be from -1 bearish to +1 bullish.\n\n"
-                                f"{self._provider_input(headlines)}"
-                            )
-                        }
-                    ],
-                }
+            "model": self.groq_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
-            "generationConfig": {
-                "temperature": 0.15,
-                "responseMimeType": "application/json",
-                "responseSchema": schema,
-            },
+            "temperature": 0.15,
+            "response_format": {"type": "json_object"},
         }
         try:
             async with httpx.AsyncClient(timeout=18, follow_redirects=True) as client:
                 response = await client.post(
-                    f"{self.gemini_base_url}/models/{self.gemini_model}:generateContent",
+                    f"{self.groq_base_url}/chat/completions",
                     headers={
-                        "x-goog-api-key": self.gemini_api_key,
+                        "Authorization": f"Bearer {self.groq_api_key}",
                         "Content-Type": "application/json",
                     },
                     json=payload,
                 )
                 response.raise_for_status()
-            parsed = json.loads(_extract_gemini_text(response.json()))
+            parsed = json.loads(_extract_groq_text(response.json()))
             label = parsed.get("label", fallback.label)
             score = _clamp(float(parsed.get("score", fallback.score)), -1.0, 1.0)
             confidence = _clamp(float(parsed.get("confidence", fallback.confidence)), 0.0, 1.0)
@@ -339,8 +320,8 @@ class SentimentService:
                 source_count=fallback.source_count,
                 updated_at=int(time.time() * 1000),
                 headlines=headlines[:6],
-                provider="gemini",
-                model=self.gemini_model,
+                provider="groq",
+                model=self.groq_model,
                 summary=str(parsed.get("summary", fallback.summary))[:420],
                 drivers=_string_list(parsed.get("drivers"))[:5],
                 risk_flags=_string_list(parsed.get("risk_flags"))[:5],
@@ -348,7 +329,7 @@ class SentimentService:
         except Exception as exc:
             fallback.provider = "local_keyword"
             fallback.model = None
-            fallback.error = f"Gemini sentiment unavailable; local fallback used: {exc}"
+            fallback.error = f"Groq sentiment unavailable; local fallback used: {exc}"
             return fallback
 
     def _openai_input(self, headlines: list[SentimentHeadline]) -> str:
@@ -367,20 +348,20 @@ class SentimentService:
     def _active_provider_name(self) -> str:
         if self.provider == "local":
             return "local_keyword"
-        if self.provider == "gemini":
-            return "gemini" if self.gemini_api_key else "local_keyword"
+        if self.provider == "groq":
+            return "groq" if self.groq_api_key else "local_keyword"
         if self.provider == "openai":
             return "openai" if self.openai_api_key else "local_keyword"
-        if self.gemini_api_key:
-            return "gemini"
+        if self.groq_api_key:
+            return "groq"
         if self.openai_api_key:
             return "openai"
         return "local_keyword"
 
     def _active_model_name(self) -> str | None:
         provider = self._active_provider_name()
-        if provider == "gemini":
-            return self.gemini_model
+        if provider == "groq":
+            return self.groq_model
         if provider == "openai":
             return self.openai_model
         return None
@@ -455,17 +436,15 @@ def _extract_response_text(response_json: dict[str, Any]) -> str:
     raise ValueError("OpenAI response did not include output text")
 
 
-def _extract_gemini_text(response_json: dict[str, Any]) -> str:
-    candidates = response_json.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        raise ValueError("Gemini response did not include candidates")
-    content = candidates[0].get("content", {})
-    parts = content.get("parts", [])
-    for part in parts:
-        text = part.get("text")
-        if isinstance(text, str) and text.strip():
-            return text
-    raise ValueError("Gemini response did not include text")
+def _extract_groq_text(response_json: dict[str, Any]) -> str:
+    choices = response_json.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("Groq response did not include choices")
+    message = choices[0].get("message", {})
+    text = message.get("content", "")
+    if isinstance(text, str) and text.strip():
+        return text
+    raise ValueError("Groq response did not include content text")
 
 
 def _string_list(value: Any) -> list[str]:

@@ -6,7 +6,7 @@ Integrates multiple sentiment sources:
   2. VADER lexicon for social media sentiment
   3. Fear & Greed Index
   4. Social volume metrics
-  5. Optional Gemini/OpenAI for enriched analysis
+  5. Optional Groq/OpenAI for enriched analysis
 
 FinBERT provides domain-specific financial sentiment classification
 that significantly outperforms generic sentiment models on crypto news.
@@ -56,16 +56,16 @@ class NLPSentimentEngine:
         finbert_model: str = "ProsusAI/finbert",
         use_finbert: bool = True,
         use_vader: bool = True,
-        use_gemini: bool = False,
-        gemini_api_key: str | None = None,
+        use_groq: bool = False,
+        groq_api_key: str | None = None,
         refresh_interval: float = 300.0,
         social_lookback_minutes: int = 60,
     ) -> None:
         self.finbert_model = finbert_model
         self.use_finbert = use_finbert
         self.use_vader = use_vader
-        self.use_gemini = use_gemini
-        self.gemini_api_key = gemini_api_key
+        self.use_groq = use_groq
+        self.groq_api_key = groq_api_key
         self.refresh_interval = refresh_interval
         self.social_lookback_minutes = social_lookback_minutes
 
@@ -200,49 +200,70 @@ class NLPSentimentEngine:
         return None
 
     def _fetch_headlines(self, max_items: int = 20) -> list[dict]:
-        """Fetch latest crypto news headlines from public sources."""
+        """Fetch latest crypto news headlines from free RSS feeds and public sources."""
         headlines: list[dict] = []
+        now_ts = int(time.time() * 1000)
+
+        # Use a simple RSS-based approach via feedparser or direct httpx+xml
+        rss_sources = [
+            ("coindesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+            ("cointelegraph", "https://cointelegraph.com/rss"),
+            ("cryptonews", "https://cryptonews.com/news/feed/"),
+        ]
         try:
             import httpx
-            resp = httpx.get(
-                "https://min-api.cryptocompare.com/data/v2/news/?lang=EN",
-                timeout=5,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                for item in data.get("Data", [])[:max_items]:
-                    title = item.get("title", "").strip()
-                    if title:
-                        headlines.append({
-                            "title": title,
-                            "source": item.get("source_info", {}).get("name", "cryptocompare"),
-                            "timestamp": int(item.get("published_on", 0)) * 1000,
-                        })
+            import xml.etree.ElementTree as ET
+            for source_name, url in rss_sources:
+                try:
+                    resp = httpx.get(url, timeout=8, follow_redirects=True)
+                    if resp.status_code != 200:
+                        continue
+                    root = ET.fromstring(resp.text)
+                    for item in root.iter("item"):
+                        title_el = item.find("title")
+                        if title_el is not None and title_el.text:
+                            title = title_el.text.strip()
+                            if title and len(headlines) < max_items:
+                                pub_el = item.find("pubDate")
+                                ts = now_ts
+                                if pub_el is not None and pub_el.text:
+                                    try:
+                                        from datetime import datetime
+                                        ts = int(datetime.strptime(pub_el.text[:25], "%a, %d %b %Y %H:%M:%S").timestamp() * 1000)
+                                    except Exception:
+                                        pass
+                                headlines.append({"title": title, "source": source_name, "timestamp": ts})
+                    if headlines:
+                        break
+                except Exception:
+                    continue
         except Exception:
             pass
 
+        # Fallback: generate from Fear & Greed index
         if not headlines:
             try:
                 import httpx
-                resp = httpx.get(
-                    "https://api.coinpaprika.com/v1/news",
-                    timeout=5,
-                )
+                resp = httpx.get("https://api.alternative.me/fng/?limit=1", timeout=5)
                 if resp.status_code == 200:
-                    for item in resp.json()[:max_items]:
-                        title = item.get("title", "").strip()
-                        if title:
-                            headlines.append({
-                                "title": title,
-                                "source": item.get("source", "coinpaprika"),
-                                "timestamp": 0,
-                            })
+                    fng = int(resp.json()["data"][0]["value"])
+                    label = "extreme fear" if fng <= 25 else "extreme greed" if fng >= 75 else "neutral"
+                    headlines.append({
+                        "title": f"Market sentiment: {label} ({fng}/100)",
+                        "source": "fear_greed",
+                        "timestamp": now_ts,
+                    })
             except Exception:
                 pass
 
         for h in headlines:
             self.ingest_headline(h["title"], h["source"], h.get("timestamp"))
         return headlines
+
+    async def _fetch_headlines_async(self) -> None:
+        """Wrapper to run synchronous headline fetch in thread pool."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._fetch_headlines)
 
     async def compute(self, recent_headlines: list[dict] | None = None) -> NLPSentimentResult:
         """Compute aggregated sentiment from all sources."""
@@ -252,12 +273,12 @@ class NLPSentimentEngine:
             headlines = recent_headlines
         else:
             if not self._headline_buffer or (time.time() - self._last_fetch) > 300:
-                self._fetch_headlines()
+                await self._fetch_headlines_async()
                 self._last_fetch = time.time()
             headlines = list(self._headline_buffer)
 
         if not headlines:
-            self._fetch_headlines()
+            await self._fetch_headlines_async()
             headlines = list(self._headline_buffer)
 
         if not headlines:

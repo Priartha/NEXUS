@@ -499,6 +499,39 @@ export interface InstitutionalMetrics {
   momentum_tsi: number
 }
 
+export interface VolumeAnalysis {
+  timestamp: number
+  total_buy_volume: number
+  total_sell_volume: number
+  total_volume: number
+  buy_sell_ratio: number
+  volume_delta: number
+  volume_delta_pct: number
+  vpin: number
+  absorption_ratio: number
+  bid_ask_ratio: number
+  large_trade_ratio: number
+  avg_trade_size: number
+  buy_count: number
+  sell_count: number
+}
+
+export interface DeltaAnalysis {
+  timestamp: number
+  cumulative_delta: number
+  delta_momentum: number
+  delta_acceleration: number
+  last_delta: number
+  delta_divergence_type: string
+  delta_divergence_strength: number
+  delta_extreme: boolean
+  aggressive_buy_count: number
+  aggressive_sell_count: number
+  delta_balance: number
+  cvd_slope: number
+  cvd_trend: string
+}
+
 export interface MarketMessage {
   update_type: 'snapshot' | 'tick' | 'close' | 'status' | 'sentiment' | 'ai_ict' | 'quote' | 'futures_context' | 'news_trade_plan' | 'fast_news'
   symbol?: string
@@ -524,6 +557,8 @@ export interface MarketMessage {
   orderbook?: OrderbookData | null
   scalp?: ScalpContext | null
   scalp_risk?: ScalpRiskSummary | null
+  volume_analysis?: VolumeAnalysis | null
+  delta_analysis?: DeltaAnalysis | null
   stats?: MarketStats
   status?: string
   message?: string

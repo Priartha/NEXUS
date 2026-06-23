@@ -78,6 +78,7 @@ def init_db() -> None:
             entry_price REAL NOT NULL,
             stop_loss REAL NOT NULL,
             take_profit REAL NOT NULL,
+            target_2 REAL,
             quantity REAL NOT NULL,
             status TEXT NOT NULL DEFAULT 'open',
             opened_at INTEGER NOT NULL,
@@ -437,6 +438,7 @@ def init_db() -> None:
             "max_hold_minutes": "INTEGER DEFAULT 25",
             "regime": "TEXT",
             "enriched_features": "JSON",
+            "target_2": "REAL",
         })
         conn.commit()
     finally:

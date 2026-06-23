@@ -294,51 +294,45 @@ class AiIctService:
     def __init__(
         self,
         provider: str = "auto",
-        gemini_model: str = "gemini-2.5-flash",
-        gemini_api_key: str = "",
-        gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta",
+        groq_model: str = "llama-3.3-70b-versatile",
+        groq_api_key: str = "",
+        groq_base_url: str = "https://api.groq.com/openai/v1",
     ) -> None:
         self.provider = provider.lower().strip()
-        self.gemini_model = gemini_model
-        self.gemini_api_key = gemini_api_key
-        self.gemini_base_url = gemini_base_url.rstrip("/")
+        self.groq_model = groq_model
+        self.groq_api_key = groq_api_key
+        self.groq_base_url = groq_base_url.rstrip("/")
 
     async def analyze(self, payload: dict[str, Any], sentiment: SentimentSnapshot) -> AiIctDecision:
         fallback = self.local_review(payload, sentiment)
-        if self._active_provider_name() != "gemini":
+        if self._active_provider_name() != "groq":
             return fallback
 
+        system_prompt = (
+            "You are a quantitative statistical analyst inside a BTC trading terminal. "
+            "Return one final setup only: bullish, bearish, or neutral/NO_TRADE. Use only the supplied technical "
+            "snapshot. The local pricing engine enforces a fixed 1:3 risk/reward plan, so refine direction, grade, "
+            "confidence, confirmations, and blockers only. Do not claim certainty and do not use the word guarantee "
+            "except to say there is no guarantee. Return strict JSON. Grade only if the setup has sufficient evidence "
+            "from VWAP deviations, Bollinger Bands, RSI extremes, volatility regimes, volume confirmation, trend "
+            "slope, and sentiment."
+        )
+        user_prompt = json.dumps(_compact_context(payload, sentiment, fallback), separators=(',', ':'))
+
         body = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "text": (
-                                "You are a quantitative statistical analyst inside a BTC trading terminal. "
-                                "Return one final setup only: bullish, bearish, or neutral/NO_TRADE. Use only the supplied technical "
-                                "snapshot. The local pricing engine enforces a fixed 1:3 risk/reward plan, so refine direction, grade, "
-                                "confidence, confirmations, and blockers only. Do not claim certainty and do not use the word guarantee "
-                                "except to say there is no guarantee. Return strict JSON. Grade only if the setup has sufficient evidence "
-                                "from VWAP deviations, Bollinger Bands, RSI extremes, volatility regimes, volume confirmation, trend "
-                                "slope, and sentiment.\n\n"
-                                f"{json.dumps(_compact_context(payload, sentiment, fallback), separators=(',', ':'))}"
-                            )
-                        }
-                    ],
-                }
+            "model": self.groq_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
-            "generationConfig": {
-                "temperature": 0.1,
-                "responseMimeType": "application/json",
-                "responseSchema": _gemini_schema(),
-            },
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
         }
 
         try:
-            response_json = await self._post_gemini(body)
+            response_json = await self._post_groq(body)
 
-            parsed = json.loads(_extract_gemini_text(response_json))
+            parsed = json.loads(_extract_groq_text(response_json))
             direction = _enum(str(parsed.get("direction", fallback.direction)), {"bullish", "bearish", "neutral"}, fallback.direction)
             grade = _enum(str(parsed.get("grade", fallback.grade)), {"A+", "A", "B", "C", "NO_TRADE"}, fallback.grade)
             readiness = _enum(
@@ -393,7 +387,7 @@ class AiIctService:
             return AiIctDecision(
                 timestamp=fallback.timestamp,
                 timeframe=fallback.timeframe,
-                provider="gemini",
+                provider="groq",
                 model="NEXUS",
                 direction=direction,
                 grade=grade,
@@ -417,18 +411,18 @@ class AiIctService:
                 updated_at=int(time.time() * 1000),
             )
         except Exception as exc:
-            fallback.error = f"Gemini ICT review unavailable; deterministic confluence used: {exc}"
+            fallback.error = f"Groq ICT review unavailable; deterministic confluence used: {exc}"
             return fallback
 
-    async def _post_gemini(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def _post_groq(self, body: dict[str, Any]) -> dict[str, Any]:
         last_error: Exception | None = None
         async with httpx.AsyncClient(timeout=22, follow_redirects=True) as client:
             for attempt in range(2):
                 try:
                     response = await client.post(
-                        f"{self.gemini_base_url}/models/{self.gemini_model}:generateContent",
+                        f"{self.groq_base_url}/chat/completions",
                         headers={
-                            "x-goog-api-key": self.gemini_api_key,
+                            "Authorization": f"Bearer {self.groq_api_key}",
                             "Content-Type": "application/json",
                         },
                         json=body,
@@ -439,7 +433,7 @@ class AiIctService:
                     last_error = exc
                     if attempt == 0:
                         await _sleep_retry()
-        raise last_error or RuntimeError("Gemini request failed")
+        raise last_error or RuntimeError("Groq request failed")
 
     def local_review(self, payload: dict[str, Any], sentiment: SentimentSnapshot) -> AiIctDecision:
         metrics = _dict(payload.get("metrics"))
@@ -822,8 +816,8 @@ class AiIctService:
     def _active_provider_name(self) -> str:
         if self.provider == "local":
             return "deterministic"
-        if self.provider in {"gemini", "auto"} and self.gemini_api_key:
-            return "gemini"
+        if self.provider in {"groq", "auto"} and self.groq_api_key:
+            return "groq"
         return "deterministic"
 
 
@@ -880,30 +874,7 @@ def _compact_context(payload: dict[str, Any], sentiment: SentimentSnapshot, fall
     }
 
 
-def _gemini_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "direction": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
-            "grade": {"type": "string", "enum": ["A+", "A", "B", "C", "NO_TRADE"]},
-            "readiness": {"type": "string", "enum": ["premium", "qualified", "watchlist", "avoid"]},
-            "confidence": {"type": "number"},
-            "setup_score": {"type": "number"},
-            "summary": {"type": "string"},
-            "confirmations": {"type": "array", "items": {"type": "string"}},
-            "blockers": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": [
-            "direction",
-            "grade",
-            "readiness",
-            "confidence",
-            "setup_score",
-            "summary",
-            "confirmations",
-            "blockers",
-        ],
-    }
+
 
 
 def _best_signal(signals: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1153,16 +1124,15 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
-def _extract_gemini_text(response_json: dict[str, Any]) -> str:
-    candidates = response_json.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        raise ValueError("Gemini response did not include candidates")
-    parts = candidates[0].get("content", {}).get("parts", [])
-    for part in parts:
-        text = part.get("text")
-        if isinstance(text, str) and text.strip():
-            return text
-    raise ValueError("Gemini response did not include text")
+def _extract_groq_text(response_json: dict[str, Any]) -> str:
+    choices = response_json.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("Groq response did not include choices")
+    message = choices[0].get("message", {})
+    text = message.get("content", "")
+    if isinstance(text, str) and text.strip():
+        return text
+    raise ValueError("Groq response did not include content text")
 
 
 async def _sleep_retry() -> None:

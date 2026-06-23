@@ -618,6 +618,43 @@ class NewsTradePlanSnapshot:
     source_count: int = 0
 
 
+@dataclass
+class VolumeAnalysis:
+    """Genuine tick-level volume analysis from trade stream."""
+    timestamp: int
+    total_buy_volume: float = 0.0
+    total_sell_volume: float = 0.0
+    total_volume: float = 0.0
+    buy_sell_ratio: float = 1.0
+    volume_delta: float = 0.0
+    volume_delta_pct: float = 0.0
+    vpin: float = 0.5
+    absorption_ratio: float = 0.5
+    bid_ask_ratio: float = 1.0
+    large_trade_ratio: float = 0.0
+    avg_trade_size: float = 0.0
+    buy_count: int = 0
+    sell_count: int = 0
+
+
+@dataclass
+class DeltaAnalysis:
+    """Comprehensive delta analysis from tick-level CVD."""
+    timestamp: int
+    cumulative_delta: float = 0.0
+    delta_momentum: float = 0.0
+    delta_acceleration: float = 0.0
+    last_delta: float = 0.0
+    delta_divergence_type: str = "none"
+    delta_divergence_strength: float = 0.0
+    delta_extreme: bool = False
+    aggressive_buy_count: int = 0
+    aggressive_sell_count: int = 0
+    delta_balance: float = 0.0
+    cvd_slope: float = 0.0
+    cvd_trend: str = "neutral"
+
+
 def to_wire(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value

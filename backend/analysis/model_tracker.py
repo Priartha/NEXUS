@@ -141,6 +141,16 @@ class ModelPerformanceTracker:
         finally:
             conn.close()
 
+    @staticmethod
+    def _normalize_direction(d: str) -> str:
+        """Normalize direction strings: buy/sell → long/short."""
+        lower = d.strip().lower()
+        if lower in ("buy", "long"):
+            return "long"
+        if lower in ("sell", "short"):
+            return "short"
+        return lower
+
     def record_outcome(
         self,
         signal_id: str,
@@ -157,7 +167,9 @@ class ModelPerformanceTracker:
             if not predicted:
                 return
 
-            was_correct = 1 if predicted[0] == actual_direction else 0
+            predicted_dir = self._normalize_direction(predicted[0])
+            actual_dir = self._normalize_direction(actual_direction)
+            was_correct = 1 if predicted_dir == actual_dir else 0
             conn.execute("""
                 UPDATE model_predictions
                 SET actual_direction=?, actual_return=?, was_correct=?, hold_period_bars=?

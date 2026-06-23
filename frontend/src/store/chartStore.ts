@@ -5,6 +5,7 @@ import {
   type BtcPatternContext,
   type ChartCandle,
   type ConnectionStatus,
+  type DeltaAnalysis,
   type FastNewsSnapshot,
   type FVG,
   type LiquidityEvent,
@@ -27,6 +28,7 @@ import {
   type StructureLabel,
   type Swing,
   type TradeSignal,
+  type VolumeAnalysis,
   toChartCandle,
 } from '../types/market'
 
@@ -54,6 +56,8 @@ interface ChartStore {
   paperTrading: PaperTradeStats | null
   scalpContext: ScalpContext | null
   scalpRisk: ScalpRiskSummary | null
+  volumeAnalysis: VolumeAnalysis | null
+  deltaAnalysis: DeltaAnalysis | null
   newsTradePlan: NewsTradePlanSnapshot | null
   fastNews: FastNewsSnapshot | null
   availableTimeframes: string[]
@@ -171,6 +175,8 @@ export const useChartStore = create<ChartStore>((set) => {
   paperTrading: null,
   scalpContext: cached.scalpContext ?? null,
   scalpRisk: cached.scalpRisk ?? null,
+  volumeAnalysis: null,
+  deltaAnalysis: null,
   newsTradePlan: null,
   fastNews: null,
   availableTimeframes: ['1m', '5m', '15m', '1h'],
@@ -302,6 +308,8 @@ export const useChartStore = create<ChartStore>((set) => {
       if (message.scalp_risk !== undefined) next.scalpRisk = message.scalp_risk
       if (message.news_trade_plan !== undefined) next.newsTradePlan = message.news_trade_plan
       if (message.fast_news !== undefined) next.fastNews = message.fast_news
+      if (message.volume_analysis !== undefined) next.volumeAnalysis = message.volume_analysis
+      if (message.delta_analysis !== undefined) next.deltaAnalysis = message.delta_analysis
 
       const shouldPersist =
         message.signals !== undefined ||

@@ -13,6 +13,7 @@ from backend.analysis.btc_patterns import detect_btc_patterns
 from backend.analysis.ensemble_model import ensemble as ensemble_model
 from backend.analysis.self_optimizer import optimizer as self_optimizer
 from backend.analysis.fvg_detector import detect_fvgs, update_fvg_fills
+from backend.analysis.genuine_volume import genuine_volume_analyzer
 from backend.analysis.institutional import build_price_projection, compute_market_metrics
 from backend.analysis.liquidity import check_liquidity_sweeps, detect_equal_levels
 from backend.analysis.liquidity_engineering import detect_liquidity_events
@@ -32,6 +33,7 @@ from backend.engine.candle_store import CandleStore
 from backend.models.types import (
     BtcPatternContext,
     Candle,
+    DeltaAnalysis,
     FVG,
     FuturesContext,
     LiquidityEvent,
@@ -48,6 +50,7 @@ from backend.models.types import (
     SpreadDynamics,
     Swing,
     TradeSignal,
+    VolumeAnalysis,
     to_wire,
 )
 
@@ -517,6 +520,9 @@ class AnalysisPipeline:
                 tradeability="fair", dominant_pattern="unknown",
             )
 
+        # ── Genuine Volume & Delta Analysis ───────────────────────────
+        vol_analysis, delta_analysis = genuine_volume_analyzer.compute(closed_candles)
+
         payload = {
             "update_type": update_type,
             "symbol": store.symbol,
@@ -529,6 +535,8 @@ class AnalysisPipeline:
             "regime": to_wire(self.regime),
             "psychology": to_wire(psych),
             "readability": to_wire(read),
+            "volume_analysis": to_wire(vol_analysis),
+            "delta_analysis": to_wire(delta_analysis),
             "btc_patterns": to_wire(self.btc_patterns),
             "orderbook": {
                 "imbalances": to_wire(self.ob_imbalances[-15:]),

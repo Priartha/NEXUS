@@ -22,6 +22,7 @@ const NAV_ITEMS: { view: PanelView; icon: typeof Target; label: string; badgeCou
   { view: 'hmm', icon: Activity, label: 'Regime' },
   { view: 'risk', icon: Shield, label: 'Risk' },
   { view: 'momentum', icon: Zap, label: 'Momentum' },
+  { view: 'volume', icon: BarChart3, label: 'Vol/Del' },
   { view: 'patterns', icon: Layers, label: 'Pats', badgeCount: true },
   { view: 'depth', icon: Activity, label: 'Depth' },
   { view: 'institutional', icon: Cpu, label: 'Inst.' },

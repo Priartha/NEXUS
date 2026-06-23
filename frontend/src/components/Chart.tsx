@@ -286,7 +286,13 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
 
   // ─── Candle + volume updates ───────────────────────────
   useEffect(() => {
-    if (!seriesRef.current || candles.length === 0) return
+    if (!seriesRef.current) return
+
+    if (candles.length === 0) {
+      fittedRef.current = false
+      prevCandlesRef.current = []
+      return
+    }
 
     const prev = prevCandlesRef.current
     const lastNew = candles[candles.length - 1]

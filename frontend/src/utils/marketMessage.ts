@@ -305,6 +305,8 @@ const MessageSchema = z.union([
       system_health: z.any().optional(),
     }).passthrough().optional(),
     available_timeframes: z.array(z.string()).optional(),
+    volume_analysis: z.any().nullable().optional(),
+    delta_analysis: z.any().nullable().optional(),
     btc_patterns: z.any().nullable().optional(),
     paper_trading: z.object({
       total_trades: z.number(),
@@ -315,8 +317,8 @@ const MessageSchema = z.union([
       win_rate: z.number(),
     }).optional(),
   }),
-  z.object({ update_type: z.literal('tick'), candle: CandleSchema, quote: z.any().optional(), metrics: z.any().optional(), scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }).passthrough(),
-  z.object({ update_type: z.literal('close'), candle: CandleSchema, quote: z.any().optional(), metrics: z.any().optional(), scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }).passthrough(),
+  z.object({ update_type: z.literal('tick'), candle: CandleSchema, quote: z.any().optional(), metrics: z.any().optional(), scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), volume_analysis: z.any().nullable().optional(), delta_analysis: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }).passthrough(),
+  z.object({ update_type: z.literal('close'), candle: CandleSchema, quote: z.any().optional(), metrics: z.any().optional(), scalp: z.any().nullable().optional(), scalp_risk: z.any().nullable().optional(), psychology: z.any().nullable().optional(), readability: z.any().nullable().optional(), volume_analysis: z.any().nullable().optional(), delta_analysis: z.any().nullable().optional(), btc_patterns: z.any().nullable().optional() }).passthrough(),
   z.object({ update_type: z.literal('status'), status: z.string(), message: z.string().optional(), retry_in_seconds: z.number().optional(), symbol: z.string().optional(), timeframe: z.string().optional(), sentiment: z.any().optional(), ai_ict: z.any().optional(), available_timeframes: z.array(z.string()).optional() }).passthrough(),
   z.object({ update_type: z.literal('sentiment'), sentiment: z.any() }), // Simplified
   z.object({ update_type: z.literal('ai_ict'), ai_ict: z.any() }), // Simplified

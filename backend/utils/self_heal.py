@@ -166,4 +166,4 @@ class SelfHealingMonitor:
 
 
 # Singleton
-self_heal = SelfHealingMonitor(task_registry={}, check_interval=30.0, stale_threshold=600.0)
+self_heal = SelfHealingMonitor(task_registry={}, check_interval=30.0, stale_threshold=21600.0)

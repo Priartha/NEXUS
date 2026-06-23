@@ -62,8 +62,8 @@ class MultiExchangeAggregator:
         },
         "coinbase": {
             "rest_url": "https://api.coinbase.com",
-            "ticker_path": "/api/v3/brokerage/products/{symbol}/ticker",
-            "klines_path": "/api/v3/brokerage/products/{symbol}/candles",
+            "ticker_path": "/v2/prices/{symbol}/spot",
+            "klines_path": "/v2/prices/{symbol}/candles",
         },
         "kraken": {
             "rest_url": "https://api.kraken.com",
@@ -94,10 +94,10 @@ class MultiExchangeAggregator:
         sym = self.symbol.upper()
         mapping = {
             "binance": sym,
-            "coinbase": sym.replace("USDT", "USD").replace("-", ""),
+            "coinbase": sym.replace("USDT", "-USD").replace("BTC", "BTC-") if "BTC" in sym else sym.replace("USDT", "-USD"),
             "kraken": sym.replace("USDT", "USD").replace("BTC", "XBT") if sym.startswith("BTC") else sym.replace("USDT", "USD"),
             "okx": sym,
-            "bybit": sym,
+            "bybit": sym.replace("USD", "USDT") if sym == "BTCUSD" else sym,
         }
         return mapping.get(exchange, sym)
 
@@ -143,8 +143,8 @@ class MultiExchangeAggregator:
                 resp = await client.get(f"{base}{path}")
                 resp.raise_for_status()
                 data = resp.json()
-                price = float(data["price"])
-                volume_24h = float(data.get("volume_24h", 0)) or None
+                price = float(data["data"]["amount"])
+                volume_24h = None
             elif exchange == "kraken":
                 resp = await client.post(f"{base}{config['ticker_path']}", data={"pair": norm_sym})
                 resp.raise_for_status()
@@ -164,7 +164,7 @@ class MultiExchangeAggregator:
                 price = float(data["data"][0]["last"])
                 volume_24h = float(data["data"][0].get("volCcy24h", 0)) or None
             elif exchange == "bybit":
-                resp = await client.get(f"{base}{config['ticker_path']}", params={"category": "spot", "symbol": norm_sym})
+                resp = await client.get(f"{base}{config['ticker_path']}", params={"category": "linear", "symbol": norm_sym})
                 resp.raise_for_status()
                 data = resp.json()
                 if data.get("retCode") != 0:

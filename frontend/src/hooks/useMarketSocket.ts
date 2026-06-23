@@ -82,12 +82,12 @@ export function useMarketSocket() {
     }
 
     loadSnapshot()
-    const timer = setInterval(() => {
+    const timer = window.setInterval(() => {
       if (cancelled || snapshotAppliedRef.current) return
       loadSnapshot()
     }, 3000)
 
-    return () => { cancelled = true; clearInterval(timer) }
+    return () => { cancelled = true; window.clearInterval(timer) }
   }, [applyMessage, selectedTimeframe, session])
 
   // WebSocket - only for live ticks after HTTP snapshot
@@ -104,6 +104,7 @@ export function useMarketSocket() {
     }
 
     setConnectionStatus('connecting')
+    snapshotAppliedRef.current = false
     const joiner = WS_URL.includes('?') ? '&' : '?'
     const ws = new WebSocket(`${WS_URL}${joiner}tf=${encodeURIComponent(selectedTimeframe)}`)
     websocketRef.current = ws
@@ -151,7 +152,10 @@ export function useMarketSocket() {
       }
     }
 
-    ws.onerror = () => setConnectionStatus('error')
+    ws.onerror = () => {
+      setConnectionStatus('error')
+      ws.close()
+    }
 
     ws.onclose = () => {
       if (heartbeatRef.current) clearInterval(heartbeatRef.current)

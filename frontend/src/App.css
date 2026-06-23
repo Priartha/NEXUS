@@ -7315,6 +7315,111 @@
 }
 
 /* ═══════════════════════════════════════════════════════════
+   VOLUME ANALYSIS PANEL
+   ═══════════════════════════════════════════════════════════ */
+
+.volume-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+}
+
+.volume-empty {
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 24px;
+  text-align: center;
+}
+
+.volume-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.volume-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-secondary);
+  background: linear-gradient(90deg, rgba(0, 150, 255, 0.05) 0%, transparent 100%);
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+}
+
+.volume-section-title svg {
+  color: var(--accent-blue);
+  filter: drop-shadow(0 0 4px var(--accent-blue-glow));
+}
+
+.volume-meta {
+  font-size: 9px;
+  color: var(--text-muted);
+  padding: 8px 14px 0;
+  font-family: var(--font-mono);
+  font-style: italic;
+}
+
+.volume-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.volume-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  background: var(--bg-surface);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+.volume-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-family: var(--font-mono);
+}
+
+.volume-value {
+  font-size: 15px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.volume-sub {
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.volume-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 14px 12px;
+  padding: 8px 12px;
+  border: 1px solid;
+  border-radius: var(--radius-md);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+}
+
+/* ═══════════════════════════════════════════════════════════
    SIGNAL LOG PANEL
    ═══════════════════════════════════════════════════════════ */
 

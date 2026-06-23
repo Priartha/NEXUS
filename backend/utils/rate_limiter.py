@@ -43,7 +43,7 @@ class RateLimiter:
             "kraken_rest": RateLimitConfig(requests_per_minute=900, requests_per_second=15.0),
             "okx_rest": RateLimitConfig(requests_per_minute=600, requests_per_second=20.0),
             "bybit_rest": RateLimitConfig(requests_per_minute=600, requests_per_second=20.0),
-            "gemini_api": RateLimitConfig(requests_per_minute=60, requests_per_second=1.0),
+            "groq_api": RateLimitConfig(requests_per_minute=30, requests_per_second=3.0),
             "openai_api": RateLimitConfig(requests_per_minute=200, requests_per_second=3.0),
             "default": RateLimitConfig(requests_per_minute=300, requests_per_second=5.0),
         }

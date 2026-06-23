@@ -30,6 +30,7 @@ import { DbStatusPanel } from './components/DbStatusPanel'
 import { AlertConfigPanel } from './components/AlertConfigPanel'
 import { PsychologyPanel } from './components/PsychologyPanel'
 import { ScalpingPanel } from './components/ScalpingPanel'
+import { VolumeAnalysisPanel } from './components/VolumeAnalysisPanel'
 import SignalLogPanel from './components/SignalLogPanel'
 import { AIBrainPanel } from './components/AIBrainPanel'
 import { AiLabPanel } from './components/AiLabPanel'
@@ -56,7 +57,7 @@ import {
   formatTimestamp,
 } from './types/market'
 
-export type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab' | 'position' | 'hmm' | 'onchain' | 'nlp' | 'news' | 'forecast' | 'ml-dash'
+export type PanelView = 'signals' | 'patterns' | 'depth' | 'alerts' | 'backtest' | 'trades' | 'institutional' | 'risk' | 'momentum' | 'volume' | 'psychology' | 'analytics' | 'config' | 'forward' | 'multi-exchange' | 'model' | 'db-status' | 'alert-config' | 'scalp' | 'log' | 'brain' | 'ai-lab' | 'position' | 'hmm' | 'onchain' | 'nlp' | 'news' | 'forecast' | 'ml-dash'
 type RuntimeGuardProps = {
   children: ReactNode
 }
@@ -583,6 +584,12 @@ function AppShell() {
           {panelView === 'momentum' && (
             <div className="panel-content">
               <MomentumPanel />
+            </div>
+          )}
+
+          {panelView === 'volume' && (
+            <div className="panel-content">
+              <VolumeAnalysisPanel />
             </div>
           )}
 
