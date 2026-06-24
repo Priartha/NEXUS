@@ -42,18 +42,18 @@ class BacktestEngine:
     def __init__(
         self,
         initial_balance: float = 10_000.0,
-        position_size_pct: float = 0.02,
+        position_size_pct: float = 0.005,
         max_concurrent: int = 1,
         slippage_pct: float = 0.0001,
         commission_pct: float = 0.0002,
         max_hold_bars: int = 6,
-        breakeven_threshold: float = 0.8,
+        breakeven_threshold: float = 0.3,
         trailing_stop: bool = True,
-        trailing_atr_multiplier: float = 1.5,
+        trailing_atr_multiplier: float = 1.0,
         funding_rate_per_8h: float = -0.0001,
         signal_side_mode: str = "normal",
         avoid_reason_tokens: list[str] | None = None,
-        tp_atr_multiplier: float = 2.0,
+        tp_atr_multiplier: float = 2.5,
         sl_atr_multiplier: float = 0.0,  # 0 = use signal default
         require_regime_alignment: bool = False,
         max_candles: int = 0,  # 0 = unlimited
