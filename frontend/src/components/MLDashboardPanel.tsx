@@ -48,10 +48,25 @@ interface HMMState {
   last_train_ts: number
 }
 
+interface DynamicThresholdsState {
+  momentum_strong: number
+  momentum_moderate: number
+  min_confidence: number
+  min_edge: number
+  signal_cooldown_ms: number
+  sl_base_mult: number
+  tp_base_mult: number
+  avg_signal_interval_ms: number
+  trades_learned: number
+  recent_win_rate: number
+  regime_params: Record<string, { min_confidence: number; min_edge: number; win_rate: number; trades: number }>
+}
+
 interface OptimizerState {
   total_attempts: number
   kept_attempts: number
   current_params: Record<string, number>
+  dynamic_thresholds?: DynamicThresholdsState
 }
 
 interface CVDState {
@@ -72,6 +87,7 @@ export function MLDashboardPanel() {
   const [xgboost, setXGBoost] = useState<XGBState | null>(null)
   const [hmm, setHMM] = useState<HMMState | null>(null)
   const [optimizer, setOptimizer] = useState<OptimizerState | null>(null)
+  const [dynamic, setDynamic] = useState<DynamicThresholdsState | null>(null)
   const [rl, setRL] = useState<RLState | null>(null)
   const [funding, setFunding] = useState<FundingState | null>(null)
   const [cvd, setCVD] = useState<CVDState | null>(null)
@@ -104,6 +120,9 @@ export function MLDashboardPanel() {
       if (optRes.status === 'fulfilled') {
         const json = await optRes.value.json()
         setOptimizer({ total_attempts: json.total_attempts, kept_attempts: json.kept_attempts, current_params: json.current_params || json.params })
+        if (json.dynamic_thresholds) {
+          setDynamic(json.dynamic_thresholds)
+        }
       }
       if (rlRes.status === 'fulfilled') {
         const json = await rlRes.value.json()
@@ -257,6 +276,35 @@ export function MLDashboardPanel() {
           <StatRow label="Auto-Optimization" value="Every 60 min" color="#8ab4f8" />
         </ModelCard>
 
+        {dynamic && (
+          <ModelCard title="Dynamic Thresholds" icon={<Zap size={14} />}>
+            <StatRow label="Momentum Strong" value={dynamic.momentum_strong?.toFixed(3) ?? '--'} color="#fbbf24" />
+            <StatRow label="Momentum Moderate" value={dynamic.momentum_moderate?.toFixed(3) ?? '--'} color="#f59e0b" />
+            <StatRow label="Min Confidence" value={dynamic.min_confidence ? `${(dynamic.min_confidence * 100).toFixed(1)}%` : '--'} />
+            <StatRow label="Min Edge" value={dynamic.min_edge ? `${(dynamic.min_edge * 100).toFixed(1)}%` : '--'} />
+            <StatRow label="SL Base Mult" value={dynamic.sl_base_mult?.toFixed(2) ?? '--'} />
+            <StatRow label="TP Base Mult" value={dynamic.tp_base_mult?.toFixed(2) ?? '--'} />
+            <StatRow label="Cooldown" value={dynamic.signal_cooldown_ms ? `${(dynamic.signal_cooldown_ms / 1000).toFixed(0)}s` : '--'} />
+            <StatRow label="Avg Signal Interval" value={dynamic.avg_signal_interval_ms ? `${(dynamic.avg_signal_interval_ms / 1000).toFixed(0)}s` : '--'} />
+            <StatRow label="Recent Win Rate" value={dynamic.recent_win_rate !== undefined ? `${(dynamic.recent_win_rate * 100).toFixed(1)}%` : '--'} color={
+              dynamic.recent_win_rate >= 0.5 ? '#22c55e' : dynamic.recent_win_rate > 0 ? '#ef4444' : undefined
+            } />
+            <StatRow label="Trades Learned" value={dynamic.trades_learned?.toString() ?? '0'} />
+            {dynamic.regime_params && Object.keys(dynamic.regime_params).length > 0 && (
+              <div className="ml-features">
+                <span className="ml-stat-label">Per-Regime:</span>
+                {Object.entries(dynamic.regime_params).slice(0, 4).map(([regime, p]) => (
+                  <div key={regime} className="ml-feature-row">
+                    <span className="ml-feature-name">{regime.replace('_', ' ')}</span>
+                    <span className="ml-feature-imp" style={{ color: p.win_rate >= 0.5 ? '#22c55e' : '#ef4444' }}>
+                      {(p.win_rate * 100).toFixed(0)}% WR ({p.trades}t)
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </ModelCard>
+        )}
         <ModelCard title="RL Position Sizing" icon={<Target size={14} />}>
           <StatRow label="Trained" value={rl?.is_trained ? 'Yes' : 'No'} color={rl?.is_trained ? '#22c55e' : '#ef4444'} />
           <StatRow label="Total Steps" value={rl?.total_steps?.toLocaleString() ?? '0'} />

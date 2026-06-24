@@ -71,6 +71,15 @@ class PaperTradingEngine:
         )
         self.last_evaluation: dict[str, Any] = {}
         self.evaluation_count = 0
+        self._consumed_signal_ids: set[str] = set()
+        # Rebuild consumed IDs from closed trades so restarts don't re-enter signals
+        try:
+            for t in repo.get_paper_trades(status="closed", limit=5000):
+                sid = t.get("signal_id")
+                if sid:
+                    self._consumed_signal_ids.add(sid)
+        except Exception:
+            pass
 
     def _record_evaluation(self, **payload: Any) -> None:
         self.evaluation_count += 1
@@ -144,13 +153,13 @@ class PaperTradingEngine:
 
         # Prevent duplicate entries from the same signal
         open_signal_ids = {t.get("signal_id") for t in open_trades if t["status"] == "open"}
-        qualified = [s for s in qualified if s.id not in open_signal_ids]
-        if not qualified:
+        filtered_count = len(qualified)
+        qualified = [s for s in qualified if s.id not in open_signal_ids and s.id not in self._consumed_signal_ids]
+        if len(qualified) < filtered_count:
             self._record_evaluation(
                 symbol=symbol, timeframe=timeframe, status="duplicate_signal",
-                signal_count=len(signals), qualified_count=0,
-                open_positions=open_count,
-                blockers=["signal already has an open paper position"],
+                signal_count=len(signals), qualified_count=filtered_count,
+                signal_id=best.id,
             )
             return events
 
@@ -303,6 +312,7 @@ class PaperTradingEngine:
             "enriched_features": getattr(best, 'enriched_features', None),
         }
         repo.save_paper_trade(trade)
+        self._consumed_signal_ids.add(best.id)
         self._record_evaluation(
             symbol=symbol, timeframe=timeframe, status="opened",
             signal_count=len(signals), qualified_count=len(qualified),

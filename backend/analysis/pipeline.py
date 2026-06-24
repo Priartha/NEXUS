@@ -12,6 +12,7 @@ from backend.analysis.alerts import check_signal_alert, check_regime_alert
 from backend.analysis.btc_patterns import detect_btc_patterns
 from backend.analysis.ensemble_model import ensemble as ensemble_model
 from backend.analysis.self_optimizer import optimizer as self_optimizer
+from backend.analysis.dynamic_thresholds import dynamic_thresholds as dynamic_engine
 from backend.analysis.fvg_detector import detect_fvgs, update_fvg_fills
 from backend.analysis.genuine_volume import genuine_volume_analyzer
 from backend.analysis.institutional import build_price_projection, compute_market_metrics
@@ -22,6 +23,7 @@ from backend.analysis.order_block import detect_order_blocks, update_order_block
 from backend.analysis.orderbook import OrderbookAnalyzer
 from backend.analysis.paper_trading import PaperTradingEngine
 from backend.analysis.price_action_readability import assess_price_action_readability, ReadabilitySnapshot
+from backend.analysis.hmm_regime import hmm_classifier
 from backend.analysis.regime_v2 import detect_market_regime
 from backend.analysis.unified_scalp import UnifiedScalpEngine
 from backend.analysis.scalp_risk import ScalpRiskManager
@@ -65,6 +67,7 @@ class AnalysisPipeline:
         self.metrics: MarketMetrics | None = None
         self.projection: PriceProjection | None = None
         self.regime: MarketRegime | None = None
+        self.hmm_regime: Any = None
         
         # Orderbook analysis
         self.orderbook_analyzer = OrderbookAnalyzer(history_size=500)
@@ -134,6 +137,7 @@ class AnalysisPipeline:
                 order_blocks=self.order_blocks,
                 swings=self.swings,
                 regime=self.regime,
+                hmm_regime=self.hmm_regime,
                 liquidity_events=self.liquidity_events,
                 futures_context=self.futures_context,
                 timeframe=store.timeframe,
@@ -198,6 +202,7 @@ class AnalysisPipeline:
         self.liquidity_events = detect_liquidity_events(window, self.liquidity, atr)[-80:]
 
         self.regime = detect_market_regime(candles, self.metrics, self.liquidity_events)
+        self.hmm_regime = hmm_classifier.predict(candles)
         self.projection = build_price_projection(candles, self.metrics, self.liquidity_events)
 
         # Market psychology detection
@@ -270,6 +275,7 @@ class AnalysisPipeline:
         self.liquidity_events = self._merge_liquidity_events(new_events)
 
         self.regime = detect_market_regime(candles, self.metrics, self.liquidity_events)
+        self.hmm_regime = hmm_classifier.predict(candles)
         self.projection = build_price_projection(candles, self.metrics, self.liquidity_events)
 
         # Incremental market psychology & readability
@@ -357,6 +363,7 @@ class AnalysisPipeline:
         if closed_candles and (self.metrics is None or self.metrics.timestamp != closed_candles[-1].timestamp):
             self.metrics = compute_market_metrics(closed_candles, self.swings)
             self.regime = detect_market_regime(closed_candles, self.metrics, self.liquidity_events)
+            self.hmm_regime = hmm_classifier.predict(closed_candles)
             self.projection = build_price_projection(closed_candles, self.metrics, self.liquidity_events)
             if self._btc_patterns_ts != closed_candles[-1].timestamp:
                 self.btc_patterns = detect_btc_patterns(
@@ -397,6 +404,7 @@ class AnalysisPipeline:
                 order_blocks=self.order_blocks,
                 swings=self.swings,
                 regime=self.regime,
+                hmm_regime=self.hmm_regime,
                 liquidity_events=self.liquidity_events,
                 futures_context=self.futures_context,
                 timeframe=store.timeframe,
@@ -614,6 +622,10 @@ class AnalysisPipeline:
                         'entry_price': trade.get('entry_price', 0),
                         'exit_price': trade.get('exit_price', 0),
                     }
+                    # Record in dynamic threshold engine for adaptive learning
+                    # Every trade outcome feeds back into threshold refinement
+                    dynamic_engine.record_trade_outcome(trade_data)
+
                     # Record in ensemble for weight learning
                     # Use trade_data directly instead of scalp_context so outcomes
                     # are recorded even when the scalp context has been cleared

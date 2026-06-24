@@ -24,6 +24,8 @@ from typing import Any
 
 import numpy as np
 
+from backend.analysis.dynamic_thresholds import dynamic_thresholds as _dynamic_engine
+
 
 @dataclass
 class OptimizationAttempt:
@@ -198,30 +200,27 @@ class SelfOptimizationEngine:
     def score_signal(self, direction: str, regime: str, confidence: float) -> float:
         """Score a new signal based on historical performance of similar setups.
 
-        Returns a multiplier in [0.5, 1.3]:
+        Returns a multiplier in [0.3, 1.3]:
         - 1.0 = neutral (no history)
         - 1.3 = strong historical edge
-        - 0.5 = historically losing setup
+        - 0.8 = mildly losing setup
+        - 0.3 = historically terrible setup
 
-        The historical edge has a strong floor; even low-confidence signals
-        get the benefit/drawback of the regime's track record.
+        Removed the 0.5 floor so bad regimes properly penalize signals.
         """
         rp = self.regime_performance.get(regime, {})
         if not rp or rp.get('trades', 0) < 3:
             return 1.0
         wr = rp['wins'] / rp['trades']
         avg_pnl = rp['total_pnl'] / rp['trades']
-        n = rp['trades']
-        # Base quality: combines win rate (60%) and avg pnl (40%)
+
         pnl_component = max(-0.15, min(0.15, avg_pnl / 5))
         quality = 0.5 + (wr - 0.5) * 0.6 + pnl_component * 0.4
-        # Confidence amplifies the move but with less dampening
         quality = 0.8 + (quality - 0.8) * (0.5 + 0.5 * confidence)
-        # Confidence-conditional boost: high conf in winning regime = more
         if confidence > 0.6 and wr > 0.55:
             quality += 0.05
-        # Clamp
-        return float(max(0.5, min(1.3, quality)))
+
+        return float(max(0.3, min(1.3, quality)))
 
     def _analyze_performance(self) -> dict:
         """Analyze recent performance metrics."""
@@ -402,19 +401,27 @@ class SelfOptimizationEngine:
         }
 
     def get_adaptive_params(self, regime: str | None = None) -> dict:
-        """Get current adaptive parameters, optionally regime-adjusted."""
+        """Get current adaptive parameters, optionally regime-adjusted.
+        
+        Blends self-optimizer params with dynamic threshold engine's learned params
+        for a unified adaptive decision boundary.
+        """
         params = self.params.copy()
+        
+        # Blend with dynamic engine's learned thresholds
+        dyn_conf = _dynamic_engine.get_confidence_threshold(regime)
+        dyn_edge = _dynamic_engine.get_edge_threshold(regime)
+        params['min_confidence'] = (params['min_confidence'] + dyn_conf) / 2
+        params['min_edge'] = (params['min_edge'] + dyn_edge) / 2
         
         if regime and regime in self.regime_performance:
             rp = self.regime_performance[regime]
             if rp['trades'] >= 10:
                 wr = rp['wins'] / rp['trades']
                 if wr < 0.40:
-                    # Bad regime - be more conservative
                     params['min_confidence'] = min(0.75, params['min_confidence'] + 0.05)
                     params['min_edge'] = min(0.15, params['min_edge'] + 0.03)
                 elif wr > 0.60:
-                    # Good regime - slightly more aggressive
                     params['min_confidence'] = max(0.50, params['min_confidence'] - 0.02)
                     params['min_edge'] = max(0.05, params['min_edge'] - 0.01)
         
@@ -435,6 +442,7 @@ class SelfOptimizationEngine:
                     'avg_pnl': round(avg_pnl, 4),
                     'trades': s['trades'],
                 }
+        dynamic_status = _dynamic_engine.get_status()
         return {
             'total_attempts': len(self.attempts),
             'kept_attempts': sum(1 for a in self.attempts if a.kept),
@@ -451,6 +459,7 @@ class SelfOptimizationEngine:
             'last_optimization': self._last_optimization,
             'next_optimization': self._last_optimization + self._optimization_interval,
             'active_learning': True,
+            'dynamic_thresholds': dynamic_status,
         }
 
     def _save_state(self) -> None:

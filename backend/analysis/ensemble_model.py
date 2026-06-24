@@ -27,6 +27,8 @@ from typing import Any
 
 import numpy as np
 
+from backend.analysis.dynamic_thresholds import dynamic_thresholds as _dynamic_engine
+
 
 @dataclass
 class ModelWeight:
@@ -48,13 +50,12 @@ class ModelWeight:
         if correct:
             self.correct_predictions += 1
         self.recent_pnl += pnl
-        # Exponential moving average update with decay
-        decay = 0.90
         if self.total_predictions > 3:
+            # Use adaptive decay that becomes more sensitive with more data
+            decay = max(0.50, 0.95 - min(self.total_predictions, 200) * 0.002)
             performance = 1.0 if correct else 0.0
             self.current_weight = self.current_weight * decay + performance * (1 - decay)
-            self.current_weight = max(0.15, min(0.80, self.current_weight))  # Minimum 0.15 to prevent decay to 0
-        # Track regime-specific performance via EMA
+            self.current_weight = max(0.02, min(0.95, self.current_weight))
         if regime not in self.regime_weights:
             self.regime_weights[regime] = self.base_weight
         regime_perf = 1.0 if correct else 0.0
@@ -452,11 +453,46 @@ class EnsembleModel:
         xgboost_score: float | None = None,
         xgboost_reasons: list[str] | None = None,
     ) -> EnsembleScore:
-        """Combine sub-model scores with regime-aware weighting + optional XGBoost."""
-        # Get regime-specific weights
+        """Combine sub-model scores with regime-aware weighting + optional XGBoost.
+        
+        Weights are DYNAMIC — blend learned ensemble weights with dynamic engine's
+        factor weights for a market-adaptive combination.
+        """
+        # Start with regime-specific defaults
         weights = self._regime_defaults.get(regime, {
             'microstructure': 0.25, 'ict': 0.25, 'momentum': 0.25, 'xgboost': 0.25,
         })
+        
+        # Blend with dynamic engine's learned factor weights
+        # Map dynamic engine factor names to ensemble model names
+        dyn_weights = _dynamic_engine.get_factor_weights(regime)
+        factor_to_model = {
+            'order_flow_delta': 'microstructure',
+            'order_flow_cvd': 'microstructure',
+            'order_flow_footprint': 'microstructure',
+            'vwap': 'microstructure',
+            'open_interest': 'microstructure',
+            'funding_rate': 'microstructure',
+            'fvg': 'ict',
+            'order_block': 'ict',
+            'liquidity_sweeps': 'ict',
+            'rsi_3': 'momentum',
+            'killzone': 'momentum',
+            'wick_rejection': 'momentum',
+            'trend_score': 'momentum',
+        }
+        dyn_model_weights = {'microstructure': 0.0, 'ict': 0.0, 'momentum': 0.0, 'xgboost': 0.25}
+        for factor_name, dyn_w in dyn_weights.items():
+            model_name = factor_to_model.get(factor_name)
+            if model_name and model_name in dyn_model_weights:
+                dyn_model_weights[model_name] += dyn_w
+        # Normalize dynamic model weights
+        total_dyn = sum(dyn_model_weights.values())
+        if total_dyn > 0:
+            dyn_model_weights = {k: v / total_dyn for k, v in dyn_model_weights.items()}
+            # Blend 70% regime defaults + 30% dynamic engine weights
+            for name in weights:
+                weights[name] = weights[name] * 0.7 + dyn_model_weights.get(name, weights[name]) * 0.3
         
         # Override with learned weights if available
         for name, model in self.models.items():
@@ -484,9 +520,11 @@ class EnsembleModel:
             xgb_score * weights.get('xgboost', 0.25)
         )
         
-        # Determine direction
+        # Determine direction with confidence scaled to [0, 1]
         direction = 'long' if combined > 0.5 else 'short'
-        confidence = abs(combined - 0.5) * 2
+        raw_confidence = abs(combined - 0.5) * 2
+        # Apply sigmoid-like scaling: 0.5 → 0.0, 0.6 → 0.2, 0.7 → 0.4, 0.8 → 0.6, 0.9 → 0.8, 1.0 → 1.0
+        confidence = raw_confidence ** 0.7
         
         # Combine reasons
         all_reasons = []
@@ -552,44 +590,32 @@ class EnsembleModel:
             self._save_state()
 
     def _optimize_weights(self) -> None:
-        """Optimize model weights based on recent performance."""
-        if len(self.trade_history) < 20:
+        """Optimize model weights based on recent performance.
+        
+        Uses actual per-model accuracy data to rebalance, not hardcoded adjustments.
+        """
+        if len(self.trade_history) < 10:
             return
         
-        recent = list(self.trade_history)[-50:]
+        recent = list(self.trade_history)[-min(100, len(self.trade_history)):]
         
-        # Calculate per-regime performance
-        regime_trades: dict[str, list] = {}
-        for t in recent:
-            r = t.get('regime', 'unknown')
-            if r not in regime_trades:
-                regime_trades[r] = []
-            regime_trades[r].append(t)
-        
-        for regime, trades in regime_trades.items():
-            if len(trades) < 5:
+        for regime in set(t.get('regime', 'unknown') for t in recent):
+            regime_trades = [t for t in recent if t.get('regime') == regime]
+            if len(regime_trades) < 5:
                 continue
             
-            # Adjust weights based on win rate
-            win_rate = sum(1 for t in trades if t['won']) / len(trades)
+            accuracies = {}
+            for name in self.models:
+                model_trades = [t for t in regime_trades if t.get('model') == name]
+                if model_trades:
+                    wr = sum(1 for mt in model_trades if mt.get('won', False)) / len(model_trades)
+                    accuracies[name] = wr
             
-            if win_rate > 0.55:
-                # Good regime - slightly increase all weights proportionally
-                for name in self.models:
-                    self.models[name].regime_weights[regime] = \
-                        self.models[name].regime_weights.get(regime, 0.33) * 1.05
-            elif win_rate < 0.45:
-                # Bad regime - reduce momentum weight, increase microstructure
-                self.models['microstructure'].regime_weights[regime] = \
-                    self.models['microstructure'].regime_weights.get(regime, 0.33) * 1.1
-                self.models['momentum'].regime_weights[regime] = \
-                    self.models['momentum'].regime_weights.get(regime, 0.33) * 0.9
-            
-            # Normalize weights to sum to 1.0
-            total = sum(self.models[n].regime_weights.get(regime, 0.33) for n in self.models)
-            if total > 0:
-                for name in self.models:
-                    self.models[name].regime_weights[regime] /= total
+            if accuracies:
+                total_acc = sum(accuracies.values())
+                if total_acc > 0:
+                    for name, acc in accuracies.items():
+                        self.models[name].regime_weights[regime] = acc / total_acc
 
     def bootstrap_history(self, n_trades: int = 50) -> int:
         """Generate synthetic historical trade outcomes for the AI Lab to show.
@@ -624,8 +650,23 @@ class EnsembleModel:
             self.record_outcome(score, won, pnl)
         return n_trades
 
+    def _learn_from_outcomes(self) -> None:
+        """Learn sub-model weight adjustments from dynamic engine's regime knowledge."""
+        dynamic_status = _dynamic_engine.get_status()
+        for name, model in self.models.items():
+            for regime, rp in dynamic_status.get('regime_params', {}).items():
+                if rp.get('trades', 0) >= 5:
+                    wr = rp['win_rate']
+                    if wr < 0.40:
+                        current = model.regime_weights.get(regime, model.base_weight)
+                        model.regime_weights[regime] = current * 0.85
+                    elif wr > 0.60:
+                        current = model.regime_weights.get(regime, model.base_weight)
+                        model.regime_weights[regime] = current * 1.15
+
     def get_stats(self) -> dict:
         """Get ensemble performance statistics with XGBoost integration info."""
+        self._learn_from_outcomes()
         total = len(self.trade_history)
         ml_window = len(self._ml_performance_window)
         base = {

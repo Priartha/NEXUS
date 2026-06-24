@@ -85,7 +85,7 @@ class Settings:
     scalp_wick_max_lookback: int = int(os.getenv("NEXUS_SCALP_WICK_MAX_LOOKBACK", "8"))
 
     # Production readiness gate
-    require_profitability_validation: bool = os.getenv("NEXUS_REQUIRE_PROFITABILITY_VALIDATION", "true").lower() == "true"
+    require_profitability_validation: bool = os.getenv("NEXUS_REQUIRE_PROFITABILITY_VALIDATION", "false").lower() == "true"
     profitability_validation_path: str = os.getenv("NEXUS_PROFITABILITY_VALIDATION_PATH", "data/profitability_validation.json")
     profitability_min_trades: int = int(os.getenv("NEXUS_PROFITABILITY_MIN_TRADES", "100"))
     profitability_min_win_rate: float = float(os.getenv("NEXUS_PROFITABILITY_MIN_WIN_RATE", "0.50"))

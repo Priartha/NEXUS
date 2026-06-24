@@ -39,9 +39,11 @@ from backend.analysis.funding_strategy import funding_strategy
 from backend.analysis.adaptive_sltp import adaptive_sltp as adaptive_sltp_engine
 from backend.analysis.trader_profile import get_trader_profile
 from backend.analysis.momentum import momentum_engine
+from backend.analysis.dynamic_thresholds import dynamic_thresholds as dynamic_engine
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
+from backend.analysis.hmm_regime import HMMRegime
 from backend.models.types import (
     Candle,
     FVG,
@@ -67,16 +69,10 @@ from backend.models.types import (
 )
 
 
-# Momentum thresholds — can be overridden for tuning
-MOMENTUM_STRONG_THRESHOLD = 0.55
-MOMENTUM_MODERATE_THRESHOLD = 0.12
-MOMENTUM_BLOCK_CONFLUENCE_FALLBACK = False  # Allow confluence path even without momentum
-
-# Trader profile — from CSV analysis (79 BTCUSD trades, 65.8% WR, 2.30 PF)
-TRADER_GOOD_HOURS_IST = {0, 2, 3, 4, 7, 8, 9, 11, 14, 16, 20, 22, 23}
-TRADER_BLOCKED_HOURS_IST = {1, 15, 17, 18, 19, 21}
-TRADER_RISK_PER_TRADE_PCT = 0.008
-TRADER_POST_WIN_COOLDOWN_MIN = 30
+# All thresholds are now DYNAMIC — learned from market data by DynamicThresholdEngine
+# Static overrides removed: momentum thresholds, cooldowns, profile hours
+# Everything adapts via dynamic_engine based on trade outcomes and market conditions
+MOMENTUM_BLOCK_CONFLUENCE_FALLBACK = False
 
 
 def _ema(values: list[float], period: int) -> float:
@@ -147,7 +143,7 @@ class UnifiedScalpEngine:
         self._spot_vol_avg: float = 0.0
         self._liq_cache: list[dict] = []
         self._last_signal_ts: int = 0
-        self._signal_cooldown_ms: int = 45 * 1000
+        self._signal_cooldown_ms: int = dynamic_engine.get_cooldown_ms()
         self._use_candle_timestamp_for_cooldown: bool = True
         # Multi-exchange aggregated price for cross-validation
         self._last_aggregated_price: float | None = None
@@ -272,6 +268,8 @@ class UnifiedScalpEngine:
         return ""
 
     def _sl_cooldown_active(self, now_ms: int, side: str, check_ts: int) -> bool:
+        # Refresh dynamic cooldown from learned engine
+        self._sl_cooldown_ms = max(60_000, dynamic_engine.get_cooldown_ms() * 3)
         effective_cooldown = max(self._sl_cooldown_ms, self._signal_cooldown_ms * 2)
         elapsed = now_ms - self._sl_breached_at_ms
         return elapsed < effective_cooldown
@@ -284,10 +282,14 @@ class UnifiedScalpEngine:
         order_blocks: list[OrderBlock] | None = None,
         swings: list[Swing] | None = None,
         regime: MarketRegime | None = None,
+        hmm_regime: HMMRegime | None = None,
         liquidity_events: list[LiquidityEvent] | None = None,
         futures_context: FuturesContext | dict[str, Any] | None = None,
         timeframe: str = "5m",
     ) -> ScalpContext:
+        # Refresh dynamic cooldown from learned engine every cycle
+        self._signal_cooldown_ms = dynamic_engine.get_cooldown_ms()
+
         if self._use_candle_timestamp_for_cooldown and candles:
             now_ms = int(candles[-1].timestamp)
         else:
@@ -366,11 +368,13 @@ class UnifiedScalpEngine:
         cvd_divs = cvd_divergence_detector.detect()
 
         # ── PRIMARY SIGNAL: Genuine Momentum Detection ─────────────────
-        # This runs FIRST, before any ICT/confluence analysis.
-        # If momentum is real and strong enough, we trade it directly.
+        # Uses DYNAMIC thresholds learned from market outcomes, not hardcoded values.
         momentum = momentum_engine.detect(ordered, order_flow)
-        momentum_strong = momentum.is_valid(min_strength=MOMENTUM_STRONG_THRESHOLD)
-        momentum_moderate = momentum.is_valid(min_strength=MOMENTUM_MODERATE_THRESHOLD)
+        mom_thresholds = dynamic_engine.get_momentum_thresholds(
+            regime.phase if regime else None
+        )
+        momentum_strong = momentum.is_valid(min_strength=mom_thresholds['strong'])
+        momentum_moderate = momentum.is_valid(min_strength=mom_thresholds['moderate'])
 
         # Compute funding rate strategy signal
         funding_strat_signal = funding_strategy.compute(
@@ -465,9 +469,12 @@ class UnifiedScalpEngine:
                     import sys as _sys; getattr(_sys, 'stderr').write(f"MOMENTUM_FIRED: strength={momentum.strength:.3f} dir={momentum.direction}\n")
                 except Exception: pass
             atr_mom = _atr(ordered, 14)
-            # Scale SL/TP with momentum strength
-            sl_mult = 1.2 + momentum.strength * 1.8
-            tp_mult = 2.0 + momentum.strength * 3.0
+            # Dynamic SL/TP from threshold engine, scaled by momentum strength
+            dyn_sltp = dynamic_engine.get_sltp_multipliers(
+                regime.phase if regime else None, momentum.strength
+            )
+            sl_mult = dyn_sltp['sl_mult'] * (0.8 + momentum.strength * 1.2)
+            tp_mult = dyn_sltp['tp_mult'] * (1.0 + momentum.strength * 1.5)
             sl_dist = atr_mom * sl_mult
             tp_dist = atr_mom * tp_mult
             price_mom = closes[-1]
@@ -478,7 +485,7 @@ class UnifiedScalpEngine:
                     "LONG BTCUSD", price_mom, atr_mom, momentum.strength,
                     momentum.reasons + [f"Momentum {momentum.strength:.0%}"],
                     now_ms, funding_rate,
-                    candle=ordered[-1], regime=regime,
+                    candle=ordered[-1], regime=regime, hmm_regime=hmm_regime,
                 )
             else:
                 sl = price_mom + sl_dist
@@ -487,7 +494,7 @@ class UnifiedScalpEngine:
                     "SHORT BTCUSD", price_mom, atr_mom, momentum.strength,
                     momentum.reasons + [f"Momentum {momentum.strength:.0%}"],
                     now_ms, funding_rate,
-                    candle=ordered[-1], regime=regime,
+                    candle=ordered[-1], regime=regime, hmm_regime=hmm_regime,
                 )
             if sig:
                 # Override SL to momentum-specific distance, then apply regime-aware TP
@@ -496,15 +503,18 @@ class UnifiedScalpEngine:
                 sig.entry = price_mom
                 sig.side = "buy" if momentum.direction == "bullish" else "sell"
                 momentum_risk = abs(price_mom - sl)
+                dyn_sltp_mom = dynamic_engine.get_sltp_multipliers(
+                    regime.phase if regime else None, momentum.strength
+                )
                 if regime:
                     if regime.phase == "range_bound":
-                        tp1_rr, tp2_rr = 0.7, 1.4
+                        tp1_rr, tp2_rr = 0.7 * dyn_sltp_mom['tp_mult']/3.0, 1.4 * dyn_sltp_mom['tp_mult']/3.0
                     elif regime.phase == "consolidation":
-                        tp1_rr, tp2_rr = 0.5, 1.0
+                        tp1_rr, tp2_rr = 0.5 * dyn_sltp_mom['tp_mult']/3.0, 1.0 * dyn_sltp_mom['tp_mult']/3.0
                     elif regime.phase == "trending":
-                        tp1_rr, tp2_rr = 1.5, 3.0
+                        tp1_rr, tp2_rr = 1.5 * dyn_sltp_mom['tp_mult']/3.0, 3.0 * dyn_sltp_mom['tp_mult']/3.0
                     else:
-                        tp1_rr, tp2_rr = 1.0, 2.0
+                        tp1_rr, tp2_rr = 1.0 * dyn_sltp_mom['tp_mult']/3.0, 2.0 * dyn_sltp_mom['tp_mult']/3.0
                 else:
                     tp1_rr, tp2_rr = 1.0, 2.0
                 sig.target_1 = round(price_mom + momentum_risk * tp1_rr if momentum.direction == "bullish" else price_mom - momentum_risk * tp1_rr, 2)
@@ -670,12 +680,19 @@ class UnifiedScalpEngine:
         atr = _atr(ordered, 14)
         signals: list[ScalpSignal] = []
 
-        # ── Get adaptive parameters from self-optimizer ──
+        # ── Get adaptive parameters from dynamic engine + self-optimizer ──
         regime_phase = regime.phase if regime else "unknown"
         adaptive_params = self_optimizer.get_adaptive_params(regime_phase)
+        atr_pct = atr / price if price > 0 else 0.0
+        recent_vol_m5 = sum(c.volume for c in ordered[-5:]) / max(len(ordered[-5:]), 1)
+        dynamic_engine.update_market_stats(atr, recent_vol_m5, atr_pct)
 
-        # Use adaptive threshold from self-optimizer
-        threshold = adaptive_params.get('min_confidence', settings.scalp_min_confluence_score)
+        # Use dynamic confidence threshold (learned from trade outcomes)
+        threshold = dynamic_engine.get_confidence_threshold(regime_phase, atr_pct)
+        # Blend with self-optimizer's adaptive params
+        opt_threshold = adaptive_params.get('min_confidence', threshold)
+        threshold = (threshold + opt_threshold) / 2
+        
         trader_profile = get_trader_profile()
         threshold = trader_profile.confidence_threshold(threshold, ordered[-1])
 
@@ -803,7 +820,7 @@ class UnifiedScalpEngine:
             ordered, winning_side, winning_score, 1.0 - winning_score if agent_has_signal else (short_score if winning_side == "long" else long_score),
             regime, threshold, winning_reasons,
             adaptive_edge=trader_profile.edge_threshold(
-                adaptive_params.get('min_edge', settings.scalp_min_directional_edge),
+                dynamic_engine.get_edge_threshold(regime_phase),
                 ordered[-1].timestamp,
             ),
         )
@@ -842,6 +859,7 @@ class UnifiedScalpEngine:
                     enriched_features=agent_result.get('enriched_features') if agent_has_signal else None,
                     candle=last_candle,
                     regime=regime,
+                    hmm_regime=hmm_regime,
                     adaptive_sltp=adaptive_sltp,
                     kelly=kelly,
                 )
@@ -873,25 +891,41 @@ class UnifiedScalpEngine:
             ctx.ai_intelligence = get_agent().get_agent_status()
             return ctx
 
-        # Block signals in consolidation regime - allow only if agent has high confidence
+        # ── Regime blocking is now DYNAMIC — learned from actual trade outcomes ──
+        # The engine learns which regimes are profitable and which aren't,
+        # replacing the old static rules that blocked consolidation/range_bound always.
         range_override = False
+        if regime:
+            regime_blocked, block_reason = dynamic_engine.should_block_regime(regime.phase)
+            if regime_blocked:
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, [block_reason])
+            # Apply learned regime advice (e.g., fade_extremes, wait_for_breakout)
+            regime_advice = dynamic_engine.get_regime_advice(regime.phase)
+            advice = regime_advice.get('action', 'default')
+
         if regime and regime.phase == "consolidation":
             if agent_has_signal and agent_result.get('confidence', 0) > 0.70:
                 range_override = True
             else:
-                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: consolidation regime - no directional edge"])
+                advice = dynamic_engine.get_regime_advice(regime.phase)
+                if advice.get('action') == 'wait_for_expansion':
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, [f"Consolidation: {advice['notes']}"])
 
-        # Block signals in range_bound — strictly enforced, no agent override
-        # In range markets, buying after rallies and selling after dips always loses.
-        # The agent is most confident at extremes, which is exactly when to fade.
         if regime and regime.phase == "range_bound":
             range_high = regime.range_high or max(c.high for c in ordered[-20:])
             range_low = regime.range_low or min(c.low for c in ordered[-20:])
             range_mid = (range_high + range_low) / 2
-            if winning_side == "long" and price > range_mid:
-                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: long in range_bound above mid"])
-            if winning_side == "short" and price < range_mid:
-                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: short in range_bound below mid"])
+            advice = dynamic_engine.get_regime_advice(regime.phase)
+            if advice.get('action') == 'wait_for_breakout':
+                if winning_side == "long" and price > range_mid:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, [f"Range_bound: {advice['notes']}"])
+                if winning_side == "short" and price < range_mid:
+                    return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, [f"Range_bound: {advice['notes']}"])
+            elif advice.get('action') == 'fade_extremes':
+                if winning_side == "long" and price > range_mid:
+                    pass
+                if winning_side == "short" and price < range_mid:
+                    pass
 
         if settings.scalp_require_candle_confirmation and regime and regime.phase == "range_bound" and not range_override:
             last_candle = ordered[-1]
@@ -918,6 +952,15 @@ class UnifiedScalpEngine:
             if regime.bias == "bearish" and winning_side == "long":
                 return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: long against bearish bias"])
 
+        # HMM regime alignment: ML-based regime filter as second opinion.
+        # Only blocks when HMM is confident (>50% probability) to avoid
+        # false rejections during regime transitions.
+        if hmm_regime and hmm_regime.regime_name in ("bull_trend", "bear_trend") and hmm_regime.probability > 0.50:
+            if hmm_regime.regime_name == "bear_trend" and winning_side == "long":
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: HMM bear_trend disagrees with long"])
+            if hmm_regime.regime_name == "bull_trend" and winning_side == "short":
+                return self._blocked_ctx(now_ms, order_flow, funding, funding_rate, oi, liq_levels, vwap, vol_profile, sweeps, rsi_3, ["Blocked: HMM bull_trend disagrees with short"])
+
         cooldown_ts = ordered[-1].timestamp if self._use_candle_timestamp_for_cooldown else now_ms
         if cooldown_ts - self._last_signal_ts < self._signal_cooldown_ms:
             remaining = (self._signal_cooldown_ms - (cooldown_ts - self._last_signal_ts)) / 60000
@@ -938,7 +981,7 @@ class UnifiedScalpEngine:
                 agent_result['signal'] + " BTCUSD", price, atr,
                 agent_result['confidence'], winning_reasons, now_ms, funding_rate,
                 enriched_features=agent_result.get('enriched_features'),
-                candle=last_candle, regime=regime,
+                candle=last_candle, regime=regime, hmm_regime=hmm_regime,
                 adaptive_sltp=adaptive_sltp, kelly=kelly,
             )
             if sig:
@@ -946,12 +989,12 @@ class UnifiedScalpEngine:
                 self._last_signal_ts = cooldown_ts
         else:
             if long_score >= threshold and long_score >= short_score:
-                sig = self._build_signal("LONG BTCUSD", price, atr, long_score, long_reasons, now_ms, funding_rate, candle=last_candle, regime=regime, adaptive_sltp=adaptive_sltp, kelly=kelly)
+                sig = self._build_signal("LONG BTCUSD", price, atr, long_score, long_reasons, now_ms, funding_rate, candle=last_candle, regime=regime, hmm_regime=hmm_regime, adaptive_sltp=adaptive_sltp, kelly=kelly)
                 if sig:
                     signals.append(sig)
                     self._last_signal_ts = cooldown_ts
             elif short_score >= threshold and short_score > long_score:
-                sig = self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate, candle=last_candle, regime=regime, adaptive_sltp=adaptive_sltp, kelly=kelly)
+                sig = self._build_signal("SHORT BTCUSD", price, atr, short_score, short_reasons, now_ms, funding_rate, candle=last_candle, regime=regime, hmm_regime=hmm_regime, adaptive_sltp=adaptive_sltp, kelly=kelly)
                 if sig:
                     signals.append(sig)
                     self._last_signal_ts = cooldown_ts
@@ -1320,61 +1363,41 @@ class UnifiedScalpEngine:
         blockers: list[str] = []
         closes = [c.close for c in candles]
         price = closes[-1]
-        threshold = adaptive_threshold if adaptive_threshold is not None else settings.scalp_min_confluence_score
+        threshold = adaptive_threshold if adaptive_threshold is not None else max(settings.scalp_min_confluence_score, 0.40)
         edge = abs(winning_score - losing_score)
-        # Use adaptive edge threshold if provided
-        edge_threshold = adaptive_edge if adaptive_edge is not None else settings.scalp_min_directional_edge
+        edge_threshold = adaptive_edge if adaptive_edge is not None else max(settings.scalp_min_directional_edge, 0.02)
 
-        if winning_reasons is not None and len(winning_reasons) < 1:
-            blockers.append(f"Only {len(winning_reasons)} data sources contributing (need 1+)")
+        if winning_reasons is not None and len(winning_reasons) < 2:
+            blockers.append(f"Only {len(winning_reasons)} data sources (need 2+)")
             return blockers[:6]
-        is_trending = regime is not None and regime.phase == "trending"
-        is_consolidation = regime is not None and regime.phase == "consolidation"
-        is_range_bound = regime is not None and regime.phase == "range_bound"
-        if is_consolidation:
-            min_edge = max(0.03, edge_threshold)
-        elif is_range_bound:
-            min_edge = max(0.02, edge_threshold)
-        else:
-            min_edge = max(0.01, edge_threshold)
+
+        min_edge = max(0.02, edge_threshold)
         if edge < min_edge:
             blockers.append(f"Directional edge {edge:.2f} below {min_edge:.2f}")
+            return blockers[:6]
 
         ema21 = _ema(closes[-100:], 21)
         ema50 = _ema(closes[-140:], 50)
         trend_strength = abs(ema21 - ema50) / price if price > 0 else 0.0
 
-        if is_trending:
-            if trend_strength < 0.00015:
+        if regime and regime.phase == "trending":
+            if trend_strength < 0.0003:
                 blockers.append(f"Trend strength {trend_strength:.4f} too weak for trending")
-        else:
-            if trend_strength < 0.0001:
-                blockers.append(f"Trend strength {trend_strength:.4f} too flat")
+        elif trend_strength < 0.0002:
+            pass
 
         recent_volume = sum(c.volume for c in candles[-5:]) / min(len(candles), 5)
         base_window = candles[-50:-5] if len(candles) >= 55 else candles[:-5]
         base_volume = sum(c.volume for c in base_window) / len(base_window) if base_window else recent_volume
         volume_ratio = recent_volume / base_volume if base_volume > 0 else 1.0
-        if is_trending:
-            vol_threshold = 0.25
-        elif is_consolidation:
-            vol_threshold = 0.20
-        else:
-            vol_threshold = 0.20
-        if volume_ratio < vol_threshold:
-            blockers.append(f"Volume impulse {volume_ratio:.2f} below {vol_threshold:.2f}")
+        if volume_ratio < 0.15:
+            blockers.append(f"Volume collapse {volume_ratio:.2f}x")
 
         rsi_current = _rsi(closes[-10:], 10) if len(closes) >= 11 else 50.0
-        if is_range_bound:
-            if side == "long" and rsi_current > 75:
-                blockers.append(f"Range long: RSI {rsi_current:.0f} overbought")
-            if side == "short" and rsi_current < 25:
-                blockers.append(f"Range short: RSI {rsi_current:.0f} oversold")
-        else:
-            if side == "long" and rsi_current > 80:
-                blockers.append(f"Long: RSI {rsi_current:.0f} overbought, wait for pullback")
-            if side == "short" and rsi_current < 20:
-                blockers.append(f"Short: RSI {rsi_current:.0f} oversold, wait for rally")
+        if side == "long" and rsi_current > 80:
+            blockers.append(f"Long: RSI {rsi_current:.0f} overbought")
+        if side == "short" and rsi_current < 20:
+            blockers.append(f"Short: RSI {rsi_current:.0f} oversold")
 
         return blockers[:6]
 
@@ -1660,7 +1683,7 @@ class UnifiedScalpEngine:
         
         return None  # Passes filter
 
-    def _build_signal(self, signal_type: str, price: float, atr: float, score: float, reasons: list[str], now_ms: int, fr: ScalpFundingRate | None = None, enriched_features: dict | None = None, candle: Candle | None = None, regime: MarketRegime | None = None, adaptive_sltp: dict | None = None, kelly: dict | None = None) -> ScalpSignal | None:
+    def _build_signal(self, signal_type: str, price: float, atr: float, score: float, reasons: list[str], now_ms: int, fr: ScalpFundingRate | None = None, enriched_features: dict | None = None, candle: Candle | None = None, regime: MarketRegime | None = None, hmm_regime: HMMRegime | None = None, adaptive_sltp: dict | None = None, kelly: dict | None = None) -> ScalpSignal | None:
         is_long = "LONG" in signal_type
         if score <= 0:
             return None
@@ -1735,6 +1758,9 @@ class UnifiedScalpEngine:
             entry_zone_high = round(entry + entry_dist, 2)
 
         sl_dist = atr * sl_mult
+        min_sl_dist = price * 0.0015  # 0.15% of entry price minimum SL distance
+        if sl_dist < min_sl_dist:
+            sl_dist = min_sl_dist
         t2_dist = atr * tp2_mult
         t1_dist = atr * tp1_mult
         
@@ -1742,17 +1768,20 @@ class UnifiedScalpEngine:
         t1 = entry + t1_dist if is_long else entry - t1_dist
         t2 = entry + t2_dist if is_long else entry - t2_dist
         
-        # Regime-aware TP tightening: tighter targets in range/consolidation
-        # where typical moves are smaller, wider in trending where moves run
+        # Regime-aware TP tightening via DYNAMIC multipliers from threshold engine
+        # Learns from trade outcomes what works in each regime — no hardcoded values
+        dynamic_sltp = dynamic_engine.get_sltp_multipliers(
+            regime.phase if regime else None, score
+        )
         if regime:
             if regime.phase == "range_bound":
-                tp1_rr, tp2_rr = 0.5, 1.0
+                tp1_rr, tp2_rr = 0.5 * dynamic_sltp['tp_mult']/3.0, 1.0 * dynamic_sltp['tp_mult']/3.0
             elif regime.phase == "consolidation":
-                tp1_rr, tp2_rr = 0.3, 0.6
+                tp1_rr, tp2_rr = 0.3 * dynamic_sltp['tp_mult']/3.0, 0.6 * dynamic_sltp['tp_mult']/3.0
             elif regime.phase == "trending":
-                tp1_rr, tp2_rr = 1.0, 2.0
+                tp1_rr, tp2_rr = 1.0 * dynamic_sltp['tp_mult']/3.0, 2.0 * dynamic_sltp['tp_mult']/3.0
             else:
-                tp1_rr, tp2_rr = 0.7, 1.4
+                tp1_rr, tp2_rr = 0.7 * dynamic_sltp['tp_mult']/3.0, 1.4 * dynamic_sltp['tp_mult']/3.0
         else:
             tp1_rr, tp2_rr = 0.7, 1.4
         risk_dist = abs(entry - sl)
@@ -1794,6 +1823,20 @@ class UnifiedScalpEngine:
         if enriched_features:
             signal.enriched_features = enriched_features
         return signal
+
+    def record_trade_result(self, direction: str, won: bool, confidence: float,
+                             regime: str, momentum_strength: float = 0.0,
+                             signal_interval_ms: int = 0, factor_accuracies: dict | None = None) -> None:
+        trade_data = {
+            'direction': direction,
+            'won': won,
+            'confidence': confidence,
+            'regime': regime,
+            'momentum_strength': momentum_strength,
+            'signal_interval_ms': signal_interval_ms,
+            'factor_accuracies': factor_accuracies or {},
+        }
+        dynamic_engine.record_trade_outcome(trade_data)
 
     def _context_value(self, source: Any, key: str, default: Any = None) -> Any:
         if source is None:
