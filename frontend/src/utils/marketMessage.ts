@@ -250,7 +250,7 @@ const MessageSchema = z.union([
         published_at: z.number().nullable().optional(),
         score: z.number(),
       })),
-      provider: z.enum(['gemini', 'openai', 'local_keyword']),
+      provider: z.enum(['gemini', 'openai', 'groq', 'local_keyword']),
       model: z.string().nullable().optional(),
       summary: z.string(),
       drivers: z.array(z.string()),
@@ -327,12 +327,29 @@ const MessageSchema = z.union([
   z.object({ update_type: z.literal('alert') }).passthrough(),
   z.object({ update_type: z.literal('news_trade_plan'), news_trade_plan: z.any() }).passthrough(),
   z.object({ update_type: z.literal('fast_news'), fast_news: z.any() }).passthrough(),
+  z.object({ update_type: z.literal('cross_exchange'), symbol: z.string().optional(), cross_exchange: z.object({ median_price: z.number(), spread_pct: z.number(), exchange_count: z.number(), basis_signals: z.array(z.object({ description: z.string(), basis_pct: z.number(), strength: z.number() })).optional() }).passthrough().optional() }).passthrough(),
+  z.object({ update_type: z.literal('pipeline_health') }).passthrough(),
+  z.object({ update_type: z.literal('onchain'), symbol: z.string().optional(), onchain: z.any() }).passthrough(),
+  z.object({ update_type: z.literal('model_alert') }).passthrough(),
+  z.object({ update_type: z.literal('auto_research'), action: z.string().optional(), improvement: z.number().optional(), changes: z.any().optional() }).passthrough(),
+  z.object({ update_type: z.literal('nlp_sentiment'), symbol: z.string().optional(), nlp_sentiment: z.any() }).passthrough(),
 ])
 
 export function parseMarketMessage(value: unknown): MarketMessage | null {
   const result = MessageSchema.safeParse(value)
   if (result.success) {
     return result.data as MarketMessage
+  }
+  const members = (MessageSchema as any).options
+  if (members && Array.isArray(members)) {
+    const ut = (value as any)?.update_type
+    for (let i = 0; i < Math.min(members.length, 12); i++) {
+      const mr = members[i].safeParse(value)
+      if (!mr.success) {
+        const first = mr.error.issues[0]
+        console.warn(`[Zod m${i}] ut=${ut} path="${first?.path?.join('.')}" code=${first?.code} msg="${first?.message}"`)
+      }
+    }
   }
   return null
 }

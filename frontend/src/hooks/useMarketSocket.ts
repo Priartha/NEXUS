@@ -24,7 +24,9 @@ export function useMarketSocket() {
   const [session, setSession] = useState(0)
 
   const reconnect = useCallback(() => {
-    websocketRef.current?.close()
+    if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN) {
+      try { websocketRef.current.close() } catch {}
+    }
     if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
     if (heartbeatRef.current) window.clearInterval(heartbeatRef.current)
     if (socketWatchdogRef.current) window.clearInterval(socketWatchdogRef.current)
@@ -192,7 +194,7 @@ export function useMarketSocket() {
       socketWatchdogRef.current = null
       animationFrameRef.current = null
       pendingLiveMessageRef.current = null
-      ws.close()
+      try { if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CLOSING) ws.close() } catch {}
     }
   }, [applyLiveMessage, applyMessage, selectedTimeframe, setConnectionStatus, session, reconnect])
 
