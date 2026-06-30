@@ -57,7 +57,7 @@ export function useMarketSocket() {
     })
   }, [applyMessage])
 
-  // HTTP snapshot - runs once per session
+  // HTTP snapshot - refreshes periodically to keep panels current
   useEffect(() => {
     let cancelled = false
     snapshotAppliedRef.current = false
@@ -84,12 +84,17 @@ export function useMarketSocket() {
     }
 
     loadSnapshot()
-    const timer = window.setInterval(() => {
+    const retryTimer = window.setInterval(() => {
       if (cancelled || snapshotAppliedRef.current) return
       loadSnapshot()
     }, 3000)
+    const refreshTimer = window.setInterval(() => {
+      if (cancelled) return
+      snapshotAppliedRef.current = false
+      loadSnapshot()
+    }, 60000)
 
-    return () => { cancelled = true; window.clearInterval(timer) }
+    return () => { cancelled = true; window.clearInterval(retryTimer); window.clearInterval(refreshTimer) }
   }, [applyMessage, selectedTimeframe, session])
 
   // WebSocket - only for live ticks after HTTP snapshot

@@ -304,10 +304,15 @@ export function Chart({ targetRiskReward }: { targetRiskReward: number | 'best' 
     if (isSameBar) {
       seriesRef.current.update(lastNew)
     } else {
-      seriesRef.current.setData(candles)
-      if (!fittedRef.current || prev.length < candles.length) {
-        const from = Math.max(0, candles.length - INITIAL_VISIBLE_BARS)
-        chartRef.current?.timeScale().setVisibleLogicalRange({ from, to: candles.length + RIGHT_OFFSET_BARS })
+      const deduped: typeof candles = []
+      const seen = new Set<number>()
+      for (const c of candles) {
+        if (!seen.has(c.time)) { seen.add(c.time); deduped.push(c) }
+      }
+      seriesRef.current.setData(deduped)
+      if (!fittedRef.current || prev.length < deduped.length) {
+        const from = Math.max(0, deduped.length - INITIAL_VISIBLE_BARS)
+        chartRef.current?.timeScale().setVisibleLogicalRange({ from, to: deduped.length + RIGHT_OFFSET_BARS })
         fittedRef.current = true
       }
     }

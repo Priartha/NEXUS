@@ -77,7 +77,7 @@ class MultiExchangeAggregator:
         },
         "bybit": {
             "rest_url": "https://api.bybit.com",
-            "ticker_path": "/v5/market/ticker",
+            "ticker_path": "/v5/market/tickers",
             "klines_path": "/v5/market/kline",
         },
     }
